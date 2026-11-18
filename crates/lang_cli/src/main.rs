@@ -1,6 +1,8 @@
 //! The compiler's command-line driver: runs the pipeline in docs/03-compiler-architecture.md
 //! and links the result with the runtime library.
 
+mod loader;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use lang_codegen::OptLevel;
 use lang_diag::{Diagnostics, SourceMap, render};
@@ -105,8 +107,9 @@ fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("{n} {word}") } else { format!("{n} {word}s") }
 }
 
-/// Lex, parse and type-check one file. Prints diagnostics. Returns the program, or `None` when
-/// `emit` asked for an earlier stage, which has then been printed.
+/// Lex, parse and type-check a program: the given file and every module it imports. Prints
+/// diagnostics. Returns the program, or `None` when `emit` asked for an earlier stage, which has
+/// then been printed.
 fn frontend(file: &Path, emit: Option<Emit>) -> Result<Option<(hir::Program, SourceMap)>, Failure> {
     if file.extension().is_none_or(|ext| ext != SOURCE_EXTENSION) {
         eprintln!(
@@ -140,13 +143,18 @@ fn frontend(file: &Path, emit: Option<Emit>) -> Result<Option<(hir::Program, Sou
         return finish_early(&display, &sources, &diags);
     }
 
+    let module_name = file.file_stem().map_or("main".into(), |stem| stem.to_string_lossy().into_owned());
+    let root = file.parent().map(Path::to_path_buf).unwrap_or_default();
+    let modules = loader::load(&root, module_name, module, &mut sources, &mut diags);
+
     // Type errors in a file that did not parse are mostly noise (a function whose header failed
     // to parse is "unknown" at every call), so checking waits for a clean parse.
     let program = if diags.has_errors() {
         None
     } else {
-        let module_name = file.file_stem().map_or("main".into(), |stem| stem.to_string_lossy().into_owned());
-        lang_sema::check(&module, &mut sources, &module_name, &mut diags)
+        let inputs: Vec<lang_sema::ModuleInput> =
+            modules.iter().map(|m| lang_sema::ModuleInput { name: m.name.clone(), ast: &m.ast }).collect();
+        lang_sema::check_modules(&inputs, &mut sources, &mut diags)
     };
     report(&display, &sources, &diags)?;
     let program = program.ok_or_else(|| internal_error("type checking failed without reporting an error".into()))?;

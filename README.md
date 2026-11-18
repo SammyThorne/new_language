@@ -4,7 +4,7 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 
 ## Status
 
-Milestones 0 to 4 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
+Milestones 0 to 5 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
 
 ```python
 trait Shape(Display):
@@ -44,8 +44,10 @@ def main():
 
 | Works now | Not yet |
 |---|---|
-| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | Modules and imports (milestone 5) |
-| `int` (wrapping), `float` (printed exactly as Python prints it), `bool`, `str` | Tasks, JSON, HTTP, WebSockets (milestones 6 to 9) |
+| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | Tasks, JSON, HTTP, WebSockets (milestones 6 to 9) |
+| `int` (wrapping), `float` (printed exactly as Python prints it), `bool`, `str`, sized numbers (`i32`, `u8`, `f32`, ...) | |
+| Modules: `import a.b as c`, `from a import x`, `pub` and `priv`; the `io` and `os` standard modules (files, stdin, stderr, arguments, environment) | |
+| `with` blocks that close files on every way out; C functions bound with `@extern("name")` | |
 | Structs, enums, methods, traits with default methods, trait objects | Sets, generic traits, methods with their own type parameters |
 | Generic functions, structs, enums and `impl` blocks with bounds (`T: Ord`), inferred type arguments | |
 | Lambdas, nested functions with captured variables, functions and bound methods as values | |

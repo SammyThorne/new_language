@@ -18,6 +18,31 @@ The standard library is what makes Weby a backend language and not a general-pur
 
 Not in the prototype: HTTP client, TLS, database drivers, templating, regular expressions, cryptography beyond what the WebSocket handshake needs. An HTTP client and a PostgreSQL driver are the first two additions afterwards, since a backend without them is a toy.
 
+## `io` and `os` (M5)
+
+```python
+import io
+import os
+
+def main():
+    for path in os.args()[1:]:
+        match io.read_lines(path):
+            case Ok(lines):
+                print(path, len(lines))
+            case Err(error):
+                io.eprint(error.message())
+                os.exit(1)
+    with io.open("log.txt", "a").unwrap() as log:
+        log.write("done\n").unwrap()
+```
+
+| Module | Functions and types |
+|---|---|
+| `io` | `read_file(path) -> Result[str, IoError]`, `read_lines`, `write_file(path, text)`, `append_file`, `exists`, `remove`, `list_dir`, `read_line() -> str?` (standard input), `eprint(text)` (standard error), `open(path, mode="r") -> Result[File, IoError]`; `File` has `read`, `read_line`, `lines`, `write`, `close`, and closes itself at the end of a `with` block; `IoError` implements `Error` |
+| `os` | `args() -> list[str]`, `getenv(name) -> str?`, `exit(code)`, `cwd()` |
+
+`input(prompt)` is also built in, returning `str?` (`None` at the end of input).
+
 ## Core types
 
 Method lists are indicative; the prototype implements what the demo programs need, then fills in.

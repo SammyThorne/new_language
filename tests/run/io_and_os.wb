@@ -1,0 +1,71 @@
+# Files, directories, `with`, standard error, environment variables, sized numbers and C
+# functions bound with `@extern` (milestone 5).
+# expect: written: True
+# expect: ['alpha', 'beta', 'gamma', 'delta']
+# expect: first two: alpha beta
+# expect: rest: ['gamma', 'delta']
+# expect: missing: /nonexistent/file.txt: No such file or directory
+# expect: listed: True
+# expect: removed: False
+# expect: env: None
+# expect: closed in order: open body exit
+# expect: early return: exit ran
+# expect: 4 -12 3.75 251 255 18446744073709551615 -128
+# expect: 5 9
+# expect-stderr: a message on standard error
+
+import io
+import os
+
+@extern("labs")
+def c_labs(x: int) -> int
+
+@extern("lrt_str_hash")
+def runtime_hash(text: str) -> int
+
+struct Tracker:
+    log: list[str]
+
+impl Tracker:
+    def enter(self) -> list[str]:
+        self.log.append("open")
+        return self.log
+
+    def exit(self):
+        self.log.append("exit")
+
+def leave_early(t: Tracker) -> str:
+    with t:
+        return "early return"
+
+def main():
+    path = "/tmp/weby_io_test.txt"
+    written = io.write_file(path, "alpha\nbeta\n")
+    print("written:", written.is_ok())
+    io.append_file(path, "gamma\ndelta\n").unwrap()
+    print(io.read_lines(path).unwrap())
+    with io.open(path).unwrap() as f:
+        print("first two:", f.read_line().unwrap(), f.read_line().unwrap())
+        print("rest:", f.lines())
+    match io.read_file("/nonexistent/file.txt"):
+        case Ok(_):
+            print("unexpected")
+        case Err(error):
+            print("missing:", error.message())
+    print("listed:", "weby_io_test.txt" in io.list_dir("/tmp").unwrap())
+    io.remove(path).unwrap()
+    print("removed:", io.exists(path))
+    io.eprint("a message on standard error")
+    print("env:", os.getenv("WEBY_TEST_SURELY_UNSET"))
+
+    t = Tracker([])
+    with t as log:
+        log.append("body")
+    print("closed in order:", " ".join(t.log))
+    t2 = Tracker([])
+    result = leave_early(t2)
+    print(f"{result}: {t2.log[-1]} ran")
+
+    small: u8 = 250
+    print(small + u8(10), i32(-3) * i32(4), f32(1.5) + f32(2.25), int(small) + 1, u8(-1), u64(-1), i8(128))
+    print(c_labs(-5), 9 if runtime_hash("abc") == runtime_hash("abc") else 0)

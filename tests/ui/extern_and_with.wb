@@ -1,0 +1,20 @@
+@extern("abs")
+def c_abs(x: list[int]) -> dict[str, int]
+
+@extern(labs)
+def c_labs(x: int) -> int
+
+@cache
+def slow() -> int:
+    return 1
+
+struct Plain:
+    x: int
+
+def main():
+    with 5 as five:
+        print(five)
+    with Plain(1):
+        pass
+    tiny: u8 = 300
+    print(tiny, i32(1) // i32(2))

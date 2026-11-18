@@ -107,6 +107,14 @@ pub const UNSATISFIED_BOUND: &str = "E0331";
 pub const ASSIGN_CAPTURED: &str = "E0332";
 /// A call to a function value with keyword arguments, or other misuse of a function value.
 pub const BAD_FUNCTION_VALUE: &str = "E0333";
+/// An import of a module that does not exist.
+pub const UNKNOWN_MODULE: &str = "E0334";
+/// Using a declaration or member that is private to another file.
+pub const PRIVATE: &str = "E0335";
+/// Modules that import each other, directly or not.
+pub const IMPORT_CYCLE: &str = "E0336";
+/// A `with` statement whose value has no `exit` method.
+pub const BAD_WITH: &str = "E0337";
 
 /// A variable that is assigned but never read.
 pub const UNUSED_VARIABLE: &str = "W0001";

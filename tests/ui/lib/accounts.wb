@@ -1,0 +1,17 @@
+pub struct Account:
+    owner: str
+    priv balance: int
+
+impl Account:
+    def deposit(self, amount: int):
+        self.audit()
+        self.balance += amount
+
+    priv def audit(self):
+        pass
+
+pub def open_account(owner: str) -> Account:
+    return Account(owner, 0)
+
+def internal_helper() -> int:
+    return 1

@@ -117,6 +117,29 @@ impl Checker<'_, '_> {
                 if expected == Some(Ty::FLOAT) {
                     return mk(K::Float(*value as f64), Ty::FLOAT, span);
                 }
+                if let Some(ty) = expected
+                    && let Some(kind) = self.types.sized_kind(ty)
+                {
+                    if kind.is_float() {
+                        return mk(K::Float(*value as f64), ty, span);
+                    }
+                    let bits = kind.bits();
+                    let max = match (kind.is_signed(), bits) {
+                        (_, 64) => u64::MAX,
+                        (true, b) => (1u64 << (b - 1)) - 1,
+                        (false, b) => (1u64 << b) - 1,
+                    };
+                    if *value > max {
+                        self.error(Diagnostic::error(
+                            codes::INT_TOO_LARGE,
+                            format!("integer literal is too large for `{}`", kind.name()),
+                            span,
+                            format!("the largest `{}` is {max}", kind.name()),
+                        ));
+                        return error_expr(span);
+                    }
+                    return mk(K::Int(*value as i64), ty, span);
+                }
                 match i64::try_from(*value) {
                     Ok(value) => mk(K::Int(value), Ty::INT, span),
                     Err(_) => {
@@ -130,7 +153,12 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            ast::ExprKind::Float(value) => mk(K::Float(*value), Ty::FLOAT, span),
+            ast::ExprKind::Float(value) => {
+                match expected.filter(|t| self.types.sized_kind(*t).is_some_and(|k| k.is_float())) {
+                    Some(f32_ty) => mk(K::Float(*value), f32_ty, span),
+                    None => mk(K::Float(*value), Ty::FLOAT, span),
+                }
+            }
             ast::ExprKind::Str(value) => mk(K::Str(value.clone()), Ty::STR, span),
             ast::ExprKind::Bool(value) => mk(K::Bool(*value), Ty::BOOL, span),
             ast::ExprKind::None => mk(K::None, Ty::NONE, span),
@@ -236,38 +264,8 @@ impl Checker<'_, '_> {
             }
             return value;
         }
-        match self.globals.get(name).map(|(global, _)| *global) {
-            Some(Global::Const(index)) => {
-                return match &self.consts[index].value {
-                    Some(value) => hir::Expr { span, ..value.clone() },
-                    None => error_expr(span),
-                };
-            }
-            Some(Global::Function(id)) => return self.func_ref(id, span),
-            Some(Global::GenericFunction(index)) => return self.generic_fn_value(index, expected, span),
-            Some(
-                Global::Struct(_)
-                | Global::Enum(_)
-                | Global::Trait(_)
-                | Global::GenericStruct(_)
-                | Global::GenericEnum(_),
-            ) => {
-                let help = match self.globals.get(name).map(|(g, _)| *g) {
-                    Some(Global::Enum(_) | Global::GenericEnum(_)) => {
-                        format!("create a value with one of its variants: `{name}.Variant`")
-                    }
-                    Some(Global::Trait(_)) => {
-                        "a trait describes behaviour; use a value of a type that implements it".to_string()
-                    }
-                    _ => format!("create a value with `{name}(...)`"),
-                };
-                self.error(
-                    Diagnostic::error(codes::NOT_SUPPORTED, format!("`{name}` is a type, not a value"), span, "a type")
-                        .with_help(help),
-                );
-                return error_expr(span);
-            }
-            None => {}
+        if let Some(global) = self.globals.get(name).map(|(global, _)| *global) {
+            return self.global_value(cx, global, name, span, expected);
         }
         match self.lookup_variant(name, span) {
             Some(Ok((enum_id, index))) => return self.variant_value(cx, enum_id, index, None, span),
@@ -315,7 +313,11 @@ impl Checker<'_, '_> {
     /// A variant used by its bare name: the enum and index if the name is unique, an error (already
     /// reported) if several enums have it, `None` if no enum does.
     fn lookup_variant(&mut self, name: &str, span: Span) -> Option<Result<(EnumId, usize), ()>> {
-        let owners = self.variant_names.get(name)?.clone();
+        let mut owners = self.variant_names.get(name)?.clone();
+        owners.retain(|(e, _)| self.enum_in_scope(Global::Enum(*e)));
+        if owners.is_empty() {
+            return None;
+        }
         if let [single] = owners.as_slice() {
             return Some(Ok(*single));
         }
@@ -334,7 +336,11 @@ impl Checker<'_, '_> {
 
     /// A variant of a generic enum used by its bare name, when only one generic enum has it.
     fn lookup_generic_variant(&mut self, name: &str, span: Span) -> Option<(usize, usize)> {
-        let owners = self.generic_variant_names.get(name)?.clone();
+        let mut owners = self.generic_variant_names.get(name)?.clone();
+        owners.retain(|(t, _)| self.enum_in_scope(Global::GenericEnum(*t)));
+        if owners.is_empty() {
+            return None;
+        }
         if let [single] = owners.as_slice() {
             return Some(*single);
         }
@@ -439,46 +445,17 @@ impl Checker<'_, '_> {
         span: Span,
         expected: Option<Ty>,
     ) -> hir::Expr {
+        // `module.name(...)`
+        if let ast::ExprKind::Attr { object, name } = &callee.kind
+            && let Some(global) = self.member_global(cx, object, name)
+        {
+            let shown = format!("{}.{}", Self::dotted(object).unwrap_or_default(), name.name);
+            return self.call_global(cx, global, &shown, callee.span, args, span, expected);
+        }
         match &callee.kind {
             ast::ExprKind::Name(name) if !cx.sees(name) => {
-                match self.globals.get(name).map(|(global, _)| *global) {
-                    Some(Global::Function(id)) => {
-                        let signature = &self.signatures[id.0];
-                        let (fname, def_span, params, ret) =
-                            (signature.name.clone(), signature.name_span, signature.params.clone(), signature.ret);
-                        let args = self.call_args(cx, &fname, def_span, &params, args, span);
-                        return mk(K::Call { func: id, args }, ret, span);
-                    }
-                    Some(Global::GenericFunction(index)) => return self.call_generic(cx, index, args, span, expected),
-                    Some(Global::Struct(id)) => return self.construct(cx, id, args, span),
-                    Some(Global::GenericStruct(index)) => {
-                        return self.construct_generic(cx, index, None, args, span, expected);
-                    }
-                    Some(Global::Enum(_) | Global::GenericEnum(_)) => {
-                        self.error(
-                            Diagnostic::error(
-                                codes::NOT_A_FUNCTION,
-                                format!("`{name}` is an enum; create a value with one of its variants"),
-                                callee.span,
-                                "an enum",
-                            )
-                            .with_help(format!("for example `{name}.Variant(...)`")),
-                        );
-                        self.check_all(cx, args);
-                        return error_expr(span);
-                    }
-                    Some(Global::Trait(_) | Global::Const(_)) => {
-                        let kind = self.global_kind(name).unwrap_or("not a function");
-                        self.error(Diagnostic::error(
-                            codes::NOT_A_FUNCTION,
-                            format!("`{name}` is {kind}, not a function"),
-                            callee.span,
-                            "not callable",
-                        ));
-                        self.check_all(cx, args);
-                        return error_expr(span);
-                    }
-                    None => {}
+                if let Some(global) = self.globals.get(name).map(|(global, _)| *global) {
+                    return self.call_global(cx, global, name, callee.span, args, span, expected);
                 }
                 if BUILTIN_FUNCTIONS.contains(&name.as_str()) {
                     return self.builtin_function(cx, name, args, span);
@@ -582,10 +559,12 @@ impl Checker<'_, '_> {
                 self.static_call(cx, ty, name, args, span)
             }
             ast::ExprKind::Attr { object, name } => {
-                if let ast::ExprKind::Name(type_name) = &object.kind
-                    && !cx.sees(type_name)
+                if let Some(type_name) = Self::dotted(object)
+                    && !cx.sees(type_name.split('.').next().unwrap_or_default())
                 {
-                    match self.globals.get(type_name).map(|(g, _)| *g) {
+                    let type_name = type_name.as_str();
+                    let global = self.path_global(cx, object);
+                    match global {
                         Some(Global::GenericStruct(template)) => {
                             return self.generic_static_call(cx, template, None, name, args, span, expected);
                         }
@@ -602,7 +581,7 @@ impl Checker<'_, '_> {
                         Some(Global::GenericFunction(_)) => {}
                         _ => {}
                     }
-                    match self.globals.get(type_name).map(|(g, _)| *g) {
+                    match global {
                         Some(Global::Struct(id)) => {
                             let ty = self.structs[id.0].ty;
                             return self.static_call(cx, ty, name, args, span);
@@ -617,10 +596,10 @@ impl Checker<'_, '_> {
                         Some(Global::Trait(id)) => return self.trait_call(cx, id, name, args, span),
                         _ => {}
                     }
-                    if matches!(type_name.as_str(), "int" | "float") && name.name == "parse" {
+                    if matches!(type_name, "int" | "float") && name.name == "parse" {
                         return self.parse_call(cx, type_name, args, span);
                     }
-                    if matches!(type_name.as_str(), "int" | "float" | "str" | "bool" | "list" | "dict") {
+                    if matches!(type_name, "int" | "float" | "str" | "bool" | "list" | "dict") {
                         self.error(
                             Diagnostic::error(
                                 codes::NOT_SUPPORTED,
@@ -654,6 +633,71 @@ impl Checker<'_, '_> {
         }
     }
 
+    /// A call to something named by a global: a function, a struct (construction), or an error.
+    #[allow(clippy::too_many_arguments)]
+    fn call_global(
+        &mut self,
+        cx: &mut FnCx,
+        global: Global,
+        name: &str,
+        callee_span: Span,
+        args: &[ast::Arg],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> hir::Expr {
+        let callee = ast::Expr { kind: ast::ExprKind::None, span: callee_span };
+        match global {
+            Global::Function(id) => {
+                let signature = &self.signatures[id.0];
+                let (fname, def_span, params, ret) =
+                    (signature.name.clone(), signature.name_span, signature.params.clone(), signature.ret);
+                let args = self.call_args(cx, &fname, def_span, &params, args, span);
+                mk(K::Call { func: id, args }, ret, span)
+            }
+            Global::GenericFunction(index) => self.call_generic(cx, index, args, span, expected),
+            Global::Struct(id) => self.construct(cx, id, args, span),
+            Global::GenericStruct(index) => self.construct_generic(cx, index, None, args, span, expected),
+            Global::Enum(_) | Global::GenericEnum(_) => {
+                self.error(
+                    Diagnostic::error(
+                        codes::NOT_A_FUNCTION,
+                        format!("`{name}` is an enum; create a value with one of its variants"),
+                        callee.span,
+                        "an enum",
+                    )
+                    .with_help(format!("for example `{name}.Variant(...)`")),
+                );
+                self.check_all(cx, args);
+                error_expr(span)
+            }
+            Global::Trait(_) | Global::Const(_) => {
+                let kind = self.global_kind(name).unwrap_or("not a function");
+                self.error(Diagnostic::error(
+                    codes::NOT_A_FUNCTION,
+                    format!("`{name}` is {kind}, not a function"),
+                    callee.span,
+                    "not callable",
+                ));
+                self.check_all(cx, args);
+                error_expr(span)
+            }
+            Global::Module(_) => {
+                self.error(Diagnostic::error(
+                    codes::NOT_A_FUNCTION,
+                    format!("`{name}` is a module, not a function"),
+                    callee.span,
+                    "a module",
+                ));
+                self.check_all(cx, args);
+                error_expr(span)
+            }
+            Global::Missing => {
+                self.check_all_quietly(cx, args);
+                error_expr(span)
+            }
+        }
+    }
+
     fn has_method(&self, ty: Ty, name: &str) -> bool {
         self.is_builtin_method(ty, name)
             || self.inherent.contains_key(&(ty, name.to_string()))
@@ -662,11 +706,23 @@ impl Checker<'_, '_> {
 
     /// The generic declaration an expression names, if it is a bare name of one.
     fn generic_name(&self, cx: &FnCx, expr: &ast::Expr) -> Option<Global> {
-        let ast::ExprKind::Name(name) = &expr.kind else { return None };
-        if cx.sees(name) {
-            return None;
-        }
-        match self.globals.get(name).map(|(g, _)| *g) {
+        let global = match &expr.kind {
+            ast::ExprKind::Name(name) if !cx.sees(name) => self.globals.get(name).map(|(g, _)| *g),
+            ast::ExprKind::Attr { object, name } => {
+                let path = Self::dotted(object)?;
+                if cx.sees(path.split('.').next().unwrap_or_default()) {
+                    return None;
+                }
+                match self.globals.get(&path) {
+                    Some((Global::Module(m), _)) => {
+                        self.exports[*m].get(&name.name).filter(|(_, _, public)| *public).map(|(g, _, _)| *g)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        match global {
             Some(g @ (Global::GenericStruct(_) | Global::GenericEnum(_) | Global::GenericFunction(_))) => Some(g),
             _ => None,
         }
@@ -827,6 +883,7 @@ impl Checker<'_, '_> {
         args: &[ast::Arg],
         span: Span,
     ) -> hir::Expr {
+        self.check_method_visible(func, span);
         let signature = &self.signatures[func.0];
         let (name, def_span, params, ret) =
             (signature.name.clone(), signature.name_span, signature.params.clone(), signature.ret);
@@ -1182,6 +1239,10 @@ impl Checker<'_, '_> {
         args: &[ast::Arg],
         span: Span,
     ) -> hir::Expr {
+        if !self.check_constructible(id, span) {
+            self.check_all_quietly(cx, args);
+            return error_expr(span);
+        }
         let info = &self.structs[id.0];
         let (struct_name, struct_span, struct_ty, fields) =
             (info.name.clone(), info.span, info.ty, info.fields.clone());
@@ -1325,10 +1386,17 @@ impl Checker<'_, '_> {
             ));
             return error_expr(span);
         }
-        if let ast::ExprKind::Name(type_name) = &object.kind
-            && !cx.sees(type_name)
+        // `module.name`
+        if let Some(global) = self.member_global(cx, object, name) {
+            let shown = format!("{}.{}", Self::dotted(object).unwrap_or_default(), name.name);
+            return self.global_value(cx, global, &shown, span, expected);
+        }
+        if let Some(type_name) = Self::dotted(object)
+            && !cx.sees(type_name.split('.').next().unwrap_or_default())
         {
-            if let Some(&(Global::GenericEnum(template), _)) = self.globals.get(type_name) {
+            let type_name = type_name.as_str();
+            let global = self.path_global(cx, object);
+            if let Some(Global::GenericEnum(template)) = global {
                 let pattern = self.pattern_of(template);
                 if let Some(id) = self.enum_of(pattern)
                     && let Some(variant) = self.enums[id.0].variants.iter().position(|v| v.name == name.name)
@@ -1336,7 +1404,7 @@ impl Checker<'_, '_> {
                     return self.generic_variant(cx, template, variant, None, None, span, expected);
                 }
             }
-            match self.globals.get(type_name).map(|(g, _)| *g) {
+            match global {
                 Some(Global::Enum(id)) => {
                     if let Some(index) = self.enums[id.0].variants.iter().position(|v| v.name == name.name) {
                         return self.variant_value(cx, id, index, None, span);
@@ -1751,9 +1819,33 @@ impl Checker<'_, '_> {
         {
             return mk(K::Int(i64::MIN), Ty::INT, span);
         }
-        let value = self.expr(cx, operand, expected.filter(|t| *t == Ty::FLOAT));
+        let value = self.expr(cx, operand, expected.filter(|t| *t == Ty::FLOAT || self.types.sized_kind(*t).is_some()));
         if value.ty == Ty::ERROR {
             return error_expr(span);
+        }
+        if let Some(kind) = self.types.sized_kind(value.ty) {
+            let ty = value.ty;
+            return match (op, &value.kind) {
+                (ast::UnaryOp::Neg, K::Int(v)) => mk(K::Int(v.wrapping_neg()), ty, span),
+                (ast::UnaryOp::Neg, K::Float(v)) => mk(K::Float(-v), ty, span),
+                (ast::UnaryOp::Neg, _) => {
+                    let op = if kind.is_float() { hir::UnaryOp::FloatNeg } else { hir::UnaryOp::IntNeg };
+                    mk(K::Unary { op, operand: Box::new(value) }, ty, span)
+                }
+                (ast::UnaryOp::Plus, _) => value,
+                (ast::UnaryOp::Invert, _) if !kind.is_float() => {
+                    mk(K::Unary { op: hir::UnaryOp::IntInvert, operand: Box::new(value) }, ty, span)
+                }
+                _ => {
+                    self.error(Diagnostic::error(
+                        codes::BAD_OPERANDS,
+                        format!("cannot apply unary `{}` to `{}`", op.symbol(), kind.name()),
+                        span,
+                        format!("operand has type `{}`", kind.name()),
+                    ));
+                    error_expr(span)
+                }
+            };
         }
         match (op, value.ty) {
             (ast::UnaryOp::Neg, Ty::INT) => match value.kind {
@@ -1961,6 +2053,39 @@ impl Checker<'_, '_> {
             return self.bad_operands(op, &l, &r, span);
         }
 
+        // The sized number types have the basic operators; anything else converts to `int` or
+        // `float` first.
+        if let (Some(kind), true) = (self.types.sized_kind(l.ty), l.ty == r.ty) {
+            let hir_op = match (op, kind.is_float()) {
+                (A::Add, false) => Some(B::IntAdd),
+                (A::Sub, false) => Some(B::IntSub),
+                (A::Mul, false) => Some(B::IntMul),
+                (A::BitAnd, false) => Some(B::IntAnd),
+                (A::BitOr, false) => Some(B::IntOr),
+                (A::BitXor, false) => Some(B::IntXor),
+                (A::Add, true) => Some(B::FloatAdd),
+                (A::Sub, true) => Some(B::FloatSub),
+                (A::Mul, true) => Some(B::FloatMul),
+                (A::Div, true) => Some(B::FloatDiv),
+                _ => None,
+            };
+            if let Some(hir_op) = hir_op {
+                let ty = l.ty;
+                return mk(K::Binary { op: hir_op, lhs: Box::new(l), rhs: Box::new(r) }, ty, span);
+            }
+            let (symbol, name) = (op.symbol(), kind.name());
+            let to = if kind.is_float() { "float" } else { "int" };
+            self.error(
+                Diagnostic::error(
+                    codes::BAD_OPERANDS,
+                    format!("`{symbol}` is not available on `{name}`"),
+                    span,
+                    format!("both sides are `{name}`"),
+                )
+                .with_help(format!("convert first: `{to}(a) {symbol} {to}(b)`")),
+            );
+            return error_expr(span);
+        }
         let (hir_op, ty) = match (op, self.types.kind(l.ty), self.types.kind(r.ty)) {
             (A::Add, TyKind::Int, TyKind::Int) => (B::IntAdd, Ty::INT),
             (A::Sub, TyKind::Int, TyKind::Int) => (B::IntSub, Ty::INT),

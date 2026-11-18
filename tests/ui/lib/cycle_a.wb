@@ -1,0 +1,4 @@
+import lib.cycle_b
+
+pub def a() -> int:
+    return 1

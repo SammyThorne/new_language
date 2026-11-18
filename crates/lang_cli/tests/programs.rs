@@ -1,7 +1,8 @@
 //! End-to-end tests against the real compiler executable.
 //!
 //! - `tests/run/*`: each program is compiled and run in debug and release mode. Its standard
-//!   output must equal the `# expect:` comment lines in the file, in order.
+//!   output must equal the `# expect:` comment lines in the file, in order. `# args:` gives it
+//!   command-line arguments. Modules it imports live in subdirectories, which are not run.
 //! - `tests/ui/*`: each program is checked, and the compiler's standard error must equal the
 //!   `.stderr` file next to it. The expected exit status is 1 if that file contains an error,
 //!   otherwise 0. Set the `BLESS` environment variable (with the language's prefix, see
@@ -67,6 +68,8 @@ struct Expectations {
     exit: i32,
     /// Lines that must each appear in standard error.
     stderr: Vec<String>,
+    /// Command-line arguments for the program, from `# args:`.
+    args: Vec<String>,
 }
 
 fn expectations(source: &str) -> Expectations {
@@ -81,6 +84,7 @@ fn expectations(source: &str) -> Expectations {
         stdout: directive("# expect:").iter().map(|line| format!("{line}\n")).collect(),
         exit: directive("# expect-exit:").first().map_or(0, |code| code.trim().parse().expect("exit code")),
         stderr: directive("# expect-stderr:"),
+        args: directive("# args:").iter().flat_map(|line| line.split_whitespace().map(String::from)).collect(),
     }
 }
 
@@ -101,7 +105,7 @@ fn run_programs() {
             if gc_stress {
                 command.env(&stress, "1");
             }
-            let output = command.arg(&program).output().unwrap();
+            let output = command.arg(&program).args(&expected.args).output().unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let missing: Vec<&String> = expected.stderr.iter().filter(|line| !stderr.contains(line.as_str())).collect();

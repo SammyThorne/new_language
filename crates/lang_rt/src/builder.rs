@@ -85,6 +85,15 @@ pub unsafe extern "C" fn lrt_builder_push_int(b: *mut Builder, value: i64) {
     unsafe { builder(b).push(value.to_string().as_bytes()) };
 }
 
+/// Append an unsigned 64-bit integer (a `u64`).
+///
+/// # Safety
+/// `b` comes from `lrt_builder_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lrt_builder_push_uint(b: *mut Builder, value: i64) {
+    unsafe { builder(b).push((value as u64).to_string().as_bytes()) };
+}
+
 /// # Safety
 /// `b` comes from `lrt_builder_new`.
 #[unsafe(no_mangle)]

@@ -1,0 +1,17 @@
+error[E0334]: cannot find module `lib.nowhere`
+ --> tests/ui/module_errors.wb:2:8
+  |
+2 | import lib.nowhere
+  |        ^^^^^^^^^^^ no such module
+  |
+  = help: looked for `tests/ui/lib/nowhere.wb` and for a standard library module; the standard library has `io`, `os`
+
+error[E0336]: modules import each other: lib.cycle_a -> lib.cycle_b -> lib.cycle_a
+ --> tests/ui/lib/cycle_b.wb:1:8
+  |
+1 | import lib.cycle_a
+  |        ^^^^^^^^^^^ this import closes the cycle
+  |
+  = help: move what both modules need into a third module that both import
+
+error: could not compile `tests/ui/module_errors.wb` due to 2 errors

@@ -324,13 +324,13 @@ def load_user(id: int) -> Result[User]:
 Memory is collected automatically, at no particular time. Anything that must be released promptly (files, locks, connections) uses `with`:
 
 ```python
-with open("data.csv") as f:
+with io.open("data.csv")? as f:
     for line in f.lines():
         process(line)
 # f is closed here, including on early return and on ?
 ```
 
-`with` works on any type that implements the `Scoped[T]` trait, which has two methods: `enter(self) -> T` produces the value bound by `as`, and `exit(self)` runs on every way out of the block. A file's `enter` returns the file itself; a mutex guard's `enter` returns the protected value. There is no `defer` and there are no destructors.
+`with` works on any type that has an `exit(self)` method, which runs on every way out of the block. If the type also has `enter(self) -> T`, its result is what `as` binds; otherwise `as` binds the value itself. A file has only `exit`; a mutex guard's `enter` returns the protected value. These are plain methods rather than a `Scoped[T]` trait until traits can take type parameters (D38). There is no `defer` and there are no destructors.
 
 ## Closures (M4)
 

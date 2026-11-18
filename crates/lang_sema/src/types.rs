@@ -32,6 +32,67 @@ pub struct EnumId(pub usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TraitId(pub usize);
 
+/// The sized numeric types, for binding C functions and compact data (docs/01, "Built-in types").
+/// `int` is 64-bit signed and `float` 64-bit; `i64` and `f64` are other names for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SizedKind {
+    I8,
+    I16,
+    I32,
+    U8,
+    U16,
+    U32,
+    U64,
+    F32,
+}
+
+impl SizedKind {
+    pub const ALL: [SizedKind; 8] = [
+        SizedKind::I8,
+        SizedKind::I16,
+        SizedKind::I32,
+        SizedKind::U8,
+        SizedKind::U16,
+        SizedKind::U32,
+        SizedKind::U64,
+        SizedKind::F32,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SizedKind::I8 => "i8",
+            SizedKind::I16 => "i16",
+            SizedKind::I32 => "i32",
+            SizedKind::U8 => "u8",
+            SizedKind::U16 => "u16",
+            SizedKind::U32 => "u32",
+            SizedKind::U64 => "u64",
+            SizedKind::F32 => "f32",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<SizedKind> {
+        SizedKind::ALL.into_iter().find(|k| k.name() == name)
+    }
+
+    pub fn bits(self) -> u32 {
+        match self {
+            SizedKind::I8 | SizedKind::U8 => 8,
+            SizedKind::I16 | SizedKind::U16 => 16,
+            SizedKind::I32 | SizedKind::U32 | SizedKind::F32 => 32,
+            SizedKind::U64 => 64,
+        }
+    }
+
+    pub fn is_float(self) -> bool {
+        self == SizedKind::F32
+    }
+
+    pub fn is_signed(self) -> bool {
+        matches!(self, SizedKind::I8 | SizedKind::I16 | SizedKind::I32 | SizedKind::F32)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TyKind {
     Error,
@@ -59,6 +120,8 @@ pub enum TyKind {
     Param(u32),
     /// A function value: `def(int, str) -> bool`.
     Func(Vec<Ty>, Ty),
+    /// `i8` to `u64` and `f32`.
+    Sized(SizedKind),
 }
 
 #[derive(Debug)]
@@ -173,6 +236,18 @@ impl Types {
         self.intern(TyKind::Func(params, ret))
     }
 
+    pub fn sized(&mut self, kind: SizedKind) -> Ty {
+        self.intern(TyKind::Sized(kind))
+    }
+
+    /// The sized numeric kind of a type, if it is one.
+    pub fn sized_kind(&self, ty: Ty) -> Option<SizedKind> {
+        match self.kind(ty) {
+            TyKind::Sized(kind) => Some(*kind),
+            _ => None,
+        }
+    }
+
     pub fn add_trait(&mut self, name: &str) -> TraitId {
         let id = TraitId(self.trait_names.len());
         self.trait_names.push(name.to_string());
@@ -200,6 +275,7 @@ impl Types {
             TyKind::Int => "int".into(),
             TyKind::Float => "float".into(),
             TyKind::Str => "str".into(),
+            TyKind::Sized(kind) => kind.name().into(),
             TyKind::List(elem) => format!("list[{}]", self.display(*elem)),
             TyKind::Dict(key, value) => format!("dict[{}, {}]", self.display(*key), self.display(*value)),
             TyKind::Tuple(items) => {

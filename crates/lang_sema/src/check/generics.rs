@@ -210,17 +210,28 @@ impl<'m> Checker<'_, 'm> {
 
     // ---- generic functions --------------------------------------------------------------
 
-    pub(super) fn declare_generic_fn(&mut self, function: &'m ast::Function) {
+    /// Declare a generic function's name and type parameters; [`Self::finish_generic_fn`]
+    /// resolves its bounds and signature once all traits and types are known.
+    pub(super) fn declare_generic_fn(&mut self, function: &'m ast::Function) -> usize {
         let params = self.declare_type_params(&function.generics);
-        self.resolve_bounds(&params, &function.generics);
         let index = self.generic_fns.len();
-        self.generic_fns.push(GenericFn {
-            ast: function,
-            params: params.clone(),
-            instances: HashMap::new(),
-            pattern: None,
-        });
+        self.generic_fns.push(GenericFn { ast: function, params, instances: HashMap::new(), pattern: None });
         self.globals.insert(function.name.name.clone(), (Global::GenericFunction(index), function.name.span));
+        index
+    }
+
+    pub(super) fn finish_generic_fn(&mut self, index: usize) {
+        let (function, params) = (self.generic_fns[index].ast, self.generic_fns[index].params.clone());
+        self.resolve_bounds(&params, &function.generics);
+        if !function.annotations.is_empty() {
+            let span = function.annotations[0].span;
+            self.error(Diagnostic::error(
+                codes::BAD_ANNOTATION,
+                "a generic function cannot have annotations",
+                span,
+                "not allowed here",
+            ));
+        }
         let pattern = self.instantiate_fn(index, Self::own_types(&params), function.name.span);
         self.generic_fns[index].pattern = Some(pattern);
     }
@@ -237,19 +248,17 @@ impl<'m> Checker<'_, 'm> {
         let (ast, params) = (self.generic_fns[index].ast, self.generic_fns[index].params.clone());
         let mode = self.instance_mode(&args, &Self::own_types(&params));
         let shown: Vec<String> = args.iter().map(|a| self.display(*a)).collect();
-        let name = if mode == BodyMode::GenericCheck {
-            ast.name.name.clone()
-        } else {
-            format!("{}[{}]", ast.name.name, shown.join(", "))
-        };
         let bindings = Self::bindings(&params, &args);
         let saved_self = self.self_ty.take();
-        let signature =
-            self.with_scope(bindings.clone(), mode != BodyMode::GenericCheck, |this| this.signature(ast, &name, None));
+        let signature = self.in_module(self.module_of(ast.name.span), |this| {
+            let base = this.qualified(&ast.name.name);
+            let name = if mode == BodyMode::GenericCheck { base } else { format!("{base}[{}]", shown.join(", ")) };
+            this.with_scope(bindings.clone(), mode != BodyMode::GenericCheck, |this| this.signature(ast, &name, None))
+        });
         self.self_ty = saved_self;
         let id = FuncId(self.signatures.len());
         self.signatures.push(signature);
-        self.bodies.push(Some(Body { ast, self_ty: None, bindings, mode }));
+        self.bodies.push(Some(Body { ast, self_ty: None, bindings, mode, extern_symbol: None }));
         self.generic_fns[index].instances.insert(args, id);
         id
     }
@@ -294,6 +303,7 @@ impl<'m> Checker<'_, 'm> {
                 TypeDecl::Struct(d) => &d.generics,
                 TypeDecl::Enum(d) => &d.generics,
             };
+            self.enter_module(self.module_of(self.generic_types[index].span));
             self.resolve_bounds(&params, generics);
         }
         for index in 0..self.generic_types.len() {
@@ -315,6 +325,11 @@ impl<'m> Checker<'_, 'm> {
         if let Some(&ty) = self.generic_types[index].instances.get(&args) {
             return ty;
         }
+        let module = self.module_of(self.generic_types[index].span);
+        self.in_module(module, |this| this.instantiate_type_here(index, args, span))
+    }
+
+    fn instantiate_type_here(&mut self, index: usize, args: Vec<Ty>, span: Span) -> Ty {
         if self.too_deep(&args, span) {
             return Ty::ERROR;
         }
@@ -374,7 +389,10 @@ impl<'m> Checker<'_, 'm> {
         let decl = self.generic_types[index].decl;
 
         if let (TypeDecl::Struct(d), Some(id)) = (decl, self.struct_of(ty)) {
-            self.with_scope(bindings.clone(), !is_pattern, |this| this.field_defaults(id, d));
+            let module = self.module_of(d.name.span);
+            self.in_module(module, |this| {
+                this.with_scope(bindings.clone(), !is_pattern, |this| this.field_defaults(id, d))
+            });
         }
 
         let annotations = match decl {
@@ -382,7 +400,8 @@ impl<'m> Checker<'_, 'm> {
             TypeDecl::Enum(d) => &d.annotations,
         };
         for annotation in annotations.iter().filter(|a| a.name.name == "derive") {
-            for arg in &annotation.args {
+            let names = self.with_scope(Vec::new(), !is_pattern, |this| this.annotation_names(annotation));
+            for arg in names {
                 // Unknown names are reported once, for the pattern.
                 let Some(trait_id) = self.with_scope(Vec::new(), !is_pattern, |this| this.derivable(arg)) else {
                     continue;
@@ -400,7 +419,8 @@ impl<'m> Checker<'_, 'm> {
         }
 
         for template in self.generic_types[index].impls.clone() {
-            self.apply_impl_template(template, ty, &args);
+            let module = self.module_of(self.impl_templates[template].ast.target.span);
+            self.in_module(module, |this| this.apply_impl_template(template, ty, &args));
         }
     }
 

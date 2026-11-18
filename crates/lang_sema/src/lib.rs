@@ -5,6 +5,7 @@
 
 mod check;
 pub mod hir;
+pub mod stdlib;
 pub mod types;
 
-pub use check::check;
+pub use check::{ModuleInput, check, check_modules};

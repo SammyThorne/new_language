@@ -1,0 +1,68 @@
+"""Turns text into an expression tree."""
+
+from calc.syntax import Expr, EvalError
+
+def tokenize(text: str) -> list[str]:
+    tokens: list[str] = []
+    current = ""
+    for c in text:
+        if c == " " or c in "+-*/()":
+            if current != "":
+                tokens.append(current)
+                current = ""
+            if c != " ":
+                tokens.append(c)
+        else:
+            current = current + c
+    if current != "":
+        tokens.append(current)
+    return tokens
+
+pub struct Parser:
+    priv tokens: list[str]
+    priv pos: int = 0
+
+pub def parse(text: str) -> Result[Expr]:
+    return Parser(tokenize(text)).expr()
+
+impl Parser:
+    priv def peek(self) -> str:
+        if self.pos < len(self.tokens):
+            return self.tokens[self.pos]
+        return ""
+
+    priv def next(self) -> str:
+        token = self.peek()
+        self.pos += 1
+        return token
+
+    def expr(self) -> Result[Expr]:
+        left = self.term()?
+        while self.peek() == "+" or self.peek() == "-":
+            op = self.next()
+            right = self.term()?
+            left = Add(left, right) if op == "+" else Sub(left, right)
+        return left
+
+    def term(self) -> Result[Expr]:
+        left = self.atom()?
+        while self.peek() == "*" or self.peek() == "/":
+            op = self.next()
+            right = self.atom()?
+            left = Mul(left, right) if op == "*" else Div(left, right)
+        return left
+
+    def atom(self) -> Result[Expr]:
+        token = self.next()
+        if token == "":
+            return Err(EvalError("unexpected end of input"))
+        if token == "(":
+            inner = self.expr()?
+            if self.next() != ")":
+                return Err(EvalError("expected ')'"))
+            return inner
+        match float.parse(token):
+            case Ok(value):
+                return Num(value)
+            case Err(_):
+                return Var(token)

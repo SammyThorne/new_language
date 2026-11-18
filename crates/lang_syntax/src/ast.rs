@@ -20,14 +20,43 @@ pub enum Item {
     Trait(TraitDecl),
     Impl(ImplDecl),
     Const(ConstDecl),
+    Import(ImportDecl),
 }
 
-/// `@name` or `@name(arg, ...)` before a declaration. A fixed, compiler-known set.
+/// `import a.b`, `import a.b as c`, or `from a.b import x, y as z`.
+#[derive(Debug)]
+pub struct ImportDecl {
+    /// The module's dotted name, one identifier per part.
+    pub path: Vec<Ident>,
+    /// `as c` after `import a.b`.
+    pub alias: Option<Ident>,
+    /// For `from ... import`: each imported name and its optional `as` name.
+    pub names: Option<Vec<(Ident, Option<Ident>)>>,
+    pub span: Span,
+}
+
+/// `@name`, `@name(arg, ...)` or `@module.name(...)` before a declaration. A fixed,
+/// compiler-known set.
 #[derive(Debug)]
 pub struct Annotation {
+    /// The name, with dots for qualified names such as `http.get`.
     pub name: Ident,
-    pub args: Vec<Ident>,
+    pub args: Vec<AnnotationArg>,
     pub span: Span,
+}
+
+/// One argument of an annotation: a name, a string, or `keyword=value`.
+#[derive(Debug)]
+pub struct AnnotationArg {
+    pub keyword: Option<Ident>,
+    pub value: AnnotationValue,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub enum AnnotationValue {
+    Name(Ident),
+    Str(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +77,7 @@ pub struct GenericParam {
 
 #[derive(Debug)]
 pub struct Function {
+    pub annotations: Vec<Annotation>,
     pub visibility: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
@@ -57,7 +87,8 @@ pub struct Function {
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
     pub body: Vec<Stmt>,
-    /// False for a trait method declared without a body (a required method).
+    /// False for a trait method declared without a body (a required method), and for a C
+    /// function bound with `@extern`.
     pub has_body: bool,
 }
 
@@ -202,6 +233,12 @@ pub enum StmtKind {
     },
     /// A function defined inside another, which can use the enclosing function's variables.
     Def(Box<Function>),
+    /// `with value as name:`; the value's `exit` method runs however the block is left.
+    With {
+        value: Expr,
+        target: Option<Ident>,
+        body: Vec<Stmt>,
+    },
     Break,
     Continue,
     /// `pass`: does nothing; fills a block that needs no statements.

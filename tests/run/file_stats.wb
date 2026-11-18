@@ -1,0 +1,39 @@
+# Milestone 5 exit program: a command-line tool that reads the files named in its arguments.
+# args: tests/run/data/poem.txt tests/run/data/missing.txt
+# expect: tests/run/data/poem.txt: 3 lines, 16 words, 80 characters
+# expect: longest line: The tide is full, the moon lies fair
+# expect-stderr: tests/run/data/missing.txt: No such file or directory
+# expect-exit: 1
+
+import io
+import os
+
+struct Stats:
+    lines: int
+    words: int
+    chars: int
+    longest: str
+
+def stats(path: str) -> Result[Stats, io.IoError]:
+    result = Stats(0, 0, 0, "")
+    with io.open(path)? as file:
+        for line in file.lines():
+            result.lines += 1
+            result.words += len(line.split())
+            result.chars += len(line) + 1
+            if len(line) > len(result.longest):
+                result.longest = line
+    return Ok(result)
+
+def main():
+    failed = False
+    for path in os.args()[1:]:
+        match stats(path):
+            case Ok(s):
+                print(f"{path}: {s.lines} lines, {s.words} words, {s.chars} characters")
+                print("longest line:", s.longest)
+            case Err(error):
+                io.eprint(error.message())
+                failed = True
+    if failed:
+        os.exit(1)

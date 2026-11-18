@@ -210,6 +210,7 @@ version = "0.1.0"
 dependencies = [
  "lang_diag",
  "lang_format",
+ "lang_names",
  "lang_syntax",
 ]
 

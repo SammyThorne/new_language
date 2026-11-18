@@ -148,6 +148,9 @@ fn symbol_name(module: &str, function: &str) -> String {
 const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_alloc", "p", "ip"),
     ("lrt_alloc_raw", "p", "i"),
+    ("lrt_builder_push_uint", "v", "pi"),
+    ("lrt_io_read_line", "s", ""),
+    ("llvm.fptosi.sat.i64.f64", "i", "f"),
     ("lrt_list_sort_by", "v", "pppi"),
     ("lrt_panic", "v", "pipi"),
     ("lrt_panic_index", "v", "iipi"),
@@ -237,8 +240,12 @@ struct FnState<'ctx> {
     slots: Vec<Option<PointerValue<'ctx>>>,
     /// Per local: whether its slot holds the address of a heap cell with the value.
     boxed: Vec<bool>,
-    /// Enclosing loops: (where `continue` goes, where `break` goes).
-    loops: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
+    /// Enclosing loops: where `continue` goes, where `break` goes, and how many `with` blocks
+    /// were open when the loop started.
+    loops: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>, usize)>,
+    /// Open `with` blocks: the local holding the value and its `exit` method. Leaving a block
+    /// early runs the `exit` of each one being left, innermost first.
+    cleanups: Vec<(lang_sema::hir::LocalId, FuncId, Ty)>,
     /// The function's return type, for `?`.
     ret: Ty,
 }
@@ -391,6 +398,8 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             TyKind::Error => unreachable!("HIR never contains the error type"),
             TyKind::Int => self.cx.i64_type().into(),
             TyKind::Float => self.cx.f64_type().into(),
+            TyKind::Sized(kind) if kind.is_float() => self.cx.f32_type().into(),
+            TyKind::Sized(kind) => self.int_type(kind.bits()).into(),
             TyKind::Bool => self.cx.bool_type().into(),
             TyKind::Str => self.str_type.into(),
             TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..) | TyKind::Enum(_) => self.ptr_type().into(),
@@ -416,6 +425,16 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
                 }
             }
         })
+    }
+
+    /// The LLVM integer type with this many bits.
+    fn int_type(&self, bits: u32) -> inkwell::types::IntType<'ctx> {
+        match bits {
+            8 => self.cx.i8_type(),
+            16 => self.cx.i16_type(),
+            32 => self.cx.i32_type(),
+            _ => self.cx.i64_type(),
+        }
     }
 
     fn value_type(&self, ty: Ty) -> BasicTypeEnum<'ctx> {
@@ -652,7 +671,14 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         let saved_state = self.state.take();
         let entry = self.cx.append_basic_block(function, "entry");
         self.b.position_at_end(entry);
-        self.state = Some(FnState { function, slots: Vec::new(), boxed: Vec::new(), loops: Vec::new(), ret: Ty::NONE });
+        self.state = Some(FnState {
+            function,
+            slots: Vec::new(),
+            boxed: Vec::new(),
+            loops: Vec::new(),
+            cleanups: Vec::new(),
+            ret: Ty::NONE,
+        });
         let result = body(self);
         self.state = saved_state;
         if let Some(block) = saved_block {
@@ -734,6 +760,10 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
     fn define(&mut self, id: FuncId) {
         let function = &self.program.functions[id.0];
         let value = self.function_value(id);
+        if let Some(symbol) = &function.extern_symbol {
+            self.define_extern(value, function, symbol);
+            return;
+        }
         self.in_function(value, |this| {
             let ptr = this.ptr_type();
             let slots: Vec<Option<PointerValue>> = function
@@ -783,6 +813,49 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
                 // The type checker guarantees a value-returning function never reaches its end.
                 this.b.build_unreachable().must();
             }
+        });
+    }
+}
+
+impl<'ctx> Codegen<'ctx, '_> {
+    /// The body of an `@extern` function: call the C function, passing each `str` as a pointer
+    /// and a length, and return its result.
+    fn define_extern(&mut self, value: FunctionValue<'ctx>, function: &lang_sema::hir::Function, symbol: &str) {
+        let ptr = self.ptr_type();
+        let mut c_params: Vec<BasicMetadataTypeEnum> = Vec::new();
+        for local in &function.params {
+            let ty = function.locals[local.0].ty;
+            if ty == Ty::STR {
+                c_params.push(ptr.into());
+                c_params.push(self.cx.i64_type().into());
+            } else {
+                c_params.push(self.value_type(ty).into());
+            }
+        }
+        let c_type = match self.llty(function.ret) {
+            Some(ret) => ret.fn_type(&c_params, false),
+            None => self.cx.void_type().fn_type(&c_params, false),
+        };
+        let c_function = self
+            .module
+            .get_function(symbol)
+            .unwrap_or_else(|| self.module.add_function(symbol, c_type, Some(Linkage::External)));
+        self.in_function(value, |this| {
+            let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
+            for (param, local) in value.get_param_iter().zip(&function.params) {
+                if function.locals[local.0].ty == Ty::STR {
+                    let [p, len] = this.str_parts(param);
+                    args.push(p.into());
+                    args.push(len.into());
+                } else {
+                    args.push(param.into());
+                }
+            }
+            let call = this.b.build_call(c_function, &args, "").must();
+            match call.try_as_basic_value().basic() {
+                Some(result) => this.b.build_return(Some(&result)).must(),
+                None => this.b.build_return(None).must(),
+            };
         });
     }
 }

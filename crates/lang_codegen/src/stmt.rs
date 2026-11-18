@@ -51,6 +51,7 @@ impl<'ctx> Codegen<'ctx, '_> {
             }
             Stmt::Return(value) => {
                 let value = value.as_ref().and_then(|e| self.expr(e));
+                self.run_cleanups(0);
                 let returns_value = self.current_function().get_type().get_return_type().is_some();
                 match value {
                     Some(value) if returns_value => self.b.build_return(Some(&value)).must(),
@@ -87,8 +88,17 @@ impl<'ctx> Codegen<'ctx, '_> {
             }
             Stmt::For { target, source, body } => self.for_loop(target, source, body),
             Stmt::Match { subject, cases } => self.match_stmt(subject, cases),
+            Stmt::With { object, exit, body } => {
+                let ty = self.program.functions[exit.0].locals[0].ty;
+                self.state.as_mut().unwrap().cleanups.push((*object, *exit, ty));
+                self.stmts(body);
+                let depth = self.state.as_ref().unwrap().cleanups.len() - 1;
+                self.run_cleanups(depth);
+                self.state.as_mut().unwrap().cleanups.pop();
+            }
             Stmt::Break | Stmt::Continue => {
-                let &(continue_to, break_to) = self.state.as_ref().unwrap().loops.last().expect("inside a loop");
+                let &(continue_to, break_to, depth) = self.state.as_ref().unwrap().loops.last().expect("inside a loop");
+                self.run_cleanups(depth);
                 let to = if matches!(stmt, Stmt::Break) { break_to } else { continue_to };
                 self.b.build_unconditional_branch(to).must();
                 self.start_dead_block();
@@ -102,9 +112,21 @@ impl<'ctx> Codegen<'ctx, '_> {
         continue_to: inkwell::basic_block::BasicBlock<'ctx>,
         break_to: inkwell::basic_block::BasicBlock<'ctx>,
     ) {
-        self.state.as_mut().unwrap().loops.push((continue_to, break_to));
+        let depth = self.state.as_ref().unwrap().cleanups.len();
+        self.state.as_mut().unwrap().loops.push((continue_to, break_to, depth));
         self.stmts(body);
         self.state.as_mut().unwrap().loops.pop();
+    }
+
+    /// Call the `exit` method of every open `with` block above `depth`, innermost first. The
+    /// blocks stay open for the code generator: this emits the calls for one way out.
+    pub(crate) fn run_cleanups(&mut self, depth: usize) {
+        let cleanups: Vec<_> = self.state.as_ref().unwrap().cleanups[depth..].iter().rev().copied().collect();
+        for (object, exit, ty) in cleanups {
+            let value = self.load_local(object, ty).expect("`with` values are objects");
+            let call = self.b.build_call(self.function_value(exit), &[value.into()], "").must();
+            call.set_call_convention(crate::CALLCONV_FAST);
+        }
     }
 
     pub(crate) fn store(&mut self, place: &Place, value: Option<BasicValueEnum<'ctx>>) {

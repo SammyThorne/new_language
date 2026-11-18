@@ -67,6 +67,7 @@ impl Checker<'_, '_> {
                 result
             }
             ast::StmtKind::Def(function) => (self.nested_def(cx, function), false),
+            ast::StmtKind::With { value, target, body } => self.with_stmt(cx, value, target.as_ref(), body),
             ast::StmtKind::Pass => (Vec::new(), false),
             ast::StmtKind::Assign { target, ty, value } => (self.assign(cx, target, ty.as_ref(), value), false),
             ast::StmtKind::AugAssign { target, op, value } => (self.aug_assign(cx, target, *op, value), false),
@@ -94,6 +95,85 @@ impl Checker<'_, '_> {
                 }
             }
         }
+    }
+
+    /// `with value as name:`. The value's type needs `def exit(self)`; with `def enter(self)`,
+    /// `name` is bound to what `enter` returns, and otherwise to the value itself.
+    fn with_stmt(
+        &mut self,
+        cx: &mut FnCx,
+        value: &ast::Expr,
+        target: Option<&ast::Ident>,
+        body: &[ast::Stmt],
+    ) -> (Vec<hir::Stmt>, bool) {
+        let checked = self.expr(cx, value, None);
+        let ty = checked.ty;
+        let exit = self.method_of(ty, "exit").filter(|f| self.signatures[f.0].ret == Ty::NONE);
+        let enter = self.method_of(ty, "enter");
+        let Some(exit) = exit else {
+            if ty != Ty::ERROR {
+                let shown = self.display(ty);
+                let help = if self.types.result_parts(ty).is_some() {
+                    "this is a `Result`; get the value first, for example with `?`".to_string()
+                } else {
+                    "a value works with `with` when its type has a method `def exit(self)`, which runs when the block ends"
+                        .to_string()
+                };
+                self.error(
+                    Diagnostic::error(
+                        codes::BAD_WITH,
+                        format!("a value of type `{shown}` cannot be used with `with`"),
+                        value.span,
+                        format!("has type `{shown}`"),
+                    )
+                    .with_help(help),
+                );
+            }
+            if let Some(name) = target {
+                let local = cx.add_local(&name.name, Ty::ERROR, name.span, false);
+                cx.set_assigned(local);
+            }
+            let (_, diverges) = self.block(cx, body);
+            return (Vec::new(), diverges);
+        };
+        let temp = cx.temp(ty, value.span);
+        let load = hir::Expr { kind: hir::ExprKind::Local(temp), ty, span: value.span };
+        let bound = match enter {
+            Some(enter) => hir::Expr {
+                kind: hir::ExprKind::Call { func: enter, args: vec![load] },
+                ty: self.signatures[enter.0].ret,
+                span: value.span,
+            },
+            None => load,
+        };
+        let mut inner = Vec::new();
+        match target {
+            Some(name) => {
+                let local = match cx.scope.get(&name.name) {
+                    Some(&local) => {
+                        let declared = cx.locals[local.0].ty;
+                        let bound = self.coerce(bound, declared, None);
+                        inner.push(hir::Stmt::Assign { place: hir::Place::Local(local), value: bound });
+                        local
+                    }
+                    None => {
+                        let local = cx.add_local(&name.name, bound.ty, name.span, false);
+                        inner.push(hir::Stmt::Assign { place: hir::Place::Local(local), value: bound });
+                        local
+                    }
+                };
+                cx.set_assigned(local);
+            }
+            None if enter.is_some() => inner.push(hir::Stmt::Expr(bound)),
+            None => {}
+        }
+        let (body, diverges) = self.block(cx, body);
+        inner.extend(body);
+        let stmts = vec![
+            hir::Stmt::Assign { place: hir::Place::Local(temp), value: checked },
+            hir::Stmt::With { object: temp, exit, body: inner },
+        ];
+        (stmts, diverges)
     }
 
     /// A condition of `if`, `elif` or `while`.
@@ -799,8 +879,9 @@ impl Checker<'_, '_> {
         };
         let info = &self.structs[id.0];
         if let Some(index) = info.fields.iter().position(|f| f.name == field.name) {
-            let f = &info.fields[index];
-            return Some((index, f.ty, f.span));
+            let (ty, span) = (info.fields[index].ty, info.fields[index].span);
+            self.check_field_visible(object.ty, index, field.span);
+            return Some((index, ty, span));
         }
         let struct_name = info.name.clone();
         let struct_span = info.span;

@@ -19,16 +19,18 @@ pub mod num;
 pub mod out;
 pub mod panic;
 pub mod strings;
+pub mod sys;
 
 /// Program entry. The C runtime calls this; it runs the compiled program's `main`.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub extern "C" fn main(_argc: std::ffi::c_int, _argv: *const *const std::ffi::c_char) -> std::ffi::c_int {
+pub extern "C" fn main(argc: std::ffi::c_int, argv: *const *const std::ffi::c_char) -> std::ffi::c_int {
     unsafe extern "C" {
         /// The compiled program's `main`, emitted by the code generator.
         fn lang_user_main();
     }
     gc::init();
+    sys::set_args(argc as i64, argv);
     // SAFETY: the code generator always defines `lang_user_main` as `void(void)` with the C
     // calling convention.
     unsafe { lang_user_main() };

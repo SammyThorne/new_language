@@ -220,6 +220,7 @@ impl Checker<'_, '_> {
             ret: ret.unwrap_or(Ty::ERROR),
             ret_span,
             receiver: None,
+            private: false,
         });
         self.bodies.push(None);
 
@@ -271,6 +272,7 @@ impl Checker<'_, '_> {
                 body,
                 generic,
                 closure: true,
+                extern_symbol: None,
             },
         ));
         let ty = self.types.func(param_tys, ret);

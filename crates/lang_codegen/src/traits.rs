@@ -140,6 +140,7 @@ impl<'ctx> Codegen<'ctx, '_> {
             }
             None => self.none_value(ret),
         };
+        self.run_cleanups(0);
         self.b.build_return(Some(&returned)).must();
         self.b.position_at_end(cont);
         match self.kind(inner.ty) {

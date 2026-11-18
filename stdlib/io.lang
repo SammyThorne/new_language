@@ -1,0 +1,162 @@
+"""
+Files, standard input and standard error.
+
+    import io
+
+    text = io.read_file("notes.txt")?
+    io.write_file("copy.txt", text)?
+    with io.open("log.txt", "a")? as log:
+        log.write("started\n")?
+"""
+
+pub struct IoError:
+    """What went wrong with a file operation, and on which path."""
+    path: str
+    reason: str
+
+impl Error for IoError:
+    def message(self) -> str:
+        if self.path == "":
+            return self.reason
+        return f"{self.path}: {self.reason}"
+
+impl Display for IoError:
+    def to_str(self) -> str:
+        return self.message()
+
+@extern("lrt_io_error")
+def last_error() -> str
+
+@extern("lrt_io_read_file")
+def read_file_raw(path: str) -> str
+
+@extern("lrt_io_write_file")
+def write_file_raw(path: str, text: str, append: int) -> int
+
+@extern("lrt_io_exists")
+def exists_raw(path: str) -> int
+
+@extern("lrt_io_remove")
+def remove_raw(path: str) -> int
+
+@extern("lrt_io_list_dir")
+def list_dir_raw(path: str) -> int
+
+@extern("lrt_io_list_entry")
+def list_entry(index: int) -> str
+
+@extern("lrt_io_read_line")
+def read_line_raw() -> str?
+
+@extern("lrt_io_eprint")
+def eprint_raw(text: str)
+
+@extern("lrt_file_open")
+def file_open(path: str, mode: str) -> int
+
+@extern("lrt_file_read")
+def file_read(handle: int) -> str
+
+@extern("lrt_file_read_line")
+def file_read_line(handle: int) -> str?
+
+@extern("lrt_file_write")
+def file_write(handle: int, text: str) -> int
+
+@extern("lrt_file_close")
+def file_close(handle: int)
+
+def failure(path: str) -> IoError:
+    return IoError(path, last_error())
+
+pub def read_file(path: str) -> Result[str, IoError]:
+    """The whole file as text."""
+    text = read_file_raw(path)
+    reason = last_error()
+    if reason != "":
+        return Err(IoError(path, reason))
+    return Ok(text)
+
+pub def read_lines(path: str) -> Result[list[str], IoError]:
+    """The file's lines, without their line endings."""
+    text = read_file(path)?
+    lines = text.split("\n")
+    if len(lines) > 0 and lines[-1] == "":
+        lines.pop()
+    return Ok([line[:len(line) - 1] if line.ends_with("\r") else line for line in lines])
+
+pub def write_file(path: str, text: str) -> Result[None, IoError]:
+    """Create or replace a file."""
+    if write_file_raw(path, text, 0) == 0:
+        return Err(failure(path))
+
+pub def append_file(path: str, text: str) -> Result[None, IoError]:
+    """Add text to the end of a file, creating it if needed."""
+    if write_file_raw(path, text, 1) == 0:
+        return Err(failure(path))
+
+pub def exists(path: str) -> bool:
+    return exists_raw(path) != 0
+
+pub def remove(path: str) -> Result[None, IoError]:
+    if remove_raw(path) == 0:
+        return Err(failure(path))
+
+pub def list_dir(path: str) -> Result[list[str], IoError]:
+    """The names of the entries in a directory, sorted."""
+    count = list_dir_raw(path)
+    if count < 0:
+        return Err(failure(path))
+    return Ok([list_entry(i) for i in range(count)])
+
+pub def read_line() -> str?:
+    """A line from standard input without its line ending, or `None` at the end of input."""
+    return read_line_raw()
+
+pub def eprint(text: str):
+    """Write a line to standard error."""
+    eprint_raw(text)
+
+pub struct File:
+    """An open file. Use it with `with`, which closes it at the end of the block."""
+    path: str
+    priv handle: int
+
+impl File:
+    def read(self) -> Result[str, IoError]:
+        """The rest of the file."""
+        text = file_read(self.handle)
+        reason = last_error()
+        if reason != "":
+            return Err(IoError(self.path, reason))
+        return Ok(text)
+
+    def read_line(self) -> str?:
+        """The next line without its line ending, or `None` at the end of the file."""
+        return file_read_line(self.handle)
+
+    def lines(self) -> list[str]:
+        """The remaining lines."""
+        out: list[str] = []
+        line = self.read_line()
+        while line is not None:
+            out.append(line)
+            line = self.read_line()
+        return out
+
+    def write(self, text: str) -> Result[None, IoError]:
+        if file_write(self.handle, text) == 0:
+            return Err(failure(self.path))
+
+    def close(self):
+        file_close(self.handle)
+
+    def exit(self):
+        self.close()
+
+pub def open(path: str, mode: str = "r") -> Result[File, IoError]:
+    """Open a file to read (`"r"`), write (`"w"`) or append (`"a"`)."""
+    handle = file_open(path, mode)
+    if handle < 0:
+        return Err(failure(path))
+    return Ok(File(path=path, handle=handle))

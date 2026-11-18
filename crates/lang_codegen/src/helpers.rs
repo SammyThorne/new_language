@@ -183,6 +183,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 call.try_as_basic_value().basic().unwrap().into_int_value()
             }
             TyKind::Int => value.into_int_value(),
+            TyKind::Sized(kind) => self.widen(kind, value).into_int_value(),
             TyKind::Bool => self.b.build_int_z_extend(value.into_int_value(), self.cx.i64_type(), "").must(),
             TyKind::Str => {
                 let [ptr, len] = self.str_parts(value);
@@ -295,6 +296,21 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let [ap, al] = self.str_parts(a);
                 let [bp, bl] = self.str_parts(b);
                 return self.call_rt("lrt_str_cmp", &[ap, al, bp, bl]).unwrap().into_int_value();
+            }
+            TyKind::Sized(kind) if kind.is_float() => (
+                self.b.build_float_compare(FloatPredicate::OLT, a.into_float_value(), b.into_float_value(), "").must(),
+                self.b.build_float_compare(FloatPredicate::OGT, a.into_float_value(), b.into_float_value(), "").must(),
+            ),
+            TyKind::Sized(kind) => {
+                let (lt, gt) = if kind.is_signed() {
+                    (IntPredicate::SLT, IntPredicate::SGT)
+                } else {
+                    (IntPredicate::ULT, IntPredicate::UGT)
+                };
+                (
+                    self.b.build_int_compare(lt, a.into_int_value(), b.into_int_value(), "").must(),
+                    self.b.build_int_compare(gt, a.into_int_value(), b.into_int_value(), "").must(),
+                )
             }
             TyKind::Struct(_) | TyKind::Enum(_) => {
                 let ord = self.program.builtins.ord;

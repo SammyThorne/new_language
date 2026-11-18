@@ -56,6 +56,8 @@ impl<'m> Checker<'_, 'm> {
                     }
                     if !decl.generics.is_empty() {
                         self.declare_generic_type(TypeDecl::Struct(decl));
+                        let global = self.globals[&decl.name.name].0;
+                        self.export(&decl.name, global, decl.visibility);
                         continue;
                     }
                     let (id, ty) = self.types.add_struct(&decl.name.name);
@@ -69,6 +71,7 @@ impl<'m> Checker<'_, 'm> {
                         generic: false,
                     });
                     self.globals.insert(name, (Global::Struct(id), decl.name.span));
+                    self.export(&decl.name, Global::Struct(id), decl.visibility);
                     self.struct_items.push((id, decl));
                 }
                 ast::Item::Enum(decl) => {
@@ -77,6 +80,8 @@ impl<'m> Checker<'_, 'm> {
                     }
                     if !decl.generics.is_empty() {
                         self.declare_generic_type(TypeDecl::Enum(decl));
+                        let global = self.globals[&decl.name.name].0;
+                        self.export(&decl.name, global, decl.visibility);
                         continue;
                     }
                     let (id, ty) = self.types.add_enum(&decl.name.name);
@@ -89,6 +94,7 @@ impl<'m> Checker<'_, 'm> {
                         generic: false,
                     });
                     self.globals.insert(name, (Global::Enum(id), decl.name.span));
+                    self.export(&decl.name, Global::Enum(id), decl.visibility);
                     self.enum_items.push((id, decl));
                 }
                 ast::Item::Trait(decl) => {
@@ -104,6 +110,7 @@ impl<'m> Checker<'_, 'm> {
                         methods: Vec::new(),
                     });
                     self.globals.insert(name, (Global::Trait(id), decl.name.span));
+                    self.export(&decl.name, Global::Trait(id), decl.visibility);
                     self.trait_items.push((id, decl));
                 }
                 ast::Item::Const(decl) => {
@@ -113,11 +120,59 @@ impl<'m> Checker<'_, 'm> {
                     let index = self.consts.len();
                     self.consts.push(ConstInfo { value: None });
                     self.globals.insert(decl.name.name.clone(), (Global::Const(index), decl.name.span));
+                    self.export(&decl.name, Global::Const(index), decl.visibility);
                     self.const_items.push((index, decl));
                 }
-                ast::Item::Function(_) | ast::Item::Impl(_) => {}
+                ast::Item::Function(function) => self.declare_function(function),
+                ast::Item::Impl(imp) => self.impl_items.push(imp),
+                ast::Item::Import(_) => {}
             }
         }
+    }
+
+    /// Declare a top-level function's name, so that other modules can import it before its
+    /// signature is resolved by [`Self::collect_functions`].
+    fn declare_function(&mut self, function: &'m ast::Function) {
+        if let Some(span) = function.self_param {
+            self.error(
+                Diagnostic::error(
+                    codes::UNEXPECTED_TOKEN,
+                    "`self` is only allowed in methods",
+                    span,
+                    "not inside an `impl` block",
+                )
+                .with_help("define methods inside `impl TypeName:`"),
+            );
+        }
+        if !self.claim_global(&function.name) {
+            return;
+        }
+        if !function.generics.is_empty() {
+            let index = self.declare_generic_fn(function);
+            self.export(&function.name, Global::GenericFunction(index), function.visibility);
+            self.fn_items.push((function, super::FnSlot::Generic(index)));
+            return;
+        }
+        let id = FuncId(self.signatures.len());
+        self.signatures.push(Signature {
+            name: function.name.name.clone(),
+            name_span: function.name.span,
+            params: Vec::new(),
+            ret: Ty::ERROR,
+            ret_span: None,
+            receiver: None,
+            private: false,
+        });
+        self.bodies.push(Some(Body {
+            ast: function,
+            self_ty: None,
+            bindings: Vec::new(),
+            mode: BodyMode::Normal,
+            extern_symbol: None,
+        }));
+        self.globals.insert(function.name.name.clone(), (Global::Function(id), function.name.span));
+        self.export(&function.name, Global::Function(id), function.visibility);
+        self.fn_items.push((function, super::FnSlot::Plain(id)));
     }
 
     /// Find the prelude's traits and types that the compiler gives meaning to.
@@ -151,6 +206,7 @@ impl<'m> Checker<'_, 'm> {
         // Traits first: a field typed as a trait needs the trait's methods to know whether it
         // can be used as a type.
         for (id, decl) in self.trait_items.clone() {
+            self.enter_module(self.module_of(decl.name.span));
             let mut supertraits = Vec::new();
             for name in &decl.supertraits {
                 match self.globals.get(&name.name) {
@@ -177,6 +233,7 @@ impl<'m> Checker<'_, 'm> {
             }
         }
         for (id, decl) in self.trait_items.clone() {
+            self.enter_module(self.module_of(decl.name.span));
             let self_ty = self.types.self_type(id);
             self.self_ty = Some(self_ty);
             let mut methods: Vec<TraitMethod> = Vec::new();
@@ -213,10 +270,12 @@ impl<'m> Checker<'_, 'm> {
 
         self.resolve_generic_types();
         for (id, decl) in self.struct_items.clone() {
+            self.enter_module(self.module_of(decl.name.span));
             let fields = self.fields(&decl.fields);
             self.structs[id.0].fields = fields;
         }
         for (id, decl) in self.enum_items.clone() {
+            self.enter_module(self.module_of(decl.name.span));
             let variants = self.variants(&decl.variants, Some(id));
             if variants.is_empty() {
                 self.error(Diagnostic::error(
@@ -297,7 +356,13 @@ impl<'m> Checker<'_, 'm> {
                     "a `None` field carries no information",
                 ));
             }
-            fields.push(FieldInfo { name: field.name.name.clone(), span: field.ty.span, ty, default: None });
+            fields.push(FieldInfo {
+                name: field.name.name.clone(),
+                span: field.ty.span,
+                ty,
+                default: None,
+                private: field.visibility == ast::Visibility::Priv,
+            });
         }
         fields
     }
@@ -323,7 +388,7 @@ impl<'m> Checker<'_, 'm> {
                                 "for example `@derive(Eq, Display)`",
                             ));
                         }
-                        for arg in &annotation.args {
+                        for arg in self.annotation_names(annotation) {
                             self.derive(ty, arg);
                         }
                     }
@@ -359,6 +424,24 @@ impl<'m> Checker<'_, 'm> {
                 }
             }
         }
+    }
+
+    /// The arguments of an annotation that takes names, such as `@derive(Eq, Hash)`, reporting
+    /// any that are not names.
+    pub(super) fn annotation_names<'a>(&mut self, annotation: &'a ast::Annotation) -> Vec<&'a ast::Ident> {
+        let mut names = Vec::new();
+        for arg in &annotation.args {
+            match (&arg.keyword, &arg.value) {
+                (None, ast::AnnotationValue::Name(name)) => names.push(name),
+                _ => self.error(Diagnostic::error(
+                    codes::BAD_ANNOTATION,
+                    format!("`@{}` takes trait names", annotation.name.name),
+                    arg.span,
+                    "not a name",
+                )),
+            }
+        }
+        names
     }
 
     fn derive(&mut self, ty: Ty, arg: &ast::Ident) {
@@ -427,43 +510,46 @@ impl<'m> Checker<'_, 'm> {
 
     // ---- functions and impls ------------------------------------------------------------
 
-    pub(super) fn collect_functions(&mut self, module: &'m ast::Module) {
-        for item in &module.items {
-            match item {
-                ast::Item::Function(function) => {
-                    if let Some(span) = function.self_param {
-                        self.error(
-                            Diagnostic::error(
-                                codes::UNEXPECTED_TOKEN,
-                                "`self` is only allowed in methods",
-                                span,
-                                "not inside an `impl` block",
-                            )
-                            .with_help("define methods inside `impl TypeName:`"),
-                        );
+    /// Resolve the signatures of top-level functions, and collect `impl` blocks.
+    pub(super) fn collect_functions(&mut self) {
+        for (function, slot) in self.fn_items.clone() {
+            self.enter_module(self.module_of(function.name.span));
+            match slot {
+                super::FnSlot::Generic(index) => self.finish_generic_fn(index),
+                super::FnSlot::Plain(id) => {
+                    let name = self.qualified(&function.name.name);
+                    let mut signature = self.signature(function, &name, None);
+                    signature.private = false;
+                    let symbol = self.function_annotations(function, &signature);
+                    self.signatures[id.0] = signature;
+                    if let Some(Some(body)) = self.bodies.get_mut(id.0) {
+                        body.extern_symbol = symbol;
                     }
-                    if !self.claim_global(&function.name) {
-                        continue;
-                    }
-                    if !function.generics.is_empty() {
-                        self.declare_generic_fn(function);
-                        continue;
-                    }
-                    let id = FuncId(self.signatures.len());
-                    let signature = self.signature(function, &function.name.name, None);
-                    self.signatures.push(signature);
-                    self.bodies.push(Some(Body {
-                        ast: function,
-                        self_ty: None,
-                        bindings: Vec::new(),
-                        mode: BodyMode::Normal,
-                    }));
-                    self.globals.insert(function.name.name.clone(), (Global::Function(id), function.name.span));
                 }
-                ast::Item::Impl(imp) => self.collect_impl(imp),
-                _ => {}
             }
         }
+        for imp in self.impl_items.clone() {
+            self.enter_module(self.module_of(imp.target.span));
+            self.collect_impl(imp);
+        }
+    }
+
+    /// Check a function's annotations; returns the C symbol for `@extern`.
+    fn function_annotations(&mut self, function: &ast::Function, signature: &Signature) -> Option<String> {
+        for annotation in &function.annotations {
+            if annotation.name.name != "extern" {
+                self.error(
+                    Diagnostic::error(
+                        codes::BAD_ANNOTATION,
+                        format!("unknown annotation `@{}` on a function", annotation.name.name),
+                        annotation.name.span,
+                        "not a known annotation",
+                    )
+                    .with_help("functions can have `@extern(\"c_name\")`"),
+                );
+            }
+        }
+        self.extern_symbol(function, signature)
     }
 
     fn impl_target(&mut self, target: &ast::Ident) -> Option<Ty> {
@@ -593,11 +679,26 @@ impl<'m> Checker<'_, 'm> {
             }
             self.self_ty = Some(target);
             let receiver = method.self_param.map(|span| (target, span));
-            let signature = self.signature(method, &format!("{type_name}.{name}"), receiver);
+            let mut signature = self.signature(method, &format!("{type_name}.{name}"), receiver);
+            signature.private = method.visibility == ast::Visibility::Priv;
             self.self_ty = None;
+            if let Some(annotation) = method.annotations.first() {
+                self.error(Diagnostic::error(
+                    codes::BAD_ANNOTATION,
+                    format!("annotation `@{}` is not allowed on a method", annotation.name.name),
+                    annotation.name.span,
+                    "not allowed here",
+                ));
+            }
             let id = FuncId(self.signatures.len());
             self.signatures.push(signature);
-            self.bodies.push(Some(Body { ast: method, self_ty: Some(target), bindings: bindings.to_vec(), mode }));
+            self.bodies.push(Some(Body {
+                ast: method,
+                self_ty: Some(target),
+                bindings: bindings.to_vec(),
+                mode,
+                extern_symbol: None,
+            }));
             self.inherent.insert((target, name.clone()), id);
         }
     }
@@ -652,6 +753,7 @@ impl<'m> Checker<'_, 'm> {
                     self_ty: Some(target),
                     bindings: bindings.to_vec(),
                     mode,
+                    extern_symbol: None,
                 }));
                 methods.push(Some(func));
             } else if let Some(&default) = self.trait_defaults.get(&(trait_id, index)) {
@@ -668,9 +770,16 @@ impl<'m> Checker<'_, 'm> {
                     ret,
                     ret_span,
                     receiver: has_self.then_some((target, imp.target.span)),
+                    private: false,
                 });
                 let mode = if mode == BodyMode::Skip { BodyMode::Skip } else { BodyMode::Quiet };
-                self.bodies.push(Some(Body { ast: default, self_ty: Some(target), bindings: bindings.to_vec(), mode }));
+                self.bodies.push(Some(Body {
+                    ast: default,
+                    self_ty: Some(target),
+                    bindings: bindings.to_vec(),
+                    mode,
+                    extern_symbol: None,
+                }));
                 methods.push(Some(func));
             } else {
                 missing.push(method_name);
@@ -801,6 +910,7 @@ impl<'m> Checker<'_, 'm> {
             ret,
             ret_span: function.ret.as_ref().map(|h| h.span),
             receiver,
+            private: false,
         }
     }
 
@@ -923,6 +1033,7 @@ impl<'m> Checker<'_, 'm> {
 
     pub(super) fn check_consts(&mut self) {
         for (index, decl) in self.const_items.clone() {
+            self.enter_module(self.module_of(decl.name.span));
             let mut cx = FnCx::detached();
             let literal = match &decl.value.kind {
                 ast::ExprKind::Int(_) | ast::ExprKind::Float(_) | ast::ExprKind::Str(_) | ast::ExprKind::Bool(_) => {
@@ -959,6 +1070,7 @@ impl<'m> Checker<'_, 'm> {
 
     pub(super) fn check_field_defaults(&mut self) {
         for (id, decl) in self.struct_items.clone() {
+            self.enter_module(self.module_of(decl.name.span));
             self.field_defaults(id, decl);
         }
     }
@@ -979,6 +1091,7 @@ impl<'m> Checker<'_, 'm> {
     }
 
     pub(super) fn check_main(&mut self, module: &ast::Module) -> Option<FuncId> {
+        self.enter_module(self.module_names.len() - 1);
         let Some(&(Global::Function(id), _)) = self.globals.get("main") else {
             self.error(
                 Diagnostic::error(codes::NO_MAIN, "the program has no `main` function", module.start, "")
@@ -1015,6 +1128,7 @@ impl<'m> Checker<'_, 'm> {
             self.trait_defaults.iter().map(|(k, v)| (*k, *v)).collect();
         defaults.sort_by_key(|((t, i), _)| (t.0, *i));
         for ((trait_id, index), ast_method) in defaults {
+            self.enter_module(self.module_of(ast_method.name.span));
             let self_ty = self.types.self_type(trait_id);
             let method = &self.traits[trait_id.0].methods[index];
             let signature = Signature {
@@ -1024,6 +1138,7 @@ impl<'m> Checker<'_, 'm> {
                 ret: method.ret,
                 ret_span: method.ret_span,
                 receiver: method.has_self.then_some((self_ty, method.span)),
+                private: false,
             };
             self.check_body(&signature, ast_method, Some(self_ty));
         }

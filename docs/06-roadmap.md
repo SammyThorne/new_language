@@ -43,15 +43,16 @@ As of 2026-11-18.
 | M1 | Done | Everything listed below, with `float` formatted exactly as CPython does. The first benchmark is recorded in [bench/README.md](../bench/README.md) |
 | M2 | Done | Everything listed below. Gate 1 passed. Sets were not in the milestone and are not included |
 | M3 | Done | Everything listed below, with two differences. `match` is compiled as a test per case in order, not as a decision tree (D31). `Option` and `Result` behave as enums in `match`, `?` and their methods, but stay built into the compiler until generics exist (M4) |
+| M5 | Done | Everything listed below, with two differences. `with` works with any type that has an `exit` method (and optionally `enter`), rather than a `Scoped[T]` trait, for the same reason as iteration (D38). The sized numeric types support conversion, comparison, `+`, `-`, `*`, bit operations and printing, but not `//`, `%` or `**` (D41) |
 | M4 | Done | Everything listed below, with three differences. Iteration uses methods named `next` and `iter` rather than generic `Iterable`/`Iterator` traits, because traits cannot have type parameters yet (D34). Methods cannot have their own type parameters; generic functions are top-level (D33). `Option` and `Result` remain built in: they need nothing generics would add |
 
-Exit programs, all in `tests/run/`: `fizzbuzz.wb`, `primes.wb` and `fib.wb` (M1), `word_frequency.wb` (M2), `shapes.wb` and `evaluator.wb` (M3), and `generics.wb`, `closures.wb` and `iterators.wb` (M4). The binary-trees and sort benchmarks are in `bench/`.
+Exit programs, all in `tests/run/`: `fizzbuzz.wb`, `primes.wb` and `fib.wb` (M1), `word_frequency.wb` (M2), `shapes.wb` and `evaluator.wb` (M3), and `generics.wb`, `closures.wb` and `iterators.wb` (M4), and `calculator.wb` (the M3 evaluator split into `calc/syntax.wb`, `calc/parser.wb` and `calc/eval.wb`) and `file_stats.wb` (a file-reading command-line tool) (M5). The binary-trees and sort benchmarks are in `bench/`.
 
 **Gate 1 result.** Allocation-heavy code (binary trees, depth 18) runs 20x faster than CPython 3.13, against a target of 10x. All 20 test programs pass in the GC stress mode.
 
 **Against Go 1.27.4**, every benchmark is already inside the end-of-prototype targets in [07](07-testing-and-performance.md#targets). Weby takes 1.28x Go's time on allocation, 1.46x and 1.51x on collections and strings, and is faster than Go on recursive calls. [bench/README.md](../bench/README.md) has the numbers and the reasons for each gap.
 
-Choices made during M1 to M4 that the earlier documents did not settle are recorded in [08](08-decisions-and-risks.md) as D21 to D37.
+Choices made during M1 to M4 that the earlier documents did not settle are recorded in [08](08-decisions-and-risks.md) as D21 to D41.
 
 **M4 result.** Sorting a million records with a key closure takes 0.74 s, against 1.12 s for Go's `sort.SliceStable` with a comparator closure and 2.05 s for CPython ([bench/README.md](../bench/README.md)).
 

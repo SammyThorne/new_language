@@ -1,0 +1,10 @@
+import lib.accounts as accounts
+from lib.accounts import Account, internal_helper, open_acount
+
+def main():
+    a = accounts.open_account("ada")
+    a.deposit(5)
+    print(a.owner, a.balance)
+    a.audit()
+    b = Account("bob", 10)
+    print(accounts.internal_helper(), b.owner)

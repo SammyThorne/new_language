@@ -1,0 +1,25 @@
+"""Computes the value of an expression tree."""
+
+from calc.syntax import Expr, EvalError
+
+pub def evaluate(e: Expr, env: dict[str, float]) -> Result[float]:
+    match e:
+        case Num(value):
+            return value
+        case Var(name):
+            match env.get(name):
+                case Some(value):
+                    return value
+                case None:
+                    return Err(EvalError(f"unknown variable '{name}'"))
+        case Add(left, right):
+            return evaluate(left, env)? + evaluate(right, env)?
+        case Sub(left, right):
+            return evaluate(left, env)? - evaluate(right, env)?
+        case Mul(left, right):
+            return evaluate(left, env)? * evaluate(right, env)?
+        case Div(left, right):
+            divisor = evaluate(right, env)?
+            if divisor == 0.0:
+                return Err(EvalError("division by zero"))
+            return evaluate(left, env)? / divisor

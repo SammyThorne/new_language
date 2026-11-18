@@ -88,6 +88,18 @@ impl Checker<'_, '_> {
             }
             return builtin(Op::Print, values, Ty::NONE);
         }
+        if name == "input" {
+            if !self.arity(name, args, args.len().min(1), span) || args.len() > 1 {
+                self.check_all_quietly(cx, args);
+                return error_expr(span);
+            }
+            let prompt = match args.first() {
+                Some(arg) => self.expect(cx, &arg.value, Ty::STR, None),
+                None => hir::Expr { kind: hir::ExprKind::Str(String::new()), ty: Ty::STR, span },
+            };
+            let ty = self.types.option(Ty::STR);
+            return builtin(Op::Input, vec![prompt], ty);
+        }
         if name == "range" {
             self.error(
                 Diagnostic::error(
@@ -116,6 +128,27 @@ impl Checker<'_, '_> {
             return error_expr(span);
         }
         let kind = self.types.kind(value.ty).clone();
+        let numeric = matches!(kind, TyKind::Int | TyKind::Float | TyKind::Sized(_));
+        if let Some(target) = crate::types::SizedKind::from_name(name) {
+            if !numeric {
+                let shown = self.display(value.ty);
+                self.error(Diagnostic::error(
+                    codes::TYPE_MISMATCH,
+                    format!("`{name}` cannot take a `{shown}`"),
+                    value.span,
+                    "expected a number",
+                ));
+                return error_expr(span);
+            }
+            let ty = self.types.sized(target);
+            return builtin(Op::NumConvert, vec![value], ty);
+        }
+        if let TyKind::Sized(_) = kind
+            && matches!(name, "int" | "float")
+        {
+            let ty = if name == "int" { Ty::INT } else { Ty::FLOAT };
+            return builtin(Op::NumConvert, vec![value], ty);
+        }
         let result = match (name, &kind) {
             ("len", TyKind::Str | TyKind::List(_) | TyKind::Dict(..)) => builtin(Op::Len, vec![value], Ty::INT),
             ("str", TyKind::Str) => value,

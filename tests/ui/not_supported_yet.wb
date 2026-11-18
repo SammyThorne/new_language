@@ -2,6 +2,4 @@ import json
 
 def main():
     items = {1, 2}
-    with open("data.txt") as f:
-        print("no")
     print("still checked")

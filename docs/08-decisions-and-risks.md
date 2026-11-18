@@ -337,6 +337,22 @@ A value of type `def(A) -> R` is two words: code that takes the environment firs
 
 After `if x is not None:` (or `is None` with an early return), and on the right of `x is not None and ...`, a local `x: T?` reads as a `T`. Narrowing ends where `x` may be assigned `None` again: at an assignment of an optional value, and for the whole of a loop or `match` that assigns it. Only local variables narrow, not fields, since another reference could change a field. `x.unwrap()` still works on a narrowed `x`.
 
+### D38. `with` uses methods named `enter` and `exit`
+
+`with value as name:` works when the value's type has `def exit(self)`, which runs however the block is left: at its end, and before `return`, `break`, `continue` and `?` leave it. If the type also has `def enter(self) -> T`, `name` is bound to its result; otherwise to the value itself. The plan named a `Scoped[T]` trait, but traits cannot take type parameters yet (D34); the methods give the same behaviour, and become a trait later without changing programs. A panic does not run `exit`: it ends the process (D24).
+
+### D39. Modules: one scope per file, `pub` to export, and a loader in the driver
+
+The command-line driver loads the main file, follows its imports depth-first (the main file's directory first, then the standard library), and reports cycles with the whole chain. The type checker then sees all modules at once, each with its own scope that starts with the prelude. `import a.b` binds `a.b` (or the `as` name); `from a.b import x` binds `x`. Bare enum variants are usable only where their enum is in scope. Functions in imported modules are named `module.function` in diagnostics and symbols. A `pub` declaration may still mention a private type in its signature; the planned check is left for later.
+
+### D40. The standard library is written in the language and compiled into the compiler
+
+`stdlib/io.lang` and `stdlib/os.lang` are embedded in the compiler with `include_str!`, like the prelude, so a program builds the same wherever it is. They reach the runtime through `@extern`. Because a C function cannot return a `Result`, a failing runtime call returns a placeholder and records a message per thread, which the module reads back to build its error. `str` crosses the C boundary as a pointer and a length (never NUL-terminated), and a returned `str?` is `None` when the pointer is null; binding C functions that expect NUL-terminated strings needs a small shim for now.
+
+### D41. Sized numbers are for data and C, not for arithmetic
+
+`i8` to `u64` and `f32` exist for binding C functions and compact data. They support conversion (`i32(x)`, `int(x)`, `float(x)`; integers wrap and floats truncate, saturating), comparison, hashing, printing, `+`, `-`, `*`, bit operations and, for `f32`, `/`. Floor division, modulo and powers need `int` or `float`; the error says to convert. Integer literals take a sized type from context and are checked against its range. `i64` and `f64` are other names for `int` and `float`.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

@@ -253,11 +253,10 @@ impl Parser<'_> {
                     Ok(item) => items.push(item),
                     Err(Reported) => self.skip_statement(),
                 },
-                kind @ (TokenKind::Import | TokenKind::From) => {
-                    let span = self.span();
-                    self.not_supported(&format!("{} declarations are", kind.describe()), span);
-                    self.skip_statement();
-                }
+                TokenKind::Import | TokenKind::From => match self.import_decl() {
+                    Ok(import) => items.push(Item::Import(import)),
+                    Err(Reported) => self.skip_statement(),
+                },
                 TokenKind::Name(name) if name == "class" => {
                     let span = self.span();
                     self.error(
@@ -289,6 +288,54 @@ impl Parser<'_> {
         Module { items, start }
     }
 
+    /// A dotted module name: `a.b.c`.
+    fn module_path(&mut self) -> PResult<Vec<Ident>> {
+        let mut path = vec![self.expect_name("a module name")?];
+        while self.eat(&TokenKind::Dot) {
+            path.push(self.expect_name("a module name after `.`")?);
+        }
+        Ok(path)
+    }
+
+    fn import_decl(&mut self) -> PResult<ImportDecl> {
+        let start = self.span();
+        if self.eat(&TokenKind::Import) {
+            let path = self.module_path()?;
+            let alias = if self.eat(&TokenKind::As) { Some(self.expect_name("a name after `as`")?) } else { None };
+            let span = start.to(self.prev_span());
+            self.end_of_statement()?;
+            return Ok(ImportDecl { path, alias, names: None, span });
+        }
+        self.expect(TokenKind::From, "")?;
+        let path = self.module_path()?;
+        self.expect(TokenKind::Import, "after the module name")?;
+        let parenthesised = self.eat(&TokenKind::LParen);
+        let mut names = Vec::new();
+        loop {
+            if self.at(&TokenKind::Star) {
+                let span = self.span();
+                return Err(self.error(
+                    "`from ... import *` is not supported",
+                    span,
+                    "name the imports",
+                    Some("list the names you use, or import the module and write `module.name`"),
+                ));
+            }
+            let name = self.expect_name("a name to import")?;
+            let alias = if self.eat(&TokenKind::As) { Some(self.expect_name("a name after `as`")?) } else { None };
+            names.push((name, alias));
+            if !self.eat(&TokenKind::Comma) || (parenthesised && self.at(&TokenKind::RParen)) {
+                break;
+            }
+        }
+        if parenthesised {
+            self.expect(TokenKind::RParen, "to close the list of names")?;
+        }
+        let span = start.to(self.prev_span());
+        self.end_of_statement()?;
+        Ok(ImportDecl { path, alias: None, names: Some(names), span })
+    }
+
     fn visibility(&mut self) -> Visibility {
         if self.eat(&TokenKind::Pub) {
             Visibility::Pub
@@ -304,15 +351,15 @@ impl Parser<'_> {
         let mut annotations = Vec::new();
         while self.at(&TokenKind::At) {
             let start = self.bump().span;
-            let name = self.expect_name("an annotation name after `@`")?;
-            if self.at(&TokenKind::Dot) {
-                let span = start.to(self.span());
-                return Err(self.not_supported(&format!("`@{}.` annotations are", name.name), span));
+            let mut name = self.expect_name("an annotation name after `@`")?;
+            while self.eat(&TokenKind::Dot) {
+                let part = self.expect_name("a name after `.`")?;
+                name = Ident { name: format!("{}.{}", name.name, part.name), span: name.span.to(part.span) };
             }
             let mut args = Vec::new();
             if self.eat(&TokenKind::LParen) {
                 while !self.at(&TokenKind::RParen) {
-                    args.push(self.expect_name("a name")?);
+                    args.push(self.annotation_arg()?);
                     if !self.eat(&TokenKind::Comma) {
                         break;
                     }
@@ -329,23 +376,45 @@ impl Parser<'_> {
         Ok(annotations)
     }
 
+    /// `name`, `"text"`, or `keyword=value` inside an annotation's parentheses.
+    fn annotation_arg(&mut self) -> PResult<AnnotationArg> {
+        let start = self.span();
+        let keyword = match (self.peek().clone(), self.peek_nth(1).clone()) {
+            (TokenKind::Name(_), TokenKind::Assign) => {
+                let keyword = self.expect_name("a name")?;
+                self.bump();
+                Some(keyword)
+            }
+            _ => None,
+        };
+        let value = match self.peek().clone() {
+            TokenKind::Str(text) => {
+                self.bump();
+                AnnotationValue::Str(text)
+            }
+            TokenKind::Name(_) => AnnotationValue::Name(self.expect_name("a name")?),
+            _ => return Err(self.unexpected("expected a name or a string")),
+        };
+        Ok(AnnotationArg { keyword, value, span: start.to(self.prev_span()) })
+    }
+
     fn item(&mut self) -> PResult<Item> {
         let annotations = self.annotations()?;
         let vis_span = self.span();
         let visibility = self.visibility();
         if let Some(first) = annotations.first()
-            && !matches!(self.peek(), TokenKind::Struct | TokenKind::Enum)
+            && !matches!(self.peek(), TokenKind::Struct | TokenKind::Enum | TokenKind::Def)
         {
             let span = first.span;
             return Err(self.error(
-                "annotations are only supported on `struct` and `enum` declarations so far",
+                "annotations are only allowed on `def`, `struct` and `enum` declarations",
                 span,
-                "not supported here",
+                "not allowed here",
                 None,
             ));
         }
         match self.peek() {
-            TokenKind::Def => Ok(Item::Function(self.function(visibility, false)?)),
+            TokenKind::Def => Ok(Item::Function(self.function_with(annotations, visibility, false)?)),
             TokenKind::Struct => Ok(Item::Struct(self.struct_decl(annotations, visibility)?)),
             TokenKind::Enum => Ok(Item::Enum(self.enum_decl(annotations, visibility)?)),
             TokenKind::Trait => Ok(Item::Trait(self.trait_decl(visibility)?)),
@@ -368,6 +437,16 @@ impl Parser<'_> {
     /// A function. Inside a trait (`in_trait`), the body may be left out to declare a required
     /// method: `def area(self) -> float`.
     fn function(&mut self, visibility: Visibility, in_trait: bool) -> PResult<Function> {
+        self.function_with(Vec::new(), visibility, in_trait)
+    }
+
+    fn function_with(
+        &mut self,
+        annotations: Vec<Annotation>,
+        visibility: Visibility,
+        in_trait: bool,
+    ) -> PResult<Function> {
+        let bodiless_allowed = in_trait || annotations.iter().any(|a| a.name.name == "extern");
         self.expect(TokenKind::Def, "")?;
         let name = self.expect_name("a function name")?;
         let generics = self.generic_params()?;
@@ -397,9 +476,10 @@ impl Parser<'_> {
         }
         self.expect(TokenKind::RParen, "to close the parameter list")?;
         let ret = if self.eat(&TokenKind::Arrow) { Some(self.type_expr()?) } else { None };
-        if in_trait && self.at_line_end() {
+        if bodiless_allowed && self.at_line_end() {
             self.end_of_statement()?;
             return Ok(Function {
+                annotations,
                 visibility,
                 name,
                 generics,
@@ -422,7 +502,7 @@ impl Parser<'_> {
         }
         self.bump();
         let body = self.block()?;
-        Ok(Function { visibility, name, generics, self_param, params, ret, body, has_body: true })
+        Ok(Function { annotations, visibility, name, generics, self_param, params, ret, body, has_body: true })
     }
 
     /// `[T, U: Ord + Display]` after a declaration's name; empty when there is none.
@@ -682,9 +762,12 @@ impl Parser<'_> {
                         self.skip_statement();
                     }
                 }
-                TokenKind::Def | TokenKind::Pub | TokenKind::Priv => {
-                    let visibility = self.visibility();
-                    match self.function(visibility, false) {
+                TokenKind::Def | TokenKind::Pub | TokenKind::Priv | TokenKind::At => {
+                    let method = self.annotations().and_then(|annotations| {
+                        let visibility = self.visibility();
+                        self.function_with(annotations, visibility, false)
+                    });
+                    match method {
                         Ok(method) => methods.push(method),
                         Err(Reported) => self.skip_statement(),
                     }
@@ -744,8 +827,14 @@ impl Parser<'_> {
                 self.bump();
                 TypeExpr { kind: TypeExprKind::None, span: start }
             }
-            TokenKind::Name(name) => {
+            TokenKind::Name(mut name) => {
                 self.bump();
+                // A type from another module: `models.User`.
+                while self.at(&TokenKind::Dot) && matches!(self.peek_nth(1), TokenKind::Name(_)) {
+                    self.bump();
+                    let part = self.expect_name("a type name")?;
+                    name = format!("{name}.{}", part.name);
+                }
                 let mut args = Vec::new();
                 if self.eat(&TokenKind::LBracket) {
                     loop {
@@ -854,7 +943,8 @@ impl Parser<'_> {
             TokenKind::Case => {
                 return Err(self.error("`case` outside a `match`", start, "no `match` before this", None));
             }
-            kind @ (TokenKind::With | TokenKind::Spawn) => {
+            TokenKind::With => return self.with_stmt(),
+            kind @ TokenKind::Spawn => {
                 return Err(self.not_supported(&format!("{} statements are", kind.describe()), start));
             }
             TokenKind::Def => {
@@ -893,6 +983,16 @@ impl Parser<'_> {
         let span = start;
         self.end_of_statement()?;
         Ok(Stmt { kind, span })
+    }
+
+    /// `with value as name:` or `with value:`.
+    fn with_stmt(&mut self) -> PResult<Stmt> {
+        let start = self.bump().span;
+        let value = self.expr()?;
+        let target = if self.eat(&TokenKind::As) { Some(self.expect_name("a name after `as`")?) } else { None };
+        self.expect(TokenKind::Colon, "after the `with` value")?;
+        let body = self.block()?;
+        Ok(Stmt { kind: StmtKind::With { value, target, body }, span: start })
     }
 
     fn if_stmt(&mut self) -> PResult<Stmt> {
@@ -1854,10 +1954,37 @@ impl User:
     #[test]
     fn errors_recover_at_the_next_statement() {
         let (module, diags) =
-            parse_text("def main():\n    with x:\n        y()\n    print(1 +)\n    z()\n\ndef other():\n    w()\n");
+            parse_text("def main():\n    spawn x\n    print(1 +)\n    z()\n\ndef other():\n    w()\n");
         assert_eq!(codes_of(&diags), [codes::NOT_SUPPORTED_SYNTAX, codes::UNEXPECTED_TOKEN]);
         assert_eq!(module.items.len(), 2);
         assert_eq!(function(&module, 0).body.len(), 1, "only `z()` survives");
+    }
+
+    #[test]
+    fn imports_annotations_and_with() {
+        let (module, diags) = parse_text(
+            "import models\nimport services.billing as billing\nfrom shapes import (Circle, Square as Sq,)\n\n@extern(\"labs\")\ndef c_labs(x: int) -> int\n\n@http.get(\"/users\", name=\"list\")\ndef users():\n    with open(\"x\") as f:\n        pass\n\ndef f(u: models.User):\n    pass\n",
+        );
+        assert_eq!(codes_of(&diags), Vec::<&str>::new());
+        let Item::Import(first) = &module.items[0] else { panic!() };
+        assert_eq!(first.path[0].name, "models");
+        let Item::Import(second) = &module.items[1] else { panic!() };
+        assert_eq!((second.path.len(), second.alias.as_ref().unwrap().name.as_str()), (2, "billing"));
+        let Item::Import(third) = &module.items[2] else { panic!() };
+        let names = third.names.as_ref().unwrap();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[1].1.as_ref().unwrap().name, "Sq");
+        let Item::Function(extern_fn) = &module.items[3] else { panic!() };
+        assert!(!extern_fn.has_body);
+        assert_eq!(extern_fn.annotations[0].name.name, "extern");
+        let Item::Function(handler) = &module.items[4] else { panic!() };
+        assert_eq!(handler.annotations[0].name.name, "http.get");
+        assert_eq!(handler.annotations[0].args.len(), 2);
+        assert!(matches!(handler.body[0].kind, StmtKind::With { .. }));
+        let Item::Function(f) = &module.items[5] else { panic!() };
+        assert!(
+            matches!(&f.params[0].ty.as_ref().unwrap().kind, TypeExprKind::Named { name, .. } if name == "models.User")
+        );
     }
 
     #[test]

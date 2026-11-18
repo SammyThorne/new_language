@@ -22,6 +22,7 @@ mod closures;
 mod expr;
 mod generics;
 mod items;
+mod modules;
 mod patterns;
 mod stmt;
 
@@ -55,6 +56,15 @@ const BUILTIN_FUNCTIONS: &[&str] = &[
     "zip",
     "any",
     "all",
+    "input",
+    "i8",
+    "i16",
+    "i32",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "f32",
 ];
 
 /// Constructors of the built-in enums.
@@ -64,19 +74,33 @@ const BUILTIN_CONSTRUCTORS: &[&str] = &["Some", "Ok", "Err"];
 const BUILTIN_TYPES: &[&str] = &["bool", "list", "dict", "tuple", "set", "bytes", "None", "Result", "Self"];
 
 /// Type names that exist in the language design but are not implemented yet.
-const PLANNED_TYPES: &[&str] =
-    &["set", "bytes", "bytearray", "frozenset", "range", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "f32"];
+const PLANNED_TYPES: &[&str] = &["set", "bytes", "bytearray", "frozenset", "range"];
 
-const KNOWN_TYPES: &[&str] = &["int", "bool", "str", "float", "list", "dict", "tuple", "None", "Result"];
+const KNOWN_TYPES: &[&str] = &[
+    "int", "bool", "str", "float", "list", "dict", "tuple", "None", "Result", "i8", "i16", "i32", "i64", "u8", "u16",
+    "u32", "u64", "f32", "f64",
+];
 
-/// Check a parsed module together with the prelude, which is added to `sources`. Returns HIR when
-/// this phase found no errors.
+/// One module of a program: its dotted name (`services.billing`) and its syntax tree.
+pub struct ModuleInput<'a> {
+    pub name: String,
+    pub ast: &'a ast::Module,
+}
+
+/// Check a single-file program together with the prelude, which is added to `sources`. Returns
+/// HIR when this phase found no errors.
 pub fn check(
     module: &ast::Module,
     sources: &mut SourceMap,
     module_name: &str,
     diags: &mut Diagnostics,
 ) -> Option<hir::Program> {
+    check_modules(&[ModuleInput { name: module_name.to_string(), ast: module }], sources, diags)
+}
+
+/// Check a program made of several modules. The last module is the entry point, with `main`;
+/// the loader has already found every module the others import, and rejected import cycles.
+pub fn check_modules(inputs: &[ModuleInput], sources: &mut SourceMap, diags: &mut Diagnostics) -> Option<hir::Program> {
     let prelude_file = sources.add(PRELUDE_NAME, PRELUDE);
     let mut prelude_diags = Diagnostics::default();
     let tokens = lang_syntax::lex(prelude_file, PRELUDE, &mut prelude_diags);
@@ -85,17 +109,24 @@ pub fn check(
 
     let errors_before = diags.error_count();
     let mut checker = Checker::new(diags, prelude_file);
-    let modules = [&prelude, module];
-    for m in modules {
+    let modules: Vec<(String, &ast::Module)> = std::iter::once((PRELUDE_NAME.to_string(), &prelude))
+        .chain(inputs.iter().map(|m| (m.name.clone(), m.ast)))
+        .collect();
+    let module = modules.last().expect("at least one module").1;
+    let module_name = modules.last().expect("at least one module").0.clone();
+    checker.start_modules(&modules);
+    for (index, (_, m)) in modules.iter().enumerate() {
+        checker.enter_module(index);
         checker.declare(m);
+        if index == 0 {
+            checker.find_builtins();
+        }
     }
-    checker.find_builtins();
+    checker.import_all(&modules);
     checker.resolve_declarations();
     checker.check_consts();
     checker.register_derives();
-    for m in modules {
-        checker.collect_functions(m);
-    }
+    checker.collect_functions();
     checker.finish_generic_setup();
     checker.check_impl_requirements();
     checker.check_derives();
@@ -130,7 +161,7 @@ pub fn check(
     if checker.diags.error_count() > errors_before {
         return None;
     }
-    Some(checker.into_program(module_name, functions, entry?))
+    Some(checker.into_program(&module_name, functions, entry?))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -144,6 +175,10 @@ enum Global {
     GenericFunction(usize),
     GenericStruct(usize),
     GenericEnum(usize),
+    /// An imported module, by index.
+    Module(usize),
+    /// A name whose lookup already failed and was reported.
+    Missing,
 }
 
 struct StructInfo {
@@ -163,6 +198,8 @@ struct FieldInfo {
     span: Span,
     ty: Ty,
     default: Option<hir::Expr>,
+    /// Declared `priv`: only visible in the file that defines the type.
+    private: bool,
 }
 
 struct EnumInfo {
@@ -215,6 +252,8 @@ struct Signature {
     ret_span: Option<Span>,
     /// For methods taking `self`: the type of `self`, and where it is written.
     receiver: Option<(Ty, Span)>,
+    /// A method declared `priv`: only callable in the file that defines it.
+    private: bool,
 }
 
 #[derive(Clone)]
@@ -230,6 +269,13 @@ struct ParamSig {
 struct ConstInfo {
     /// `None` when the constant's own definition had an error.
     value: Option<hir::Expr>,
+}
+
+/// A top-level function declared in the first pass, whose signature is resolved later.
+#[derive(Clone, Copy)]
+enum FnSlot {
+    Plain(FuncId),
+    Generic(usize),
 }
 
 /// How a body is checked.
@@ -251,6 +297,8 @@ struct Body<'m> {
     self_ty: Option<Ty>,
     bindings: Vec<(String, Ty)>,
     mode: BodyMode,
+    /// For `@extern("symbol")`: the C function this one stands for.
+    extern_symbol: Option<String>,
 }
 
 /// Where diagnostics go, with switches to drop them.
@@ -311,6 +359,8 @@ struct Checker<'a, 'm> {
     enum_items: Vec<(EnumId, &'m ast::EnumDecl)>,
     trait_items: Vec<(TraitId, &'m ast::TraitDecl)>,
     const_items: Vec<(usize, &'m ast::ConstDecl)>,
+    fn_items: Vec<(&'m ast::Function, FnSlot)>,
+    impl_items: Vec<&'m ast::ImplDecl>,
     builtins: Option<hir::BuiltinTraits>,
     parse_error: Option<StructId>,
     /// The meaning of `Self` in the declaration or body being checked.
@@ -336,6 +386,15 @@ struct Checker<'a, 'm> {
     generic_variant_names: HashMap<String, Vec<(usize, usize)>>,
     /// How the body being checked is checked.
     mode: BodyMode,
+    /// The module whose scope `globals` holds.
+    current_module: usize,
+    /// Each module's name and top-level scope; the current module's scope is in `globals`.
+    module_names: Vec<String>,
+    module_scopes: Vec<HashMap<String, (Global, Span)>>,
+    /// Each module's own declarations, and whether each is `pub`.
+    exports: Vec<HashMap<String, (Global, Span, bool)>>,
+    /// Which module each source file is.
+    file_module: HashMap<FileId, usize>,
 }
 
 /// Per-function state while checking a body.
@@ -530,6 +589,8 @@ impl<'a, 'm> Checker<'a, 'm> {
             enum_items: Vec::new(),
             trait_items: Vec::new(),
             const_items: Vec::new(),
+            fn_items: Vec::new(),
+            impl_items: Vec::new(),
             builtins: None,
             parse_error: None,
             self_ty: None,
@@ -546,6 +607,11 @@ impl<'a, 'm> Checker<'a, 'm> {
             generic_setup_done: false,
             generic_variant_names: HashMap::new(),
             mode: BodyMode::Normal,
+            current_module: 0,
+            module_names: Vec::new(),
+            module_scopes: Vec::new(),
+            exports: Vec::new(),
+            file_module: HashMap::new(),
         }
     }
 
@@ -717,6 +783,19 @@ impl<'a, 'm> Checker<'a, 'm> {
                     _ => Ty::FLOAT,
                 }
             }
+            "i64" | "f64" => {
+                if !self.no_type_args(name, args, span) {
+                    return Ty::ERROR;
+                }
+                if name == "i64" { Ty::INT } else { Ty::FLOAT }
+            }
+            sized if crate::types::SizedKind::from_name(sized).is_some() => {
+                if !self.no_type_args(name, args, span) {
+                    return Ty::ERROR;
+                }
+                let kind = crate::types::SizedKind::from_name(sized).expect("checked");
+                self.types.sized(kind)
+            }
             "Self" => match self.self_ty {
                 Some(ty) => ty,
                 None => {
@@ -784,7 +863,7 @@ impl<'a, 'm> Checker<'a, 'm> {
                 ));
                 Ty::ERROR
             }
-            other => match self.globals.get(other).map(|(g, _)| *g) {
+            other => match self.type_global(other, span) {
                 Some(Global::Struct(id)) => {
                     self.no_type_args(other, args, span);
                     self.structs[id.0].ty
@@ -1029,6 +1108,7 @@ impl<'a, 'm> Checker<'a, 'm> {
         match self.types.kind(ty) {
             TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Param(_) => self.implements(ty, self.builtin().eq),
             TyKind::Error | TyKind::None | TyKind::Bool | TyKind::Int | TyKind::Float | TyKind::Str => true,
+            TyKind::Sized(_) => true,
             TyKind::List(t) | TyKind::Option(t) => self.equatable(*t),
             TyKind::Result(k, v) => self.equatable(*k) && self.equatable(*v),
             TyKind::Tuple(items) => items.iter().all(|t| self.equatable(*t)),
@@ -1041,6 +1121,7 @@ impl<'a, 'm> Checker<'a, 'm> {
     fn hashable(&self, ty: Ty) -> bool {
         match self.types.kind(ty) {
             TyKind::Error | TyKind::Int | TyKind::Bool | TyKind::Str => true,
+            TyKind::Sized(kind) => !kind.is_float(),
             TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Param(_) => self.implements(ty, self.builtin().hash),
             TyKind::Tuple(items) => items.iter().all(|t| self.hashable(*t)),
             _ => false,
@@ -1051,7 +1132,7 @@ impl<'a, 'm> Checker<'a, 'm> {
     /// tuples and lists of those, compared element by element.
     fn orderable(&self, ty: Ty) -> bool {
         match self.types.kind(ty) {
-            TyKind::Error | TyKind::Bool | TyKind::Int | TyKind::Float | TyKind::Str => true,
+            TyKind::Error | TyKind::Bool | TyKind::Int | TyKind::Float | TyKind::Str | TyKind::Sized(_) => true,
             TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Param(_) => self.implements(ty, self.builtin().ord),
             TyKind::Tuple(items) => items.iter().all(|t| self.orderable(*t)),
             TyKind::List(t) => self.orderable(*t),
@@ -1065,11 +1146,17 @@ impl<'a, 'm> Checker<'a, 'm> {
     fn function(&mut self, id: FuncId) -> Option<hir::Function> {
         let body = self.bodies[id.0].as_ref()?;
         let (ast, self_ty, bindings, mode) = (body.ast, body.self_ty, body.bindings.clone(), body.mode);
+        let extern_symbol = body.extern_symbol.clone();
         let signature = self.signatures[id.0].clone();
+        self.enter_module(self.module_of(ast.name.span));
+        if let Some(symbol) = extern_symbol {
+            return Some(self.extern_function(&signature, symbol));
+        }
         let generic = matches!(mode, BodyMode::GenericCheck | BodyMode::Skip)
             || bindings.iter().any(|(_, t)| self.types.contains_param(*t))
             || self_ty.is_some_and(|t| self.types.contains_param(t));
-        if mode == BodyMode::Skip {
+        if mode == BodyMode::Skip || !ast.has_body {
+            // Signatures only; a bodiless function that is not a valid `@extern` was reported.
             return Some(hir::Function {
                 name: signature.name,
                 params: Vec::new(),
@@ -1078,6 +1165,7 @@ impl<'a, 'm> Checker<'a, 'm> {
                 body: Vec::new(),
                 generic: true,
                 closure: false,
+                extern_symbol: None,
             });
         }
         let saved_mode = std::mem::replace(&mut self.mode, mode);
@@ -1116,6 +1204,7 @@ impl<'a, 'm> Checker<'a, 'm> {
             body,
             generic: false,
             closure: false,
+            extern_symbol: None,
         }
     }
 
@@ -1142,6 +1231,8 @@ impl<'a, 'm> Checker<'a, 'm> {
             Some((Global::GenericFunction(_), _)) => Some("a function"),
             Some((Global::GenericStruct(_), _)) => Some("a struct"),
             Some((Global::GenericEnum(_), _)) => Some("an enum"),
+            Some((Global::Module(_), _)) => Some("a module"),
+            Some((Global::Missing, _)) => Some("unknown"),
             // Built-in functions can be shadowed by local variables, as in Python.
             None if BUILTIN_CONSTRUCTORS.contains(&name) => Some("a built-in function"),
             None => None,

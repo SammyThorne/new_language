@@ -1,0 +1,30 @@
+# Milestone 5 exit program: the milestone 3 evaluator split into modules (calc/syntax.wb,
+# calc/parser.wb, calc/eval.wb), with private fields and methods behind a public function.
+# expect: 1 + 2 * 3 = 7.0
+# expect: (1 + 2) * 3 = 9.0
+# expect: x * (y - 0.5) = 8.0
+# expect: parsed: ((x * 2.0) + 1.0)
+# expect: 10 / (x - 4): error: division by zero
+# expect: z + 1: error: unknown variable 'z'
+# expect: (1 + 2: error: expected ')'
+# expect: 2 *: error: unexpected end of input
+
+import calc.syntax as syntax
+from calc.parser import parse
+from calc.eval import evaluate
+
+def run(text: str, env: dict[str, float]) -> Result[float]:
+    tree = parse(text)?
+    return evaluate(tree, env)
+
+def main():
+    env = {"x": 4.0, "y": 2.5}
+    for text in ["1 + 2 * 3", "(1 + 2) * 3", "x * (y - 0.5)"]:
+        print(f"{text} = {run(text, env).unwrap()}")
+    print("parsed:", syntax.show(parse("x * 2 + 1").unwrap()))
+    for text in ["10 / (x - 4)", "z + 1", "(1 + 2", "2 *"]:
+        match run(text, env):
+            case Ok(value):
+                print(f"{text} = {value}")
+            case Err(error):
+                print(f"{text}: error: {error.message()}")

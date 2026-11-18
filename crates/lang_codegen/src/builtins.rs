@@ -26,6 +26,18 @@ impl<'ctx> Codegen<'ctx, '_> {
             let value = self.expr(&args[0]);
             return Some(self.display_string(args[0].ty, value));
         }
+        if op == Builtin::Input {
+            let prompt = self.value(&args[0]);
+            let builder = self.builder_new();
+            let [ptr, len] = self.str_parts(prompt);
+            self.call_rt("lrt_builder_push", &[builder.into(), ptr, len]);
+            self.call_rt("lrt_builder_print", &[builder.into()]);
+            return self.call_rt("lrt_io_read_line", &[]);
+        }
+        if op == Builtin::NumConvert {
+            let value = self.value(&args[0]);
+            return Some(self.num_convert(args[0].ty, expr.ty, value));
+        }
         if op == Builtin::ListSortBy {
             self.sort_by(&args[0], &args[1], &args[2]);
             return None;
@@ -453,7 +465,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 });
                 self.b.build_load(self.cx.bool_type(), result, "").must()
             }
-            Builtin::ListSortBy => unreachable!("handled above"),
+            Builtin::ListSortBy | Builtin::Input | Builtin::NumConvert => unreachable!("handled above"),
         })
     }
 

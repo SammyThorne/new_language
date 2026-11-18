@@ -15,8 +15,14 @@ impl<'ctx> Codegen<'ctx, '_> {
 
     pub(crate) fn expr(&mut self, expr: &Expr) -> Option<BasicValueEnum<'ctx>> {
         Some(match &expr.kind {
-            ExprKind::Int(value) => self.i64(*value).into(),
-            ExprKind::Float(value) => self.cx.f64_type().const_float(*value).into(),
+            ExprKind::Int(value) => match self.kind(expr.ty) {
+                TyKind::Sized(kind) => self.int_type(kind.bits()).const_int(*value as u64, false).into(),
+                _ => self.i64(*value).into(),
+            },
+            ExprKind::Float(value) => match self.kind(expr.ty) {
+                TyKind::Sized(_) => self.cx.f32_type().const_float(*value).into(),
+                _ => self.cx.f64_type().const_float(*value).into(),
+            },
             ExprKind::Bool(value) => self.bool(*value).into(),
             ExprKind::Str(text) => self.str_const(text).into(),
             ExprKind::None => {
@@ -637,6 +643,12 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.build_int_compare(IntPredicate::NE, eq, self.i64(0), "").must()
             }
             TyKind::None => self.bool(true),
+            TyKind::Sized(kind) if kind.is_float() => {
+                self.b.build_float_compare(FloatPredicate::OEQ, a.into_float_value(), b.into_float_value(), "").must()
+            }
+            TyKind::Sized(_) => {
+                self.b.build_int_compare(IntPredicate::EQ, a.into_int_value(), b.into_int_value(), "").must()
+            }
             TyKind::Struct(_) | TyKind::Enum(_) => {
                 let eq = self.program.builtins.eq;
                 if let Some(function) = self.explicit_method(eq, ty, 0) {
@@ -676,6 +688,13 @@ impl<'ctx> Codegen<'ctx, '_> {
             TyKind::Int => self.b.build_int_compare(signed, a.into_int_value(), b.into_int_value(), "").must(),
             TyKind::Bool => self.b.build_int_compare(unsigned, a.into_int_value(), b.into_int_value(), "").must(),
             TyKind::Float => self.b.build_float_compare(float, a.into_float_value(), b.into_float_value(), "").must(),
+            TyKind::Sized(kind) if kind.is_float() => {
+                self.b.build_float_compare(float, a.into_float_value(), b.into_float_value(), "").must()
+            }
+            TyKind::Sized(kind) => {
+                let predicate = if kind.is_signed() { signed } else { unsigned };
+                self.b.build_int_compare(predicate, a.into_int_value(), b.into_int_value(), "").must()
+            }
             TyKind::Str => {
                 let [ap, al] = self.str_parts(a);
                 let [bp, bl] = self.str_parts(b);
@@ -748,6 +767,15 @@ impl<'ctx> Codegen<'ctx, '_> {
             TyKind::Float => {
                 self.call_rt("lrt_builder_push_float", &[builder.into(), value.unwrap()]);
             }
+            TyKind::Sized(kind) => {
+                let wide = self.widen(*kind, value.unwrap());
+                let function = match (kind.is_float(), kind.is_signed()) {
+                    (true, _) => "lrt_builder_push_float",
+                    (false, true) => "lrt_builder_push_int",
+                    (false, false) => "lrt_builder_push_uint",
+                };
+                self.call_rt(function, &[builder.into(), wide]);
+            }
             TyKind::Bool => {
                 let truth = self.bytes_const("True");
                 let falsehood = self.bytes_const("False");
@@ -768,6 +796,89 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let helper = self.helper(Helper::Push { repr }, ty);
                 let call = self.b.build_call(helper, &[builder.into(), value.unwrap().into()], "").must();
                 call.set_call_convention(crate::CALLCONV_FAST);
+            }
+        }
+    }
+
+    /// A sized number as an `int` (sign- or zero-extended) or, for `f32`, a `float`.
+    pub(crate) fn widen(
+        &mut self,
+        kind: lang_sema::types::SizedKind,
+        value: BasicValueEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        if kind.is_float() {
+            return self.b.build_float_ext(value.into_float_value(), self.cx.f64_type(), "").must().into();
+        }
+        let i64_type = self.cx.i64_type();
+        if kind.bits() == 64 {
+            return value;
+        }
+        if kind.is_signed() {
+            self.b.build_int_s_extend(value.into_int_value(), i64_type, "").must().into()
+        } else {
+            self.b.build_int_z_extend(value.into_int_value(), i64_type, "").must().into()
+        }
+    }
+
+    /// Convert a number between `int`, `float` and the sized types. Integers wrap; floats
+    /// truncate toward zero, saturating at the limits of `int` (NaN becomes 0).
+    pub(crate) fn num_convert(&mut self, from: Ty, to: Ty, value: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        use lang_sema::types::SizedKind;
+        // (is a float, bits, signed)
+        let shape = |this: &Self, ty: Ty| -> (bool, u32, bool) {
+            match this.kind(ty) {
+                TyKind::Int => (false, 64, true),
+                TyKind::Float => (true, 64, true),
+                TyKind::Sized(k) => (k.is_float(), k.bits(), k.is_signed()),
+                other => unreachable!("not a number: {other:?}"),
+            }
+        };
+        let (from_float, from_bits, from_signed) = shape(self, from);
+        let (to_float, to_bits, _) = shape(self, to);
+        let target = self.value_type(to);
+        match (from_float, to_float) {
+            (false, false) => {
+                let v = value.into_int_value();
+                let t = target.into_int_type();
+                if to_bits < from_bits {
+                    self.b.build_int_truncate(v, t, "").must().into()
+                } else if to_bits > from_bits && from_signed {
+                    self.b.build_int_s_extend(v, t, "").must().into()
+                } else if to_bits > from_bits {
+                    self.b.build_int_z_extend(v, t, "").must().into()
+                } else {
+                    v.into()
+                }
+            }
+            (false, true) => {
+                let v = value.into_int_value();
+                let t = target.into_float_type();
+                if from_signed {
+                    self.b.build_signed_int_to_float(v, t, "").must().into()
+                } else {
+                    self.b.build_unsigned_int_to_float(v, t, "").must().into()
+                }
+            }
+            (true, false) => {
+                let wide = if from_bits == 32 {
+                    self.b.build_float_ext(value.into_float_value(), self.cx.f64_type(), "").must().into()
+                } else {
+                    value
+                };
+                let as_int = self.call_rt("llvm.fptosi.sat.i64.f64", &[wide]).unwrap();
+                let _ = SizedKind::ALL;
+                self.num_convert(Ty::INT, to, as_int)
+            }
+            (true, true) => {
+                let v = value.into_float_value();
+                let t = target.into_float_type();
+                if to_bits < from_bits {
+                    self.b.build_float_trunc(v, t, "").must().into()
+                } else if to_bits > from_bits {
+                    self.b.build_float_ext(v, t, "").must().into()
+                } else {
+                    v.into()
+                }
             }
         }
     }

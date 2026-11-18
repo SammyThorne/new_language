@@ -1,0 +1,40 @@
+"""
+The running program: its command-line arguments, environment variables and exit status.
+
+    import os
+
+    for arg in os.args()[1:]:
+        print(arg)
+    home = os.getenv("HOME").unwrap_or("/")
+"""
+
+@extern("lrt_os_arg_count")
+def arg_count() -> int
+
+@extern("lrt_os_arg")
+def arg(index: int) -> str
+
+@extern("lrt_os_getenv")
+def getenv_raw(name: str) -> str?
+
+@extern("lrt_os_exit")
+def exit_raw(code: int)
+
+@extern("lrt_os_cwd")
+def cwd_raw() -> str
+
+pub def args() -> list[str]:
+    """The command-line arguments; the first is the program's own name."""
+    return [arg(i) for i in range(arg_count())]
+
+pub def getenv(name: str) -> str?:
+    """An environment variable, or `None` if it is not set."""
+    return getenv_raw(name)
+
+pub def exit(code: int):
+    """End the program now with an exit status. Standard output is flushed first."""
+    exit_raw(code)
+
+pub def cwd() -> str:
+    """The current working directory."""
+    return cwd_raw()

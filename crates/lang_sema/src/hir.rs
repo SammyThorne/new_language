@@ -132,6 +132,9 @@ pub struct Function {
     /// A lambda or nested function. It takes a hidden first argument, its environment: the
     /// cells of the variables it captures.
     pub closure: bool,
+    /// Bound to a C function with `@extern("symbol")`; it has no body. Code generation emits a
+    /// wrapper that converts the arguments to the C calling convention.
+    pub extern_symbol: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +180,13 @@ pub enum Stmt {
     },
     Break,
     Continue,
+    /// `with`: `object` holds the value; its `exit` method runs however the body is left,
+    /// including by `return`, `break`, `continue` and `?`.
+    With {
+        object: LocalId,
+        exit: FuncId,
+        body: Block,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -526,4 +536,9 @@ pub enum Builtin {
     /// `list.sort(key=f, reverse=r)`: args are the list, the key function or `None`, and the
     /// `reverse` flag.
     ListSortBy,
+    /// Convert between `int`, `float` and the sized number types; the target is the result
+    /// type. Integers wrap; floats convert to integers by truncating toward zero.
+    NumConvert,
+    /// `input()`: a line from standard input, or `None` at the end.
+    Input,
 }

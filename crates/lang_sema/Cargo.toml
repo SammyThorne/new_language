@@ -10,3 +10,4 @@ publish.workspace = true
 lang_diag.workspace = true
 lang_syntax.workspace = true
 lang_format.workspace = true
+lang_names.workspace = true

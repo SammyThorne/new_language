@@ -1,0 +1,31 @@
+"""The expression tree and the error type, shared by the parser and the evaluator."""
+
+pub enum Expr:
+    Num(value: float)
+    Var(name: str)
+    Add(left: Expr, right: Expr)
+    Sub(left: Expr, right: Expr)
+    Mul(left: Expr, right: Expr)
+    Div(left: Expr, right: Expr)
+
+pub struct EvalError:
+    reason: str
+
+impl Error for EvalError:
+    def message(self) -> str:
+        return self.reason
+
+pub def show(e: Expr) -> str:
+    match e:
+        case Num(value):
+            return str(value)
+        case Var(name):
+            return name
+        case Add(left, right):
+            return f"({show(left)} + {show(right)})"
+        case Sub(left, right):
+            return f"({show(left)} - {show(right)})"
+        case Mul(left, right):
+            return f"({show(left)} * {show(right)})"
+        case Div(left, right):
+            return f"({show(left)} / {show(right)})"
