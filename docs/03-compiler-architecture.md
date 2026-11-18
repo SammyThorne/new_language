@@ -9,8 +9,8 @@ A Cargo workspace. Few crates at first; split further only when compile times or
 | Path | Kind | Contents |
 |---|---|---|
 | `crates/lang_names` | library | The language name, CLI name, file extension and environment prefix as constants (see below) |
-| `crates/lang_syntax` | library | Source map, spans, lexer, AST, parser |
-| `crates/lang_diag` | library | Diagnostic type, rendering, error codes |
+| `crates/lang_diag` | library | Source map, spans, diagnostic type, rendering, error codes |
+| `crates/lang_syntax` | library | Tokens, lexer, AST, parser |
 | `crates/lang_sema` | library | Module graph, name resolution, type interner, type checker, trait tables, HIR, derivations, monomorphisation |
 | `crates/lang_codegen` | library | HIR to LLVM IR through `inkwell`, object emission |
 | `crates/lang_cli` | binary `weby` | Argument parsing, pipeline driver, linker invocation |
@@ -19,6 +19,8 @@ A Cargo workspace. Few crates at first; split further only when compile times or
 | `tests/` | data | End-to-end test programs and expected output ([07](07-testing-and-performance.md)) |
 | `bench/` | data | Benchmark programs in Weby, Go and Python |
 | `docs/` | markdown | These documents, later the language reference |
+
+Spans and the source map live in `lang_diag` rather than `lang_syntax`, so that every phase, the lexer included, can report diagnostics without a dependency cycle.
 
 `lang_sema` and `lang_syntax` must not depend on LLVM. That keeps `weby check` fast, keeps the frontend testable without LLVM installed, and lets a future language server reuse them.
 
@@ -45,9 +47,9 @@ After the first public release a rename also means keeping the old extension wor
 | Purpose | Crate | Notes |
 |---|---|---|
 | LLVM bindings | `inkwell` | Feature flag selects LLVM 19 |
-| Diagnostics rendering | `ariadne` or `codespan-reporting` | Pick one at M1; both render labelled source snippets |
+| Diagnostics rendering | Hand-written, in `lang_diag` | Chosen over `ariadne` and `codespan-reporting` at M0: plain text with no colours keeps golden tests stable, and it is about 100 lines |
 | CLI parsing | `clap` | |
-| Snapshot tests | `insta` | Lexer, parser, HIR and diagnostics goldens |
+| Snapshot tests | `insta`, if needed | Diagnostics goldens are plain `.stderr` files under `tests/ui`, regenerated with `WEBY_BLESS=1`; lexer and parser tests are ordinary assertions so far |
 | String interning | `lasso` or a small hand-written interner | |
 
 ## Pipeline

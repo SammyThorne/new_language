@@ -33,6 +33,17 @@ M0 ─ M1 ─ M2 ─ M3 ─ M4 ─ M5 ───┤      ├─ M8 ─ M9 ══ 
 
 M6 and M7 are independent of each other and can be done in either order or in parallel. M11 can run alongside M10. The hard dependencies behind the linear part: enums (M3) underpin `Option` and `Result` everywhere after; closures (M4) are needed by `spawn` and by route handlers; the import machinery (M5) is how standard library modules are found.
 
+## Progress
+
+As of 2026-11-18.
+
+| Milestone | State | Notes |
+|---|---|---|
+| M0 | Done | Workspace, runtime, LLVM object emission, linking, end-to-end test harness. Continuous integration is not set up, because the repository has no remote yet |
+| M1 | In progress | Done: the full layout lexer, parser with error recovery, diagnostics with golden tests, functions with typed parameters and returns, calls in any order, locals by assignment, `int` arithmetic (`+ - *`, wrapping), `bool` with `not`, `str` literals, `print`, `--emit` dumps, debug and release modes. Missing: `if`/`elif`/`else`, `while`, `for` over `range`, `break`/`continue`, comparison operators, `//` and `%` with their division-by-zero panic, `float`, definite assignment across branches, the first benchmark |
+
+Exit criteria checked so far: `weby run tests/run/hello.wb` prints `Hello, world!` in debug and release builds, and 17 diagnostic programs have golden tests.
+
 ## Milestones in detail
 
 ### M0 — Skeleton and toolchain (S)

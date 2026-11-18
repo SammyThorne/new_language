@@ -20,7 +20,7 @@ Each decision records what was chosen, why, what was rejected, and what evidence
 
 **Revisit if.** `inkwell` falls behind on a feature we need (statepoints for a precise GC are the likely case); then call `llvm-sys` directly for that feature only.
 
-**Verify at milestone 0.** That the current `inkwell` release has a feature flag for LLVM 19 and builds against `llvm-config-19`.
+**Verified at milestone 0 (2026-11-18).** `inkwell` 0.11 with the `llvm19-1-prefer-dynamic` feature builds against Debian's LLVM 19.1.7 and links the shared `libLLVM-19.so`. `llvm-sys` finds LLVM through `LLVM_SYS_191_PREFIX`, set in `.cargo/config.toml`.
 
 ### D3. Memory is managed by a tracing garbage collector; Boehm first
 
