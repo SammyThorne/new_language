@@ -40,3 +40,10 @@ struct ParseError:
 impl Error for ParseError:
     def message(self) -> str:
         return f"\"{self.text}\" is not a valid {self.expected}"
+
+trait Ord(Eq):
+    def cmp(self, other: Self) -> int
+
+trait Number(AddNumber, SubNumber, MulNumber, Ord):
+    """Implemented by `int` and `float`; a bound for generic arithmetic."""
+    pass

@@ -93,3 +93,10 @@ pub unsafe extern "C" fn lrt_alloc(size: i64, desc: *const TypeDesc) -> *mut u8 
     unsafe { *(ptr as *mut *const TypeDesc) = desc };
     ptr
 }
+
+/// Allocate zeroed, scanned memory with no descriptor: the cells of captured variables and the
+/// environments of closures.
+#[unsafe(no_mangle)]
+pub extern "C" fn lrt_alloc_raw(size: i64) -> *mut u8 {
+    alloc(size as usize)
+}

@@ -1,0 +1,16 @@
+struct Stack[T]:
+    items: list[T]
+
+impl[T] Stack[T]:
+    def new() -> Stack[T]:
+        return Stack(items=[])
+
+def empty[T]() -> list[T]:
+    return []
+
+def main():
+    s = Stack.new()
+    xs = empty()
+    ok: list[int] = empty()
+    print(ok)
+    t: Stack[int, str] = Stack(items=[1])

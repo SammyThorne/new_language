@@ -2,6 +2,11 @@ use super::*;
 use lang_diag::SourceMap;
 
 fn check_text(text: &str) -> (Option<hir::Program>, Vec<&'static str>) {
+    let (program, found) = check_messages(text);
+    (program, found.into_iter().map(|(code, _)| code).collect())
+}
+
+fn check_messages(text: &str) -> (Option<hir::Program>, Vec<(&'static str, String)>) {
     let mut sources = SourceMap::default();
     let file = sources.add("test.src", text);
     let mut diags = Diagnostics::default();
@@ -9,12 +14,12 @@ fn check_text(text: &str) -> (Option<hir::Program>, Vec<&'static str>) {
     let module = lang_syntax::parse(&tokens, &mut diags);
     assert!(!diags.has_errors(), "test program does not parse");
     let program = check(&module, &mut sources, "test", &mut diags);
-    (program, diags.sorted().iter().map(|d| d.code).collect())
+    (program, diags.sorted().iter().map(|d| (d.code, d.message.clone())).collect())
 }
 
 fn ok(text: &str) -> hir::Program {
-    let (program, codes) = check_text(text);
-    assert!(codes.is_empty(), "unexpected diagnostics {codes:?}");
+    let (program, found) = check_messages(text);
+    assert!(found.is_empty(), "unexpected diagnostics {found:?}");
     program.unwrap()
 }
 

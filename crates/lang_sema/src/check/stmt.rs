@@ -57,7 +57,16 @@ impl Checker<'_, '_> {
                 let diverges = matches!(checked.kind, hir::ExprKind::Builtin { op: hir::Builtin::Panic, .. });
                 (vec![hir::Stmt::Expr(checked)], diverges)
             }
-            ast::StmtKind::Match { subject, cases } => self.match_stmt(cx, subject, cases, stmt.span),
+            ast::StmtKind::Match { subject, cases } => {
+                let before = cx.narrowed.clone();
+                let result = self.match_stmt(cx, subject, cases, stmt.span);
+                cx.narrowed = before;
+                for case in cases {
+                    self.unnarrow_assigned(cx, &case.body);
+                }
+                result
+            }
+            ast::StmtKind::Def(function) => (self.nested_def(cx, function), false),
             ast::StmtKind::Pass => (Vec::new(), false),
             ast::StmtKind::Assign { target, ty, value } => (self.assign(cx, target, ty.as_ref(), value), false),
             ast::StmtKind::AugAssign { target, op, value } => (self.aug_assign(cx, target, *op, value), false),
@@ -116,11 +125,18 @@ impl Checker<'_, '_> {
         branches: &[(ast::Expr, Vec<ast::Stmt>)],
         otherwise: Option<&[ast::Stmt]>,
     ) -> (Vec<hir::Stmt>, bool) {
-        let (cond, body) = &branches[0];
-        let cond = self.condition(cx, cond);
+        let (cond_ast, body) = &branches[0];
+        let cond = self.condition(cx, cond_ast);
+        // Flow narrowing: `x is not None` makes `x` a plain value in the branch where it holds.
+        let when_true = self.narrowings(cx, cond_ast, true);
+        let when_false = self.narrowings(cx, cond_ast, false);
+        let narrowed_before = cx.narrowed.clone();
         let before = cx.assigned.clone();
+        cx.narrowed.extend(when_true);
         let (then, then_diverges) = self.block(cx, body);
         let then_state = std::mem::replace(&mut cx.assigned, before);
+        let then_narrowed = std::mem::replace(&mut cx.narrowed, narrowed_before.clone());
+        cx.narrowed.extend(when_false);
         let (otherwise, else_diverges) = if branches.len() > 1 {
             self.if_chain(cx, &branches[1..], otherwise)
         } else if let Some(body) = otherwise {
@@ -129,23 +145,36 @@ impl Checker<'_, '_> {
             (Vec::new(), false)
         };
         let else_state = std::mem::take(&mut cx.assigned);
+        let else_narrowed = std::mem::take(&mut cx.narrowed);
         cx.assigned = match (then_diverges, else_diverges) {
             (true, true) | (false, true) => then_state,
             (true, false) => else_state,
             (false, false) => merge(&then_state, &else_state),
+        };
+        cx.narrowed = match (then_diverges, else_diverges) {
+            (true, true) => narrowed_before,
+            (false, true) => then_narrowed,
+            (true, false) => else_narrowed,
+            (false, false) => then_narrowed.into_iter().filter(|l| else_narrowed.contains(l)).collect(),
         };
         (vec![hir::Stmt::If { cond, then, otherwise }], then_diverges && else_diverges)
     }
 
     fn while_loop(&mut self, cx: &mut FnCx, cond: &ast::Expr, body: &[ast::Stmt]) -> (Vec<hir::Stmt>, bool) {
         let infinite = matches!(cond.kind, ast::ExprKind::Bool(true));
+        // Narrowing holds inside the loop only for variables the loop does not assign.
+        self.unnarrow_assigned(cx, body);
+        let cond_ast = cond;
         let cond = self.condition(cx, cond);
         let before = cx.assigned.clone();
+        let narrowed_before = cx.narrowed.clone();
+        cx.narrowed.extend(self.narrowings(cx, cond_ast, true));
         cx.loops.push(false);
         let (body, _) = self.block(cx, body);
         let has_break = cx.loops.pop().unwrap_or(false);
         // The body may run zero times, so nothing it assigns counts afterwards.
         cx.assigned = before;
+        cx.narrowed = narrowed_before;
         (vec![hir::Stmt::While { cond, body }], infinite && !has_break)
     }
 
@@ -157,12 +186,15 @@ impl Checker<'_, '_> {
         body: &[ast::Stmt],
     ) -> (Vec<hir::Stmt>, bool) {
         let (source, elem) = self.loop_source(cx, iter);
+        self.unnarrow_assigned(cx, body);
         let before = cx.assigned.clone();
+        let narrowed_before = cx.narrowed.clone();
         let target = self.loop_target(cx, target, elem);
         cx.loops.push(false);
         let (body, _) = self.block(cx, body);
         cx.loops.pop();
         cx.assigned = before;
+        cx.narrowed = narrowed_before;
         match target {
             Some(target) => (vec![hir::Stmt::For { target, source, body }], false),
             None => (Vec::new(), false),
@@ -170,11 +202,11 @@ impl Checker<'_, '_> {
     }
 
     /// What a `for` loop iterates over, and the element type.
-    fn loop_source(&mut self, cx: &mut FnCx, iter: &ast::Expr) -> (hir::LoopSource, Ty) {
+    pub(super) fn loop_source(&mut self, cx: &mut FnCx, iter: &ast::Expr) -> (hir::LoopSource, Ty) {
         if let ast::ExprKind::Call { callee, args } = &iter.kind {
             if let ast::ExprKind::Name(name) = &callee.kind
                 && name == "range"
-                && !cx.scope.contains_key("range")
+                && !cx.sees("range")
             {
                 return (self.range(cx, args, iter.span), Ty::INT);
             }
@@ -209,12 +241,42 @@ impl Checker<'_, '_> {
             TyKind::Str => (hir::LoopSource::Str(iterable), Ty::STR),
             TyKind::Dict(key, _) => (hir::LoopSource::DictKeys(iterable), key),
             TyKind::Error => (hir::LoopSource::List(iterable), Ty::ERROR),
+            TyKind::Struct(_) | TyKind::Enum(_) if self.iterator_parts(iterable.ty).is_some() => {
+                // An iterator: a type with `def next(self) -> T?`.
+                let (next, elem) = self.iterator_parts(iterable.ty).expect("checked");
+                (hir::LoopSource::Iterator { iterator: iterable, next }, elem)
+            }
+            TyKind::Struct(_) | TyKind::Enum(_) if self.method_of(iterable.ty, "iter").is_some() => {
+                // An iterable: a type with `def iter(self)` returning an iterator.
+                let iter = self.method_of(iterable.ty, "iter").expect("checked");
+                let iterator_ty = self.signatures[iter.0].ret;
+                let Some((next, elem)) = self.iterator_parts(iterator_ty) else {
+                    let (shown, it) = (self.display(iterable.ty), self.display(iterator_ty));
+                    self.error(
+                        Diagnostic::error(
+                            codes::NOT_ITERABLE,
+                            format!(
+                                "cannot loop over `{shown}`: its `iter` method returns `{it}`, which is not an iterator"
+                            ),
+                            span,
+                            "not iterable",
+                        )
+                        .with_help(
+                            "an iterator has a method `def next(self) -> T?` that returns `None` when it is finished",
+                        ),
+                    );
+                    return (hir::LoopSource::List(iterable), Ty::ERROR);
+                };
+                let call =
+                    hir::Expr { kind: hir::ExprKind::Call { func: iter, args: vec![iterable] }, ty: iterator_ty, span };
+                (hir::LoopSource::Iterator { iterator: call, next }, elem)
+            }
             _ => {
                 let shown = self.display(iterable.ty);
                 let help = if iterable.ty == Ty::INT {
                     "to count, loop over `range(n)`"
                 } else {
-                    "loops work over `range(...)`, lists, strings and dicts"
+                    "loops work over `range(...)`, lists, strings, dicts, and types with `def next(self) -> T?` or `def iter(self)`"
                 };
                 self.error(
                     Diagnostic::error(
@@ -263,7 +325,28 @@ impl Checker<'_, '_> {
         }
     }
 
-    fn loop_target(&mut self, cx: &mut FnCx, target: &ast::Target, elem: Ty) -> Option<hir::LoopTarget> {
+    /// A method taking `self` with no other parameters, from the type's own methods or a
+    /// trait implementation.
+    pub(super) fn method_of(&self, ty: Ty, name: &str) -> Option<crate::hir::FuncId> {
+        let func = match self.inherent.get(&(ty, name.to_string())) {
+            Some(&func) => Some(func),
+            None => match self.trait_methods.get(&(ty, name.to_string())).map(Vec::as_slice) {
+                Some([(trait_id, index)]) => self.impl_of(*trait_id, ty).and_then(|i| self.impls[i].methods[*index]),
+                _ => None,
+            },
+        }?;
+        let signature = &self.signatures[func.0];
+        (signature.receiver.is_some() && signature.params.is_empty()).then_some(func)
+    }
+
+    /// For an iterator type: its `next` method and the element type.
+    fn iterator_parts(&self, ty: Ty) -> Option<(crate::hir::FuncId, Ty)> {
+        let next = self.method_of(ty, "next")?;
+        let elem = self.types.option_inner(self.signatures[next.0].ret)?;
+        Some((next, elem))
+    }
+
+    pub(super) fn loop_target(&mut self, cx: &mut FnCx, target: &ast::Target, elem: Ty) -> Option<hir::LoopTarget> {
         match &target.kind {
             ast::TargetKind::Name(name) => Some(hir::LoopTarget::Local(self.bind_loop_name(cx, name, elem)?)),
             ast::TargetKind::Tuple(items) => {
@@ -444,6 +527,18 @@ impl Checker<'_, '_> {
             return vec![hir::Stmt::Expr(self.expr(cx, value, None))];
         }
 
+        if !cx.scope.contains_key(&name.name) && cx.sees(&name.name) {
+            self.error(
+                Diagnostic::error(
+                    codes::ASSIGN_CAPTURED,
+                    format!("cannot assign to `{}`, which belongs to the enclosing function", name.name),
+                    name.span,
+                    "assigned inside a nested function",
+                )
+                .with_help("a nested function can read the enclosing function's variables but not reassign them; keep changing state in a list or a struct field"),
+            );
+            return vec![hir::Stmt::Expr(self.expr(cx, value, None))];
+        }
         if let Some(&local) = cx.scope.get(&name.name) {
             let declared = cx.locals[local.0].ty;
             let decl_span = cx.info[local.0].decl_span;
@@ -462,6 +557,18 @@ impl Checker<'_, '_> {
             }
             let reason = Some((decl_span, format!("`{}` was declared as `{shown}` here", name.name)));
             let value = self.expect(cx, value, declared, reason);
+            if cx.locals[local.0].capture.is_some() {
+                self.error(Diagnostic::error(
+                    codes::ASSIGN_CAPTURED,
+                    format!("cannot assign to `{}`, which belongs to the enclosing function", name.name),
+                    name.span,
+                    "assigned inside a nested function",
+                ));
+            }
+            // Assigning a plain value keeps a narrowed optional narrowed; anything else ends it.
+            if !matches!(value.kind, hir::ExprKind::Some(_)) {
+                cx.narrowed.retain(|l| *l != local);
+            }
             cx.set_assigned(local);
             return vec![hir::Stmt::Assign { place: hir::Place::Local(local), value }];
         }
@@ -728,6 +835,19 @@ impl Checker<'_, '_> {
         let span = target.span.to(value.span);
         match &target.kind {
             ast::TargetKind::Name(name) => {
+                if !cx.scope.contains_key(&name.name) && cx.sees(&name.name) {
+                    self.error(
+                        Diagnostic::error(
+                            codes::ASSIGN_CAPTURED,
+                            format!("cannot assign to `{}`, which belongs to the enclosing function", name.name),
+                            name.span,
+                            "assigned inside a nested function",
+                        )
+                        .with_help("a nested function can read the enclosing function's variables but not reassign them; keep changing state in a list or a struct field"),
+                    );
+                    self.expr(cx, value, None);
+                    return Vec::new();
+                }
                 if !cx.scope.contains_key(&name.name) {
                     if let Some(kind) = self.global_kind(&name.name) {
                         self.error(Diagnostic::error(
@@ -752,6 +872,14 @@ impl Checker<'_, '_> {
                 }
                 let current = self.name_expr(cx, &name.name, name.span);
                 let local = cx.scope[&name.name];
+                if cx.locals[local.0].capture.is_some() {
+                    self.error(Diagnostic::error(
+                        codes::ASSIGN_CAPTURED,
+                        format!("cannot assign to `{}`, which belongs to the enclosing function", name.name),
+                        name.span,
+                        "assigned inside a nested function",
+                    ));
+                }
                 let declared = cx.locals[local.0].ty;
                 let result = self.binary_with(cx, op, current, value, span);
                 let result = self.coerce(result, declared, None);

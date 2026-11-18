@@ -4,7 +4,7 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 
 ## Status
 
-Milestones 0 to 3 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
+Milestones 0 to 4 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
 
 ```python
 trait Shape(Display):
@@ -44,17 +44,21 @@ def main():
 
 | Works now | Not yet |
 |---|---|
-| Functions with type hints, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | Generics, lambdas, closures (milestone 4) |
-| `int` (wrapping), `float` (printed exactly as Python prints it), `bool`, `str` | Modules and imports (milestone 5) |
-| Structs, enums, methods, traits with default methods, trait objects | Tasks, JSON, HTTP, WebSockets (milestones 6 to 9) |
-| `match` with exhaustiveness checking; `Result`, `?`, `int.parse` | Sets |
-| `@derive(Eq, Hash, Display, Copy)`, `@frozen`, operator traits | |
+| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | Modules and imports (milestone 5) |
+| `int` (wrapping), `float` (printed exactly as Python prints it), `bool`, `str` | Tasks, JSON, HTTP, WebSockets (milestones 6 to 9) |
+| Structs, enums, methods, traits with default methods, trait objects | Sets, generic traits, methods with their own type parameters |
+| Generic functions, structs, enums and `impl` blocks with bounds (`T: Ord`), inferred type arguments | |
+| Lambdas, nested functions with captured variables, functions and bound methods as values | |
+| List and dict comprehensions; `for` over user iterators (`next`) and iterables (`iter`) | |
+| `match` with exhaustiveness checking; `Result`, `?`, `int.parse`; narrowing after `x is not None` | |
+| `@derive(Eq, Hash, Display, Copy, Ord)`, `@frozen`, operator traits | |
 | `list`, `dict`, tuples, optionals (`T?`), f-strings with Python's format specs | |
+| `min`, `max`, `sum`, `sorted` and `sort` with `key=` and `reverse=`, `enumerate`, `zip`, `any`, `all` | |
 | Panics with source locations; diagnostics with source snippets | |
 
 Constructs from the design that are not implemented are rejected with an error saying they are not supported yet.
 
-Compiled programs run between 1.2x and 1.8x Go's time on allocation, collections, strings and dynamic dispatch, and faster than Go on plain function calls. Against CPython they are 11x to 35x faster, except about 2x on string-and-dict-heavy code; see [bench/README.md](bench/README.md).
+Compiled programs run between 1.2x and 1.7x Go's time on allocation, collections, strings and dynamic dispatch, and faster than Go on plain function calls and on sorting with a key function. Against CPython they are 11x to 35x faster, except about 2x on string-and-dict-heavy code; see [bench/README.md](bench/README.md).
 
 ## Building and running
 

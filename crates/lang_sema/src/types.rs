@@ -54,6 +54,11 @@ pub enum TyKind {
     /// `Self` while checking a trait's default methods, before they are copied into each
     /// implementation. Only the trait's own methods can be used on it.
     SelfType(TraitId),
+    /// A type parameter, while checking a generic declaration against its bounds. The number
+    /// indexes the type checker's table of parameters.
+    Param(u32),
+    /// A function value: `def(int, str) -> bool`.
+    Func(Vec<Ty>, Ty),
 }
 
 #[derive(Debug)]
@@ -63,6 +68,7 @@ pub struct Types {
     struct_names: Vec<String>,
     enum_names: Vec<String>,
     trait_names: Vec<String>,
+    param_names: Vec<String>,
     /// The built-in `Error` trait, so that `Result[T, Error]` can be shown as `Result[T]`.
     pub error_trait: Option<TraitId>,
 }
@@ -81,6 +87,7 @@ impl Types {
             struct_names: Vec::new(),
             enum_names: Vec::new(),
             trait_names: Vec::new(),
+            param_names: Vec::new(),
             error_trait: None,
         };
         for (kind, expected) in [
@@ -104,6 +111,11 @@ impl Types {
         self.kinds.push(kind.clone());
         self.ids.insert(kind, ty);
         ty
+    }
+
+    /// The type with this structure, if it has been created.
+    pub fn lookup(&self, kind: &TyKind) -> Option<Ty> {
+        self.ids.get(kind).copied()
     }
 
     pub fn kind(&self, ty: Ty) -> &TyKind {
@@ -148,6 +160,17 @@ impl Types {
         let id = EnumId(self.enum_names.len());
         self.enum_names.push(name.to_string());
         (id, self.intern(TyKind::Enum(id)))
+    }
+
+    /// A new type parameter; `index` is its position in the type checker's table.
+    pub fn add_param(&mut self, name: &str) -> (u32, Ty) {
+        let index = self.param_names.len() as u32;
+        self.param_names.push(name.to_string());
+        (index, self.intern(TyKind::Param(index)))
+    }
+
+    pub fn func(&mut self, params: Vec<Ty>, ret: Ty) -> Ty {
+        self.intern(TyKind::Func(params, ret))
     }
 
     pub fn add_trait(&mut self, name: &str) -> TraitId {
@@ -195,6 +218,27 @@ impl Types {
             TyKind::Enum(id) => self.enum_name(*id).to_string(),
             TyKind::Dyn(id) => self.trait_name(*id).to_string(),
             TyKind::SelfType(_) => "Self".to_string(),
+            TyKind::Param(index) => self.param_names[*index as usize].clone(),
+            TyKind::Func(params, ret) => {
+                let params = params.iter().map(|t| self.display(*t)).collect::<Vec<_>>().join(", ");
+                if *ret == Ty::NONE {
+                    format!("def({params})")
+                } else {
+                    format!("def({params}) -> {}", self.display(*ret))
+                }
+            }
+        }
+    }
+
+    /// Whether the type mentions a type parameter anywhere.
+    pub fn contains_param(&self, ty: Ty) -> bool {
+        match self.kind(ty) {
+            TyKind::Param(_) => true,
+            TyKind::List(t) | TyKind::Option(t) => self.contains_param(*t),
+            TyKind::Dict(k, v) | TyKind::Result(k, v) => self.contains_param(*k) || self.contains_param(*v),
+            TyKind::Tuple(items) => items.iter().any(|t| self.contains_param(*t)),
+            TyKind::Func(params, ret) => params.iter().any(|t| self.contains_param(*t)) || self.contains_param(*ret),
+            _ => false,
         }
     }
 
@@ -204,6 +248,7 @@ impl Types {
             TyKind::List(t) | TyKind::Option(t) => self.contains_error(*t),
             TyKind::Dict(k, v) | TyKind::Result(k, v) => self.contains_error(*k) || self.contains_error(*v),
             TyKind::Tuple(items) => items.iter().any(|t| self.contains_error(*t)),
+            TyKind::Func(params, ret) => params.iter().any(|t| self.contains_error(*t)) || self.contains_error(*ret),
             _ => false,
         }
     }

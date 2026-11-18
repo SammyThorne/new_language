@@ -26,6 +26,10 @@ impl<'ctx> Codegen<'ctx, '_> {
             let value = self.expr(&args[0]);
             return Some(self.display_string(args[0].ty, value));
         }
+        if op == Builtin::ListSortBy {
+            self.sort_by(&args[0], &args[1], &args[2]);
+            return None;
+        }
 
         // Every other builtin has value-typed arguments, evaluated left to right.
         let values: Vec<BasicValueEnum<'ctx>> = args.iter().map(|a| self.value(a)).collect();
@@ -353,6 +357,183 @@ impl<'ctx> Codegen<'ctx, '_> {
                 copy.into()
             }
             Builtin::Hash => self.emit_hash(args[0].ty, values[0]).into(),
+            Builtin::Cmp => self.emit_cmp(args[0].ty, values[0], values[1]).into(),
+            Builtin::Min | Builtin::Max => {
+                // Ties keep the earlier value, as in Python.
+                let ty = args[0].ty;
+                let mut best = values[0];
+                for value in &values[1..] {
+                    let cmp = self.emit_cmp(ty, *value, best);
+                    let predicate = if op == Builtin::Min { IntPredicate::SLT } else { IntPredicate::SGT };
+                    let better = self.b.build_int_compare(predicate, cmp, self.i64(0), "").must();
+                    best = self.b.build_select(better, *value, best, "").must();
+                }
+                best
+            }
+            Builtin::MinList | Builtin::MaxList => {
+                let elem = elem_ty.unwrap();
+                let list = values[0].into_pointer_value();
+                let len = self.list_len(list);
+                let empty = self.b.build_int_compare(IntPredicate::EQ, len, self.i64(0), "").must();
+                let name = if op == Builtin::MinList { "min" } else { "max" };
+                self.check(empty, |this| this.panic_message(&format!("{name}() of an empty list"), span));
+                let best = self.alloca(self.value_type(elem), "best");
+                let first = self.list_elem_unchecked(list, self.i64(0), elem);
+                self.b.build_store(best, first).must();
+                self.list_loop(list, elem, Some(1), |this, _, item| {
+                    let current = this.b.build_load(this.value_type(elem), best, "").must();
+                    let cmp = this.emit_cmp(elem, item, current);
+                    let predicate = if op == Builtin::MinList { IntPredicate::SLT } else { IntPredicate::SGT };
+                    let better = this.b.build_int_compare(predicate, cmp, this.i64(0), "").must();
+                    let chosen = this.b.build_select(better, item, current, "").must();
+                    this.b.build_store(best, chosen).must();
+                });
+                self.b.build_load(self.value_type(elem), best, "").must()
+            }
+            Builtin::Sum => {
+                let elem = elem_ty.unwrap();
+                let list = values[0].into_pointer_value();
+                let total = self.alloca(self.value_type(elem), "total");
+                let start = values.get(1).copied().unwrap_or_else(|| self.value_type(elem).const_zero());
+                self.b.build_store(total, start).must();
+                self.list_loop(list, elem, None, |this, _, item| {
+                    let current = this.b.build_load(this.value_type(elem), total, "").must();
+                    let sum: BasicValueEnum = if elem == lang_sema::types::Ty::INT {
+                        this.b.build_int_add(current.into_int_value(), item.into_int_value(), "").must().into()
+                    } else {
+                        this.b.build_float_add(current.into_float_value(), item.into_float_value(), "").must().into()
+                    };
+                    this.b.build_store(total, sum).must();
+                });
+                self.b.build_load(self.value_type(elem), total, "").must()
+            }
+            Builtin::Enumerate => {
+                let elem = elem_ty.unwrap();
+                let list = values[0].into_pointer_value();
+                let desc = self.desc(expr.ty);
+                let len = self.list_len(list);
+                let out = self.call_rt("lrt_list_new", &[desc.into(), len.into()]).unwrap().into_pointer_value();
+                self.list_loop(list, elem, None, |this, i, item| {
+                    let pair = this.make_tuple(&[i.into(), item]);
+                    this.list_push(out, pair);
+                });
+                out.into()
+            }
+            Builtin::Zip => {
+                let TyKind::List(other_elem) = *self.kind(args[1].ty) else { unreachable!() };
+                let (a, b) = (values[0].into_pointer_value(), values[1].into_pointer_value());
+                let len_a = self.list_len(a);
+                let len_b = self.list_len(b);
+                let shorter = self.b.build_int_compare(IntPredicate::SLT, len_a, len_b, "").must();
+                let len = self.b.build_select(shorter, len_a, len_b, "").must().into_int_value();
+                let desc = self.desc(expr.ty);
+                let out = self.call_rt("lrt_list_new", &[desc.into(), len.into()]).unwrap().into_pointer_value();
+                let elem = elem_ty.unwrap();
+                self.count_loop(len, |this, i| {
+                    let x = this.list_elem_unchecked(a, i, elem);
+                    let y = this.list_elem_unchecked(b, i, other_elem);
+                    let pair = this.make_tuple(&[x, y]);
+                    this.list_push(out, pair);
+                });
+                out.into()
+            }
+            Builtin::Any | Builtin::All => {
+                let list = values[0].into_pointer_value();
+                let any = op == Builtin::Any;
+                let elem = elem_ty.unwrap();
+                let result = self.alloca(self.cx.bool_type().into(), "result");
+                self.b.build_store(result, self.bool(!any)).must();
+                self.list_loop(list, elem, None, |this, _, item| {
+                    let flag = item.into_int_value();
+                    let decisive = if any { flag } else { this.b.build_not(flag, "").must() };
+                    let current = this.b.build_load(this.cx.bool_type(), result, "").must().into_int_value();
+                    let decided = this.bool(any);
+                    let next = this.b.build_select(decisive, decided, current, "").must();
+                    this.b.build_store(result, next).must();
+                });
+                self.b.build_load(self.cx.bool_type(), result, "").must()
+            }
+            Builtin::ListSortBy => unreachable!("handled above"),
         })
+    }
+
+    /// Run `body` for each element of a list from index `from` (default 0), with the index.
+    pub(crate) fn list_loop(
+        &mut self,
+        list: inkwell::values::PointerValue<'ctx>,
+        elem: lang_sema::types::Ty,
+        from: Option<i64>,
+        mut body: impl FnMut(&mut Self, inkwell::values::IntValue<'ctx>, BasicValueEnum<'ctx>),
+    ) {
+        let counter = self.alloca(self.cx.i64_type().into(), "i");
+        self.b.build_store(counter, self.i64(from.unwrap_or(0))).must();
+        let (header, body_block, exit) = (self.block("loop"), self.block("body"), self.block("end"));
+        self.b.build_unconditional_branch(header).must();
+        self.b.position_at_end(header);
+        let i = self.b.build_load(self.cx.i64_type(), counter, "").must().into_int_value();
+        let len = self.list_len(list);
+        let more = self.b.build_int_compare(IntPredicate::SLT, i, len, "").must();
+        self.b.build_conditional_branch(more, body_block, exit).must();
+        self.b.position_at_end(body_block);
+        let item = self.list_elem_unchecked(list, i, elem);
+        body(self, i, item);
+        let next = self.b.build_int_add(i, self.i64(1), "").must();
+        self.b.build_store(counter, next).must();
+        self.b.build_unconditional_branch(header).must();
+        self.b.position_at_end(exit);
+    }
+
+    /// Run `body` for each index below `count`.
+    fn count_loop(
+        &mut self,
+        count: inkwell::values::IntValue<'ctx>,
+        mut body: impl FnMut(&mut Self, inkwell::values::IntValue<'ctx>),
+    ) {
+        let counter = self.alloca(self.cx.i64_type().into(), "i");
+        self.b.build_store(counter, self.i64(0)).must();
+        let (header, body_block, exit) = (self.block("loop"), self.block("body"), self.block("end"));
+        self.b.build_unconditional_branch(header).must();
+        self.b.position_at_end(header);
+        let i = self.b.build_load(self.cx.i64_type(), counter, "").must().into_int_value();
+        let more = self.b.build_int_compare(IntPredicate::SLT, i, count, "").must();
+        self.b.build_conditional_branch(more, body_block, exit).must();
+        self.b.position_at_end(body_block);
+        body(self, i);
+        let next = self.b.build_int_add(i, self.i64(1), "").must();
+        self.b.build_store(counter, next).must();
+        self.b.build_unconditional_branch(header).must();
+        self.b.position_at_end(exit);
+    }
+
+    /// `list.sort(key=f, reverse=r)`: compute each key once, then sort by the keys. The sort is
+    /// stable, also in reverse.
+    fn sort_by(&mut self, list: &Expr, key: &Expr, reverse: &Expr) {
+        let TyKind::List(elem) = *self.kind(list.ty) else { unreachable!() };
+        let list_value = self.value(list).into_pointer_value();
+        let key_value = self.expr(key);
+        let reverse_value = self.value(reverse).into_int_value();
+        let reverse_value = self.b.build_int_z_extend(reverse_value, self.cx.i64_type(), "").must();
+        let (keys, key_ty) = match key_value {
+            None => (self.ptr_type().const_null(), elem),
+            Some(function) => {
+                let TyKind::Func(_, key_ty) = *self.kind(key.ty) else { unreachable!() };
+                let list_of_keys = self
+                    .program
+                    .types
+                    .lookup(&TyKind::List(key_ty))
+                    .expect("the type checker creates the list type of sort keys");
+                let desc = self.desc(list_of_keys);
+                let len = self.list_len(list_value);
+                let keys = self.call_rt("lrt_list_new", &[desc.into(), len.into()]).unwrap().into_pointer_value();
+                let key_fn_ty = key.ty;
+                self.list_loop(list_value, elem, None, |this, _, item| {
+                    let k = this.call_function_value(key_fn_ty, function, &[item]).expect("keys have values");
+                    this.list_push(keys, k);
+                });
+                (keys, key_ty)
+            }
+        };
+        let cmp = self.helper(Helper::CmpPtr, key_ty).as_global_value().as_pointer_value();
+        self.call_rt("lrt_list_sort_by", &[list_value.into(), keys.into(), cmp.into(), reverse_value.into()]);
     }
 }

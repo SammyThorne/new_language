@@ -39,10 +39,18 @@ pub enum Visibility {
     Priv,
 }
 
+/// A type parameter: `T` or `T: Ord + Display`.
+#[derive(Debug, Clone)]
+pub struct GenericParam {
+    pub name: Ident,
+    pub bounds: Vec<Ident>,
+}
+
 #[derive(Debug)]
 pub struct Function {
     pub visibility: Visibility,
     pub name: Ident,
+    pub generics: Vec<GenericParam>,
     /// Set for methods whose first parameter is `self`; holds the span of `self`.
     pub self_param: Option<Span>,
     /// Parameters other than `self`.
@@ -58,6 +66,7 @@ pub struct StructDecl {
     pub annotations: Vec<Annotation>,
     pub visibility: Visibility,
     pub name: Ident,
+    pub generics: Vec<GenericParam>,
     pub fields: Vec<FieldDecl>,
 }
 
@@ -75,6 +84,7 @@ pub struct EnumDecl {
     pub annotations: Vec<Annotation>,
     pub visibility: Visibility,
     pub name: Ident,
+    pub generics: Vec<GenericParam>,
     pub variants: Vec<VariantDecl>,
 }
 
@@ -97,10 +107,14 @@ pub struct TraitDecl {
 
 #[derive(Debug)]
 pub struct ImplDecl {
+    /// `impl[T] ...`: type parameters for implementing a generic type.
+    pub generics: Vec<GenericParam>,
     /// `impl Trait for Type:`; `None` for inherent methods, `impl Type:`.
     pub trait_name: Option<Ident>,
     /// The type the methods belong to.
     pub target: Ident,
+    /// Type arguments of the target: `T` in `impl[T] Stack[T]:`.
+    pub target_args: Vec<TypeExpr>,
     pub methods: Vec<Function>,
 }
 
@@ -124,6 +138,8 @@ pub struct Param {
     /// `None` when the hint is missing. That is a type error, not a syntax error, so the
     /// parser accepts it and the type checker reports it.
     pub ty: Option<TypeExpr>,
+    /// Evaluated at each call that leaves the argument out.
+    pub default: Option<Expr>,
 }
 
 #[derive(Debug)]
@@ -140,6 +156,8 @@ pub enum TypeExprKind {
     Optional(Box<TypeExpr>),
     /// `None`, as in `-> None`.
     None,
+    /// `def(int, str) -> bool`; no return type means `None`.
+    Func { params: Vec<TypeExpr>, ret: Option<Box<TypeExpr>> },
 }
 
 #[derive(Debug)]
@@ -182,6 +200,8 @@ pub enum StmtKind {
         subject: Expr,
         cases: Vec<Case>,
     },
+    /// A function defined inside another, which can use the enclosing function's variables.
+    Def(Box<Function>),
     Break,
     Continue,
     /// `pass`: does nothing; fills a block that needs no statements.
@@ -295,6 +315,30 @@ pub enum ExprKind {
     },
     /// `expr?`
     Try(Box<Expr>),
+    /// `lambda x, y: body`
+    Lambda {
+        params: Vec<Ident>,
+        body: Box<Expr>,
+    },
+    /// `[element for target in iter if condition]`
+    ListComp {
+        element: Box<Expr>,
+        clauses: Vec<CompClause>,
+    },
+    /// `{key: value for target in iter if condition}`
+    DictComp {
+        key: Box<Expr>,
+        value: Box<Expr>,
+        clauses: Vec<CompClause>,
+    },
+}
+
+/// One `for ... in ... if ...` clause of a comprehension.
+#[derive(Debug)]
+pub struct CompClause {
+    pub target: Target,
+    pub iter: Expr,
+    pub conditions: Vec<Expr>,
 }
 
 #[derive(Debug)]

@@ -101,6 +101,12 @@ pub const BAD_IMPL: &str = "E0328";
 pub const BAD_PATTERN: &str = "E0329";
 /// An annotation that does not exist or cannot be used here.
 pub const BAD_ANNOTATION: &str = "E0330";
+/// A type argument that does not implement a trait its type parameter requires.
+pub const UNSATISFIED_BOUND: &str = "E0331";
+/// Assigning, from a nested function or lambda, to a variable of the enclosing function.
+pub const ASSIGN_CAPTURED: &str = "E0332";
+/// A call to a function value with keyword arguments, or other misuse of a function value.
+pub const BAD_FUNCTION_VALUE: &str = "E0333";
 
 /// A variable that is assigned but never read.
 pub const UNUSED_VARIABLE: &str = "W0001";

@@ -313,6 +313,30 @@ Each decision records what was chosen, why, what was rejected, and what evidence
 
 **Revisit if.** A benchmark of `match`-heavy code (an interpreter loop, a protocol parser) shows the repeated tests in a profile.
 
+### D32. Generics are monomorphised, and each template is checked once against its bounds
+
+A generic function, struct, enum or `impl` block is checked once with its type parameters as opaque types that only support what their bounds provide: `T: Ord` allows `<`, `T: Display` allows printing, `T: Number` allows `+`, `-` and `*`. Errors are reported from that check. Each use with concrete types then creates an instance, checked again without reporting and compiled like hand-written code, so generic code runs as fast as code written for one type. Type arguments are inferred from the arguments of a call (lambdas last, once their parameter types are known) and from the expected type, or written out: `Stack[int].new()`, `first_or[str]([], "")`. A derived trait on a generic type applies to an instance when every type argument has the trait, as if each parameter had that bound. Built-in types implement the prelude traits that describe what they support (`int` is `Number`, `Ord`, `Hash`, `Display`), so `largest([3, 1, 2])` works with `T: Ord`.
+
+### D33. Methods do not have their own type parameters yet
+
+`impl[T] Stack[T]:` gives methods the type's parameters, but a method cannot add one of its own (`def map[U](self, ...)`). Top-level generic functions cover the same needs. Allowing it is a small extension of the same machinery, deferred until a use needs it.
+
+### D34. Iteration is by method names, not by generic traits
+
+`for x in value` works when the value's type has `def next(self) -> T?` (an iterator) or `def iter(self)` returning an iterator. The plan named `Iterable[T]` and `Iterator[T]` traits, but traits cannot take type parameters yet. The method protocol gives the same static dispatch and the same syntax for users; it can become a pair of traits when generic traits arrive, without changing user code.
+
+### D35. Closures capture variables by reference and cannot reassign them
+
+A lambda or nested `def` sees the enclosing function's variables as they are when it runs, as in Python: a captured variable lives in a heap cell shared by the function and its closures. A closure may read captured variables and change the objects they refer to, but assigning to one is an error (E0332), where Python would need `nonlocal`. This keeps closures safe to hand to tasks later (D20) and removes a classic source of confusion. Lambdas take their parameter types from the function type expected where they appear; a lambda with parameters and no such context is an error that suggests `def`.
+
+### D36. Function values are a code pointer and an environment
+
+A value of type `def(A) -> R` is two words: code that takes the environment first, then the arguments. Named functions and bound methods (`staff[0].summary`) used as values get small adapter functions, so every function value is called the same way. Built-in functions such as `len` can be values where a function type is expected (`sorted(words, key=len)`).
+
+### D37. Flow narrowing of optional variables
+
+After `if x is not None:` (or `is None` with an early return), and on the right of `x is not None and ...`, a local `x: T?` reads as a `T`. Narrowing ends where `x` may be assigned `None` again: at an assignment of an optional value, and for the whole of a loop or `match` that assigns it. Only local variables narrow, not fields, since another reference could change a field. `x.unwrap()` still works on a narrowed `x`.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

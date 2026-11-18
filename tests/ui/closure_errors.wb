@@ -1,0 +1,13 @@
+def apply(f: def(int) -> int, x: int) -> int:
+    return f(x)
+
+def main():
+    double = lambda x: x * 2
+    total = 0
+    def add(n: int):
+        total = total + n
+    print(apply(lambda x, y: x + y, 1))
+    print(apply(lambda x: "text", 1))
+    print(apply(len, 1))
+    g: def(int) -> int = lambda n: n + 1
+    print(g(x=1))

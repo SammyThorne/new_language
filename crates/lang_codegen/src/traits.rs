@@ -204,7 +204,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         }
         for (index, method) in methods.iter().enumerate() {
             let function = match method {
-                Some(func) => self.functions[func.0],
+                Some(func) => self.function_value(*func),
                 None => self.derived_method(trait_id, index, ty),
             };
             entries.push(function.as_global_value().as_pointer_value());
@@ -284,7 +284,7 @@ impl<'ctx> Codegen<'ctx, '_> {
     /// The function implementing method `index` of `trait_id` for `ty`, if written by hand.
     pub(crate) fn explicit_method(&self, trait_id: TraitId, ty: Ty, index: usize) -> Option<FunctionValue<'ctx>> {
         let implementation = self.program.impl_of(trait_id, ty)?;
-        implementation.methods.get(index).copied().flatten().map(|f| self.functions[f.0])
+        implementation.methods.get(index).copied().flatten().map(|f| self.function_value(f))
     }
 
     pub(crate) fn call_method(

@@ -123,7 +123,10 @@ def to_json_list[T: ToJson + Display](items: list[T]) -> str:
 - Type parameters are declared in `[...]` after the name. Bounds follow `:` and combine with `+`.
 - Inside a generic body, a value of type `T` supports only what its bounds provide. Bodies are type-checked once, against the bounds, before any instantiation, so errors are reported at the definition and not at each use.
 - Each distinct set of type arguments produces its own compiled copy.
-- Before M4 the built-in collections are generic by compiler special-casing, so milestones 2 and 3 do not wait for user generics.
+- Type arguments are inferred from a call's arguments and from the expected type, or written explicitly: `Page[int](items=[], next_cursor=None)`, `Stack[str].new()`, `first[int]([])`.
+- Built-in types implement the prelude traits that describe what they support: `int` and `float` are `Number` (`+`, `-`, `*`) and `Ord`; `str`, `bool` and tuples of orderable types are `Ord`; and so on. `Number` is declared as `trait Number(AddNumber, SubNumber, MulNumber, Ord)`.
+- The built-in collections are generic by compiler special-casing, and `Option` and `Result` are built in.
+- Implemented in M4 with two limits: methods cannot declare their own type parameters (D33), and traits cannot take type parameters, so iteration is a method protocol (D34).
 
 Not supported: higher-kinded types, const generics, variadic generics, specialisation, generic methods on trait objects.
 

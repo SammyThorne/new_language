@@ -24,6 +24,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         let (label, fn_type, fast) = match helper {
             Helper::Eq => ("eq", self.cx.bool_type().fn_type(&[value.into(), value.into()], false), true),
             Helper::Hash => ("hash", i64_type.fn_type(&[value.into()], false), true),
+            Helper::Cmp => ("cmp", i64_type.fn_type(&[value.into(), value.into()], false), true),
             Helper::EqPtr => ("eq_ptr", i64_type.fn_type(&[ptr.into(), ptr.into()], false), false),
             Helper::HashPtr => ("hash_ptr", i64_type.fn_type(&[ptr.into()], false), false),
             Helper::CmpPtr => ("cmp_ptr", i64_type.fn_type(&[ptr.into(), ptr.into()], false), false),
@@ -65,6 +66,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 this.b.build_return(Some(&cmp)).must();
             }
             Helper::Push { repr } => this.push_body(function, ty, repr),
+            Helper::Cmp => this.cmp_body(function, ty),
         });
         function
     }
@@ -274,7 +276,8 @@ impl<'ctx> Codegen<'ctx, '_> {
         }
     }
 
-    fn emit_cmp(&mut self, ty: Ty, a: BasicValueEnum<'ctx>, b: BasicValueEnum<'ctx>) -> IntValue<'ctx> {
+    /// Three-way comparison: negative, zero or positive.
+    pub(crate) fn emit_cmp(&mut self, ty: Ty, a: BasicValueEnum<'ctx>, b: BasicValueEnum<'ctx>) -> IntValue<'ctx> {
         let (less, greater) = match self.kind(ty) {
             TyKind::Int => (
                 self.b.build_int_compare(IntPredicate::SLT, a.into_int_value(), b.into_int_value(), "").must(),
@@ -293,10 +296,132 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let [bp, bl] = self.str_parts(b);
                 return self.call_rt("lrt_str_cmp", &[ap, al, bp, bl]).unwrap().into_int_value();
             }
-            other => unreachable!("cannot order {other:?}"),
+            TyKind::Struct(_) | TyKind::Enum(_) => {
+                let ord = self.program.builtins.ord;
+                if let Some(function) = self.explicit_method(ord, ty, 0) {
+                    return self.call_method(function, &[a, b]).unwrap().into_int_value();
+                }
+                return self.call_cmp_helper(ty, a, b);
+            }
+            _ => return self.call_cmp_helper(ty, a, b),
         };
+        self.sign(less, greater)
+    }
+
+    fn sign(&mut self, less: IntValue<'ctx>, greater: IntValue<'ctx>) -> IntValue<'ctx> {
         let upper = self.b.build_select(greater, self.i64(1), self.i64(0), "").must().into_int_value();
         self.b.build_select(less, self.i64(-1), upper, "").must().into_int_value()
+    }
+
+    fn call_cmp_helper(&mut self, ty: Ty, a: BasicValueEnum<'ctx>, b: BasicValueEnum<'ctx>) -> IntValue<'ctx> {
+        let helper = self.helper(Helper::Cmp, ty);
+        let call = self.b.build_call(helper, &[a.into(), b.into()], "").must();
+        call.set_call_convention(crate::CALLCONV_FAST);
+        call.try_as_basic_value().basic().unwrap().into_int_value()
+    }
+
+    /// Return `cmp` from the helper being generated if it is not zero; otherwise continue.
+    fn return_if_unequal(&mut self, cmp: IntValue<'ctx>) {
+        let unequal = self.b.build_int_compare(IntPredicate::NE, cmp, self.i64(0), "").must();
+        let (out, next) = (self.block("differ"), self.block("same"));
+        self.b.build_conditional_branch(unequal, out, next).must();
+        self.b.position_at_end(out);
+        self.b.build_return(Some(&cmp)).must();
+        self.b.position_at_end(next);
+    }
+
+    /// Lexicographic comparison: tuples and lists element by element, structs field by field,
+    /// enums by variant order and then fields (a derived `Ord`).
+    fn cmp_body(&mut self, function: FunctionValue<'ctx>, ty: Ty) {
+        let a = function.get_nth_param(0).unwrap();
+        let b = function.get_nth_param(1).unwrap();
+        match self.kind(ty).clone() {
+            TyKind::Tuple(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    let x = self.b.build_extract_value(a.into_struct_value(), index as u32, "").must();
+                    let y = self.b.build_extract_value(b.into_struct_value(), index as u32, "").must();
+                    let cmp = self.emit_cmp(*item, x, y);
+                    self.return_if_unequal(cmp);
+                }
+            }
+            TyKind::List(elem) => {
+                let (la, lb) = (a.into_pointer_value(), b.into_pointer_value());
+                let len_a = self.list_len(la);
+                let len_b = self.list_len(lb);
+                let shorter = self.b.build_int_compare(IntPredicate::SLT, len_a, len_b, "").must();
+                let common = self.b.build_select(shorter, len_a, len_b, "").must().into_int_value();
+                let counter = self.alloca(self.cx.i64_type().into(), "i");
+                self.b.build_store(counter, self.i64(0)).must();
+                let (header, body, exit) = (self.block("loop"), self.block("body"), self.block("end"));
+                self.b.build_unconditional_branch(header).must();
+                self.b.position_at_end(header);
+                let i = self.b.build_load(self.cx.i64_type(), counter, "").must().into_int_value();
+                let more = self.b.build_int_compare(IntPredicate::SLT, i, common, "").must();
+                self.b.build_conditional_branch(more, body, exit).must();
+                self.b.position_at_end(body);
+                let x = self.list_elem_unchecked(la, i, elem);
+                let y = self.list_elem_unchecked(lb, i, elem);
+                let cmp = self.emit_cmp(elem, x, y);
+                self.return_if_unequal(cmp);
+                let next = self.b.build_int_add(i, self.i64(1), "").must();
+                self.b.build_store(counter, next).must();
+                self.b.build_unconditional_branch(header).must();
+                self.b.position_at_end(exit);
+                let less = self.b.build_int_compare(IntPredicate::SLT, len_a, len_b, "").must();
+                let greater = self.b.build_int_compare(IntPredicate::SGT, len_a, len_b, "").must();
+                let result = self.sign(less, greater);
+                self.b.build_return(Some(&result)).must();
+                return;
+            }
+            TyKind::Struct(id) => {
+                for index in 0..self.program.structs[id.0].fields.len() {
+                    let field_ty = self.program.structs[id.0].fields[index].ty;
+                    let x = self.struct_field(ty, index, a);
+                    let y = self.struct_field(ty, index, b);
+                    let cmp = self.emit_cmp(field_ty, x, y);
+                    self.return_if_unequal(cmp);
+                }
+            }
+            TyKind::Enum(id) => {
+                let tag_a = self.enum_tag(ty, a);
+                let tag_b = self.enum_tag(ty, b);
+                let less = self.b.build_int_compare(IntPredicate::SLT, tag_a, tag_b, "").must();
+                let greater = self.b.build_int_compare(IntPredicate::SGT, tag_a, tag_b, "").must();
+                let by_tag = self.sign(less, greater);
+                self.return_if_unequal(by_tag);
+                let done = self.block("done");
+                self.for_each_variant(ty, a, done, |this, variant| {
+                    for field in 0..this.program.enums[id.0].variants[variant].fields.len() {
+                        let field_ty = this.program.enums[id.0].variants[variant].fields[field].ty;
+                        let x = this.variant_field(ty, variant, field, a);
+                        let y = this.variant_field(ty, variant, field, b);
+                        let cmp = this.emit_cmp(field_ty, x, y);
+                        this.return_if_unequal(cmp);
+                    }
+                });
+                self.b.position_at_end(done);
+            }
+            TyKind::Option(inner) => {
+                // `None` sorts first.
+                let a_some = self.opt_is_some(ty, a);
+                let b_some = self.opt_is_some(ty, b);
+                let less = self.b.build_int_compare(IntPredicate::ULT, a_some, b_some, "").must();
+                let greater = self.b.build_int_compare(IntPredicate::UGT, a_some, b_some, "").must();
+                let by_presence = self.sign(less, greater);
+                self.return_if_unequal(by_presence);
+                let (both, done) = (self.block("both"), self.block("done"));
+                self.b.build_conditional_branch(a_some, both, done).must();
+                self.b.position_at_end(both);
+                let x = self.opt_inner(ty, a);
+                let y = self.opt_inner(ty, b);
+                let cmp = self.emit_cmp(inner, x, y);
+                self.b.build_return(Some(&cmp)).must();
+                self.b.position_at_end(done);
+            }
+            other => unreachable!("cannot order {other:?}"),
+        }
+        let zero = self.i64(0);
+        self.b.build_return(Some(&zero)).must();
     }
 
     fn push_body(&mut self, function: FunctionValue<'ctx>, ty: Ty, repr: bool) {

@@ -16,10 +16,4 @@ error[E0101]: `with` statements are not supported yet
 5 |     with open("data.txt") as f:
   |     ^^^^ not supported yet
 
-error[E0101]: `lambda` expressions are not supported yet
- --> tests/ui/not_supported_yet.wb:7:14
-  |
-7 |     double = lambda x: x * 2
-  |              ^^^^^^ not supported yet
-
-error: could not compile `tests/ui/not_supported_yet.wb` due to 4 errors
+error: could not compile `tests/ui/not_supported_yet.wb` due to 3 errors

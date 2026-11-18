@@ -1,0 +1,149 @@
+# expect: Stack[1, 2, 3] 3 3
+# expect: 3 2 1
+# expect: Stack['hello'] hello None
+# expect: Pair(first='x', second=10) Pair(first=10, second='x') True
+# expect: first
+# expect: [1, 3, 4, 5, 8, 9]
+# expect: ['ann', 'mia', 'zoe']
+# expect: 9 c Version(major=1, minor=10)
+# expect: None
+# expect: 6 0.75
+# expect: count: 3 pair: Pair(first='x', second=10)
+# expect: 2.5 none
+# expect: 2 1
+# expect: True False Version(major=3, minor=1)
+"""Generic structs, enums, functions and impl blocks, with bounds (milestone 4 exit program)."""
+
+struct Stack[T]:
+    items: list[T]
+
+impl[T] Stack[T]:
+    def new() -> Stack[T]:
+        return Stack(items=[])
+
+    def push(self, item: T):
+        self.items.append(item)
+
+    def pop(self) -> T?:
+        if len(self.items) == 0:
+            return None
+        return self.items.pop()
+
+    def peek(self) -> T?:
+        if len(self.items) == 0:
+            return None
+        return self.items[-1]
+
+    def size(self) -> int:
+        return len(self.items)
+
+impl[T: Display] Display for Stack[T]:
+    def to_str(self) -> str:
+        return f"Stack{self.items}"
+
+@derive(Eq, Display, Hash)
+struct Pair[A, B]:
+    first: A
+    second: B
+
+impl[A, B] Pair[A, B]:
+    def swap(self) -> Pair[B, A]:
+        return Pair(first=self.second, second=self.first)
+
+enum Tree[T]:
+    Leaf
+    Node(left: Tree[T], value: T, right: Tree[T])
+
+def insert[T: Ord](tree: Tree[T], value: T) -> Tree[T]:
+    match tree:
+        case Leaf:
+            return Node(Leaf, value, Leaf)
+        case Node(left, v, right):
+            if value < v:
+                return Node(insert(left, value), v, right)
+            return Node(left, v, insert(right, value))
+
+def in_order[T](tree: Tree[T], out: list[T]):
+    match tree:
+        case Leaf:
+            pass
+        case Node(left, v, right):
+            in_order(left, out)
+            out.append(v)
+            in_order(right, out)
+
+def largest[T: Ord](items: list[T]) -> T?:
+    if len(items) == 0:
+        return None
+    best = items[0]
+    for item in items:
+        if item > best:
+            best = item
+    return best
+
+def total[T: Number](items: list[T], zero: T) -> T:
+    result = zero
+    for item in items:
+        result = result + item
+    return result
+
+def describe[T: Display](label: str, value: T) -> str:
+    return f"{label}: {value}"
+
+def first_or[T](items: list[T], default: T) -> T:
+    if len(items) > 0:
+        return items[0]
+    return default
+
+def count_matching[T: Eq](items: list[T], wanted: T) -> int:
+    count = 0
+    for item in items:
+        if item == wanted:
+            count += 1
+    return count
+
+@derive(Eq, Ord, Display)
+struct Version:
+    major: int
+    minor: int
+
+def main():
+    s: Stack[int] = Stack.new()
+    s.push(1)
+    s.push(2)
+    s.push(3)
+    print(s, s.size(), s.peek())
+    print(s.pop(), s.pop(), s.size())
+
+    words = Stack[str].new()
+    words.push("hello")
+    print(words, words.pop(), words.pop())
+
+    p = Pair(first="x", second=10)
+    q = p.swap()
+    print(p, q, p == Pair(first="x", second=10))
+    seen = {p: "first"}
+    print(seen[Pair("x", 10)])
+
+    tree: Tree[int] = Leaf
+    for n in [5, 3, 8, 1, 4, 9]:
+        tree = insert(tree, n)
+    ordered: list[int] = []
+    in_order(tree, ordered)
+    print(ordered)
+
+    names = Tree[str].Leaf
+    for name in ["mia", "ann", "zoe"]:
+        names = insert(names, name)
+    sorted_names: list[str] = []
+    in_order(names, sorted_names)
+    print(sorted_names)
+
+    print(largest([3, 9, 2]), largest(["b", "c", "a"]), largest([Version(1, 2), Version(1, 10), Version(0, 99)]))
+    empty: list[float] = []
+    print(largest(empty))
+    print(total([1, 2, 3], 0), total([0.5, 0.25], 0.0))
+    print(describe("count", 3), describe("pair", p))
+    print(first_or(empty, 2.5), first_or[str]([], "none"))
+    print(count_matching(["a", "b", "a"], "a"), count_matching([Version(1, 0)], Version(1, 0)))
+    print(Version(1, 2) < Version(1, 10), Version(2, 0) <= Version(1, 99), max(Version(3, 1), Version(3, 0)))

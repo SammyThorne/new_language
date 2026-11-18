@@ -1,6 +1,7 @@
 //! Expressions, operators, and the representations of lists, dicts, tuples and optionals.
 
 use crate::{Codegen, Helper, Must};
+use inkwell::types::BasicType;
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, IntValue, PointerValue};
 use inkwell::{FloatPredicate, IntPredicate};
 use lang_diag::Span;
@@ -34,7 +35,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 for arg in args {
                     values.push(self.value(arg).into());
                 }
-                let call = self.b.build_call(self.functions[func.0], &values, "").must();
+                let call = self.b.build_call(self.function_value(*func), &values, "").must();
                 if *func != self.program.entry {
                     call.set_call_convention(crate::CALLCONV_FAST);
                 }
@@ -215,7 +216,112 @@ impl<'ctx> Codegen<'ctx, '_> {
                 return self.dyn_call(receiver, *trait_id, path, *method, args);
             }
             ExprKind::Try { value, conversion } => return self.try_value(value, conversion),
+            ExprKind::Closure { func, captures } => {
+                let code = self.function_value(*func).as_global_value().as_pointer_value();
+                let env = if captures.is_empty() {
+                    self.ptr_type().const_null()
+                } else {
+                    let size = self.i64(8 * captures.len() as i64);
+                    let env = self.call_rt("lrt_alloc_raw", &[size.into()]).unwrap().into_pointer_value();
+                    for (index, local) in captures.iter().enumerate() {
+                        let cell = self.local_cell(*local);
+                        // SAFETY (LLVM): the environment was allocated with one pointer per capture.
+                        let at = unsafe {
+                            self.b.build_in_bounds_gep(self.ptr_type(), env, &[self.i64(index as i64)], "").must()
+                        };
+                        self.b.build_store(at, cell).must();
+                    }
+                    env
+                };
+                self.make_dyn(code, env)
+            }
+            ExprKind::FuncRef(func) => {
+                let adapter = self.adapter(*func, false).as_global_value().as_pointer_value();
+                self.make_dyn(adapter, self.ptr_type().const_null())
+            }
+            ExprKind::BoundMethod { receiver, func } => {
+                let receiver = self.value(receiver).into_pointer_value();
+                let adapter = self.adapter(*func, true).as_global_value().as_pointer_value();
+                self.make_dyn(adapter, receiver)
+            }
+            ExprKind::CallValue { callee, args } => {
+                let callee_value = self.value(callee);
+                let values: Vec<BasicValueEnum> = args.iter().map(|a| self.value(a)).collect();
+                return self.call_function_value(callee.ty, callee_value, &values);
+            }
+            ExprKind::Block { stmts, value } => {
+                self.stmts(stmts);
+                return self.expr(value);
+            }
         })
+    }
+
+    /// The LLVM type of the code of a function value: environment first, then the arguments.
+    fn closure_fn_type(&self, ty: Ty) -> inkwell::types::FunctionType<'ctx> {
+        let TyKind::Func(params, ret) = self.kind(ty) else { unreachable!("not a function type") };
+        let mut types: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![self.ptr_type().into()];
+        types.extend(params.iter().map(|p| -> inkwell::types::BasicMetadataTypeEnum { self.value_type(*p).into() }));
+        match self.llty(*ret) {
+            Some(ret) => ret.fn_type(&types, false),
+            None => self.cx.void_type().fn_type(&types, false),
+        }
+    }
+
+    /// Call a function value of type `ty`.
+    pub(crate) fn call_function_value(
+        &mut self,
+        ty: Ty,
+        callee: BasicValueEnum<'ctx>,
+        args: &[BasicValueEnum<'ctx>],
+    ) -> Option<BasicValueEnum<'ctx>> {
+        let pair = callee.into_struct_value();
+        let code = self.b.build_extract_value(pair, 0, "code").must().into_pointer_value();
+        let env = self.b.build_extract_value(pair, 1, "env").must();
+        let mut values: Vec<BasicMetadataValueEnum> = vec![env.into()];
+        values.extend(args.iter().map(|a| -> BasicMetadataValueEnum { (*a).into() }));
+        let fn_type = self.closure_fn_type(ty);
+        let call = self.b.build_indirect_call(fn_type, code, &values, "").must();
+        call.set_call_convention(crate::CALLCONV_FAST);
+        call.try_as_basic_value().basic()
+    }
+
+    /// A function with the closure calling convention that calls `func`: ignoring the
+    /// environment, or (`bound`) passing it as the receiver.
+    fn adapter(&mut self, func: lang_sema::hir::FuncId, bound: bool) -> inkwell::values::FunctionValue<'ctx> {
+        if let Some(&adapter) = self.adapters.get(&(func, bound)) {
+            return adapter;
+        }
+        let target = self.function_value(func);
+        let function = &self.program.functions[func.0];
+        let skip = usize::from(bound);
+        let params: Vec<Ty> = function.params.iter().skip(skip).map(|l| function.locals[l.0].ty).collect();
+        let mut types: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![self.ptr_type().into()];
+        types.extend(params.iter().map(|p| -> inkwell::types::BasicMetadataTypeEnum { self.value_type(*p).into() }));
+        let fn_type = match self.llty(function.ret) {
+            Some(ret) => ret.fn_type(&types, false),
+            None => self.cx.void_type().fn_type(&types, false),
+        };
+        let name = format!("{}.adapter", function.name);
+        let adapter = self.module.add_function(&name, fn_type, Some(inkwell::module::Linkage::Private));
+        adapter.set_call_conventions(crate::CALLCONV_FAST);
+        adapter.add_attribute(inkwell::attributes::AttributeLoc::Function, self.nounwind);
+        self.adapters.insert((func, bound), adapter);
+        self.in_function(adapter, |this| {
+            let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
+            if bound {
+                args.push(adapter.get_nth_param(0).unwrap().into());
+            }
+            args.extend(adapter.get_param_iter().skip(1).map(BasicMetadataValueEnum::from));
+            let call = this.b.build_call(target, &args, "").must();
+            if func != this.program.entry {
+                call.set_call_convention(crate::CALLCONV_FAST);
+            }
+            match call.try_as_basic_value().basic() {
+                Some(value) => this.b.build_return(Some(&value)).must(),
+                None => this.b.build_return(None).must(),
+            };
+        });
+        adapter
     }
 
     // ---- control-flow values ------------------------------------------------------------
@@ -541,7 +647,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 call.set_call_convention(crate::CALLCONV_FAST);
                 call.try_as_basic_value().basic().unwrap().into_int_value()
             }
-            TyKind::Dict(..) | TyKind::Dyn(_) | TyKind::SelfType(_) => {
+            TyKind::Dict(..) | TyKind::Dyn(_) | TyKind::SelfType(_) | TyKind::Func(..) => {
                 let i64_type = self.cx.i64_type();
                 let x = self.b.build_ptr_to_int(a.into_pointer_value(), i64_type, "").must();
                 let y = self.b.build_ptr_to_int(b.into_pointer_value(), i64_type, "").must();
@@ -553,11 +659,12 @@ impl<'ctx> Codegen<'ctx, '_> {
                 call.set_call_convention(crate::CALLCONV_FAST);
                 call.try_as_basic_value().basic().unwrap().into_int_value()
             }
-            TyKind::Error => unreachable!(),
+            TyKind::Error | TyKind::Param(_) => unreachable!(),
         }
     }
 
-    /// `<`, `<=`, `>`, `>=` on numbers, booleans and strings.
+    /// `<`, `<=`, `>`, `>=`: directly on numbers, booleans and strings; through a three-way
+    /// comparison on tuples, lists and types with `Ord`.
     fn compare(&mut self, op: BinaryOp, ty: Ty, a: BasicValueEnum<'ctx>, b: BasicValueEnum<'ctx>) -> IntValue<'ctx> {
         let (signed, unsigned, float) = match op {
             BinaryOp::Lt => (IntPredicate::SLT, IntPredicate::ULT, FloatPredicate::OLT),
@@ -575,7 +682,10 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let cmp = self.call_rt("lrt_str_cmp", &[ap, al, bp, bl]).unwrap().into_int_value();
                 self.b.build_int_compare(signed, cmp, self.i64(0), "").must()
             }
-            other => unreachable!("cannot order {other:?}"),
+            _ => {
+                let cmp = self.emit_cmp(ty, a, b);
+                self.b.build_int_compare(signed, cmp, self.i64(0), "").must()
+            }
         }
     }
 

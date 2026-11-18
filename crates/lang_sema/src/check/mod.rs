@@ -18,7 +18,9 @@
 //! methods (`builtins.rs`), and `match` patterns with exhaustiveness (`patterns.rs`).
 
 mod builtins;
+mod closures;
 mod expr;
+mod generics;
 mod items;
 mod patterns;
 mod stmt;
@@ -36,7 +38,24 @@ pub const PRELUDE: &str = include_str!("../prelude.lang");
 pub const PRELUDE_NAME: &str = "<prelude>";
 
 /// Functions provided by the compiler rather than by source code.
-const BUILTIN_FUNCTIONS: &[&str] = &["print", "len", "str", "int", "float", "abs", "panic", "range"];
+const BUILTIN_FUNCTIONS: &[&str] = &[
+    "print",
+    "len",
+    "str",
+    "int",
+    "float",
+    "abs",
+    "panic",
+    "range",
+    "min",
+    "max",
+    "sum",
+    "sorted",
+    "enumerate",
+    "zip",
+    "any",
+    "all",
+];
 
 /// Constructors of the built-in enums.
 const BUILTIN_CONSTRUCTORS: &[&str] = &["Some", "Ok", "Err"];
@@ -72,20 +91,42 @@ pub fn check(
     }
     checker.find_builtins();
     checker.resolve_declarations();
+    checker.check_consts();
     checker.register_derives();
     for m in modules {
         checker.collect_functions(m);
     }
+    checker.finish_generic_setup();
     checker.check_impl_requirements();
     checker.check_derives();
     checker.check_pending_hashable();
-    checker.check_consts();
     checker.check_field_defaults();
     let entry = checker.check_main(module);
-    let functions: Vec<hir::Function> =
-        (0..checker.bodies.len()).map(|index| checker.function(FuncId(index))).collect();
+    // Checking bodies can instantiate generic functions and types, adding more bodies.
+    let mut functions: Vec<Option<hir::Function>> = Vec::new();
+    let mut index = 0;
+    while index < checker.bodies.len() {
+        let function = checker.function(FuncId(index));
+        functions.resize_with(checker.bodies.len().max(index + 1), || None);
+        functions[index] = function;
+        index += 1;
+    }
+    functions.resize_with(checker.bodies.len(), || None);
+    for (id, function) in std::mem::take(&mut checker.closures) {
+        functions[id.0] = Some(function);
+    }
+    let functions: Vec<hir::Function> = functions.into_iter().map(|f| f.expect("every function was checked")).collect();
     checker.check_trait_defaults();
     checker.check_pending_hashable();
+    if checker.diags.error_count() == errors_before
+        && let Some(diagnostic) = checker.diags.suppressed.take()
+    {
+        // An error that only shows up in an instance of generic code (or a copy of a trait's
+        // default method) was not reported when the original was checked; report it now.
+        checker.diags.out.push(diagnostic.with_help(
+            "this error is in generic code or a trait's default method, for the types used at one of its uses",
+        ));
+    }
     if checker.diags.error_count() > errors_before {
         return None;
     }
@@ -99,6 +140,10 @@ enum Global {
     Enum(EnumId),
     Trait(TraitId),
     Const(usize),
+    /// Indexes into the generic templates.
+    GenericFunction(usize),
+    GenericStruct(usize),
+    GenericEnum(usize),
 }
 
 struct StructInfo {
@@ -107,6 +152,8 @@ struct StructInfo {
     ty: Ty,
     fields: Vec<FieldInfo>,
     frozen: bool,
+    /// An instance of a generic struct with type parameters still in its arguments.
+    generic: bool,
 }
 
 #[derive(Clone)]
@@ -123,6 +170,7 @@ struct EnumInfo {
     span: Span,
     ty: Ty,
     variants: Vec<VariantInfo>,
+    generic: bool,
 }
 
 struct VariantInfo {
@@ -175,6 +223,8 @@ struct ParamSig {
     ty: Ty,
     /// The type hint, or the parameter name when the hint is missing.
     hint_span: Span,
+    /// Used when a call leaves the argument out.
+    default: Option<hir::Expr>,
 }
 
 struct ConstInfo {
@@ -182,26 +232,51 @@ struct ConstInfo {
     value: Option<hir::Expr>,
 }
 
-/// A function body to check, with the meaning of `Self` inside it.
+/// How a body is checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyMode {
+    Normal,
+    /// Copies of trait default methods and instances of generic code: their errors were
+    /// reported when the original was checked on its own, so they are not reported again.
+    Quiet,
+    /// A generic declaration checked against its bounds; reported, but not compiled.
+    GenericCheck,
+    /// An instance whose types are still parameters: only its signature is needed.
+    Skip,
+}
+
+/// A function body to check, with the meaning of `Self` and of type parameters inside it.
 struct Body<'m> {
     ast: &'m ast::Function,
     self_ty: Option<Ty>,
-    /// Copies of trait default methods: their errors were already reported when the default
-    /// was checked on its own, so they are not reported again for each implementation.
-    quiet: bool,
+    bindings: Vec<(String, Ty)>,
+    mode: BodyMode,
 }
 
-/// Where diagnostics go, with a switch to drop them.
+/// Where diagnostics go, with switches to drop them.
 struct Sink<'a> {
     out: &'a mut Diagnostics,
+    /// Checking a copy of code already checked on its own: errors are kept aside, in case the
+    /// copy has an error the original did not.
     quiet: bool,
+    /// Checking an expression only to learn its type; it is checked again for real.
+    speculative: bool,
+    /// The first error dropped while `quiet`.
+    suppressed: Option<Diagnostic>,
 }
 
 impl Sink<'_> {
     fn push(&mut self, diagnostic: Diagnostic) {
-        if !self.quiet {
-            self.out.push(diagnostic);
+        if self.speculative {
+            return;
         }
+        if self.quiet {
+            if matches!(diagnostic.severity, lang_diag::Severity::Error) && self.suppressed.is_none() {
+                self.suppressed = Some(diagnostic);
+            }
+            return;
+        }
+        self.out.push(diagnostic);
     }
 
     fn error_count(&self) -> usize {
@@ -221,7 +296,10 @@ struct Checker<'a, 'm> {
     variant_names: HashMap<String, Vec<(EnumId, usize)>>,
     /// Indexed by [`FuncId`].
     signatures: Vec<Signature>,
-    bodies: Vec<Body<'m>>,
+    /// Indexed by [`FuncId`]; `None` for closures, whose HIR is built where they appear.
+    bodies: Vec<Option<Body<'m>>>,
+    /// The HIR of closures, by [`FuncId`].
+    closures: Vec<(FuncId, hir::Function)>,
     /// Methods from `impl Type:` blocks.
     inherent: HashMap<(Ty, String), FuncId>,
     impls: Vec<ImplInfo>,
@@ -241,6 +319,23 @@ struct Checker<'a, 'm> {
     pending_hashable: Vec<(Ty, Span)>,
     /// Trait methods with a default body, by trait and method index.
     trait_defaults: HashMap<(TraitId, usize), &'m ast::Function>,
+    /// Bounds of each type parameter, by its index.
+    params: Vec<Vec<TraitId>>,
+    /// The names of type parameters in scope, innermost last.
+    type_scope: Vec<(String, Ty)>,
+    generic_fns: Vec<generics::GenericFn<'m>>,
+    generic_types: Vec<generics::GenericType<'m>>,
+    impl_templates: Vec<generics::ImplTemplate<'m>>,
+    /// For each instance of a generic type: its template and type arguments.
+    instance_of: HashMap<Ty, (usize, Vec<Ty>)>,
+    /// Instances whose derives and implementations are set up once all `impl` blocks are
+    /// known; after that, new instances are set up at once.
+    pending_instances: Vec<Ty>,
+    generic_setup_done: bool,
+    /// Bare variant names of generic enums.
+    generic_variant_names: HashMap<String, Vec<(usize, usize)>>,
+    /// How the body being checked is checked.
+    mode: BodyMode,
 }
 
 /// Per-function state while checking a body.
@@ -258,6 +353,13 @@ struct FnCx {
     first_assignment: HashMap<String, Span>,
     /// One entry per enclosing loop: whether it contains a `break`.
     loops: Vec<bool>,
+    /// For a closure: the enclosing function's context, while the closure is checked.
+    outer: Option<Box<FnCx>>,
+    /// For a closure: the enclosing function's locals it captures, by environment slot.
+    captures: Vec<LocalId>,
+    /// Optional locals known not to be `None` at this point (flow narrowing): reading one gives
+    /// the value inside.
+    narrowed: Vec<LocalId>,
 }
 
 struct LocalInfo {
@@ -280,6 +382,9 @@ impl FnCx {
             assigned: Vec::new(),
             first_assignment: HashMap::new(),
             loops: Vec::new(),
+            outer: None,
+            captures: Vec::new(),
+            narrowed: Vec::new(),
         }
     }
 
@@ -290,7 +395,7 @@ impl FnCx {
 
     fn add_local(&mut self, name: &str, ty: Ty, decl_span: Span, is_param: bool) -> LocalId {
         let id = LocalId(self.locals.len());
-        self.locals.push(hir::Local { name: name.to_string(), ty });
+        self.locals.push(hir::Local { name: name.to_string(), ty, boxed: false, capture: None });
         self.info.push(LocalInfo { decl_span, read: false, is_param, hidden: false });
         self.assigned.push(false);
         self.scope.insert(name.to_string(), id);
@@ -300,7 +405,7 @@ impl FnCx {
     /// A hidden local holding an intermediate value, already assigned.
     fn temp(&mut self, ty: Ty, span: Span) -> LocalId {
         let id = LocalId(self.locals.len());
-        self.locals.push(hir::Local { name: format!("tmp{}", id.0), ty });
+        self.locals.push(hir::Local { name: format!("tmp{}", id.0), ty, boxed: false, capture: None });
         self.info.push(LocalInfo { decl_span: span, read: true, is_param: false, hidden: true });
         self.assigned.push(true);
         id
@@ -349,6 +454,9 @@ fn prescan(stmts: &[ast::Stmt], out: &mut HashMap<String, Span>) {
                 }
             }
             ast::StmtKind::While { body, .. } => prescan(body, out),
+            ast::StmtKind::Def(function) => {
+                out.entry(function.name.name.clone()).or_insert(function.name.span);
+            }
             ast::StmtKind::For { target: t, body, .. } => {
                 target(t, out);
                 prescan(body, out);
@@ -403,7 +511,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 impl<'a, 'm> Checker<'a, 'm> {
     fn new(diags: &'a mut Diagnostics, prelude_file: FileId) -> Self {
         Checker {
-            diags: Sink { out: diags, quiet: false },
+            diags: Sink { out: diags, quiet: false, speculative: false, suppressed: None },
             types: Types::new(),
             prelude_file,
             structs: Vec::new(),
@@ -427,28 +535,50 @@ impl<'a, 'm> Checker<'a, 'm> {
             self_ty: None,
             pending_hashable: Vec::new(),
             trait_defaults: HashMap::new(),
+            closures: Vec::new(),
+            params: Vec::new(),
+            type_scope: Vec::new(),
+            generic_fns: Vec::new(),
+            generic_types: Vec::new(),
+            impl_templates: Vec::new(),
+            instance_of: HashMap::new(),
+            pending_instances: Vec::new(),
+            generic_setup_done: false,
+            generic_variant_names: HashMap::new(),
+            mode: BodyMode::Normal,
         }
     }
 
     fn into_program(self, module_name: &str, functions: Vec<hir::Function>, entry: FuncId) -> hir::Program {
         let fields =
             |fields: &[FieldInfo]| fields.iter().map(|f| hir::FieldDef { name: f.name.clone(), ty: f.ty }).collect();
+        // Instances of generic types print with the template's name: `Box(value=1)`.
+        let base_name = |ty: Ty, name: &str| match self.instance_of.get(&ty) {
+            Some((template, _)) => self.generic_types[*template].name.clone(),
+            None => name.to_string(),
+        };
         let structs = self
             .structs
             .iter()
-            .map(|s| hir::StructDef { name: s.name.clone(), ty: s.ty, fields: fields(&s.fields) })
+            .map(|s| hir::StructDef {
+                name: base_name(s.ty, &s.name),
+                ty: s.ty,
+                fields: fields(&s.fields),
+                generic: s.generic,
+            })
             .collect();
         let enums = self
             .enums
             .iter()
             .map(|e| hir::EnumDef {
-                name: e.name.clone(),
+                name: base_name(e.ty, &e.name),
                 ty: e.ty,
                 variants: e
                     .variants
                     .iter()
                     .map(|v| hir::VariantDef { name: v.name.clone(), fields: fields(&v.fields) })
                     .collect(),
+                generic: e.generic,
             })
             .collect();
         let traits = self
@@ -528,6 +658,11 @@ impl<'a, 'm> Checker<'a, 'm> {
                 self.types.option(inner_ty)
             }
             ast::TypeExprKind::Named { name, args } => self.resolve_named_type(name, args, hint.span),
+            ast::TypeExprKind::Func { params, ret } => {
+                let params: Vec<Ty> = params.iter().map(|p| self.resolve_value_type(p)).collect();
+                let ret = ret.as_ref().map_or(Ty::NONE, |r| self.resolve_type(r));
+                self.types.func(params, ret)
+            }
         }
     }
 
@@ -564,6 +699,12 @@ impl<'a, 'm> Checker<'a, 'm> {
 
     fn resolve_named_type(&mut self, name: &str, args: &[ast::TypeExpr], span: Span) -> Ty {
         let arity = |expected: usize| args.len() == expected;
+        if let Some(ty) = self.type_param(name) {
+            if !self.no_type_args(name, args, span) {
+                return Ty::ERROR;
+            }
+            return ty;
+        }
         match name {
             "int" | "bool" | "str" | "float" => {
                 if !self.no_type_args(name, args, span) {
@@ -651,6 +792,30 @@ impl<'a, 'm> Checker<'a, 'm> {
                 Some(Global::Enum(id)) => {
                     self.no_type_args(other, args, span);
                     self.enums[id.0].ty
+                }
+                Some(Global::GenericStruct(index) | Global::GenericEnum(index)) => {
+                    let count = self.generic_types[index].params.len();
+                    if args.len() != count {
+                        self.error(
+                            Diagnostic::error(
+                                codes::UNEXPECTED_TYPE_ARGS,
+                                format!("`{other}` takes {}", plural(count, "type argument")),
+                                span,
+                                format!("expected {}", plural(count, "type argument")),
+                            )
+                            .with_help(format!("for example `{other}[int]`")),
+                        );
+                        return Ty::ERROR;
+                    }
+                    let types: Vec<Ty> = args.iter().map(|a| self.resolve_value_type(a)).collect();
+                    if types.contains(&Ty::ERROR) {
+                        return Ty::ERROR;
+                    }
+                    let params = self.generic_types[index].params.clone();
+                    if !self.check_bounds(other, &params, &types, span) {
+                        return Ty::ERROR;
+                    }
+                    self.instantiate_type(index, types, span)
                 }
                 Some(Global::Trait(id)) => {
                     self.no_type_args(other, args, span);
@@ -752,6 +917,11 @@ impl<'a, 'm> Checker<'a, 'm> {
                 let items = items.into_iter().map(|t| self.subst_self(t, with)).collect();
                 self.types.tuple(items)
             }
+            TyKind::Func(params, ret) => {
+                let params = params.into_iter().map(|t| self.subst_self(t, with)).collect();
+                let ret = self.subst_self(ret, with);
+                self.types.func(params, ret)
+            }
             _ => ty,
         }
     }
@@ -762,6 +932,7 @@ impl<'a, 'm> Checker<'a, 'm> {
             TyKind::List(t) | TyKind::Option(t) => self.mentions_self(*t),
             TyKind::Dict(k, v) | TyKind::Result(k, v) => self.mentions_self(*k) || self.mentions_self(*v),
             TyKind::Tuple(items) => items.iter().any(|t| self.mentions_self(*t)),
+            TyKind::Func(params, ret) => params.iter().any(|t| self.mentions_self(*t)) || self.mentions_self(*ret),
             _ => false,
         }
     }
@@ -826,6 +997,9 @@ impl<'a, 'm> Checker<'a, 'm> {
     fn implements(&self, ty: Ty, trait_id: TraitId) -> bool {
         match self.types.kind(ty) {
             TyKind::Dyn(t) | TyKind::SelfType(t) => self.trait_closure(*t).contains(&trait_id),
+            TyKind::Param(index) => {
+                self.params[*index as usize].iter().any(|bound| self.trait_closure(*bound).contains(&trait_id))
+            }
             TyKind::Error => true,
             _ => self.impl_index.contains_key(&(trait_id, ty)),
         }
@@ -837,7 +1011,8 @@ impl<'a, 'm> Checker<'a, 'm> {
     fn displayable(&self, ty: Ty) -> bool {
         let b = self.builtin();
         match self.types.kind(ty) {
-            TyKind::Struct(_) | TyKind::Enum(_) => self.implements(ty, b.display),
+            TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Param(_) => self.implements(ty, b.display),
+            TyKind::Func(..) => false,
             TyKind::Dyn(t) | TyKind::SelfType(t) => {
                 let closure = self.trait_closure(*t);
                 closure.contains(&b.display) || closure.contains(&b.error)
@@ -852,12 +1027,13 @@ impl<'a, 'm> Checker<'a, 'm> {
     /// Supports `==`.
     fn equatable(&self, ty: Ty) -> bool {
         match self.types.kind(ty) {
-            TyKind::Struct(_) | TyKind::Enum(_) => self.implements(ty, self.builtin().eq),
+            TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Param(_) => self.implements(ty, self.builtin().eq),
             TyKind::Error | TyKind::None | TyKind::Bool | TyKind::Int | TyKind::Float | TyKind::Str => true,
             TyKind::List(t) | TyKind::Option(t) => self.equatable(*t),
             TyKind::Result(k, v) => self.equatable(*k) && self.equatable(*v),
             TyKind::Tuple(items) => items.iter().all(|t| self.equatable(*t)),
-            TyKind::Dict(..) | TyKind::Dyn(_) | TyKind::SelfType(_) => false,
+            TyKind::Dyn(t) | TyKind::SelfType(t) => self.trait_closure(*t).contains(&self.builtin().eq),
+            TyKind::Dict(..) | TyKind::Func(..) => false,
         }
     }
 
@@ -865,27 +1041,51 @@ impl<'a, 'm> Checker<'a, 'm> {
     fn hashable(&self, ty: Ty) -> bool {
         match self.types.kind(ty) {
             TyKind::Error | TyKind::Int | TyKind::Bool | TyKind::Str => true,
-            TyKind::Struct(_) | TyKind::Enum(_) => self.implements(ty, self.builtin().hash),
+            TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Param(_) => self.implements(ty, self.builtin().hash),
             TyKind::Tuple(items) => items.iter().all(|t| self.hashable(*t)),
             _ => false,
         }
     }
 
-    /// Supports `<` and sorting.
+    /// Supports `<` and sorting: numbers, strings, booleans, types implementing `Ord`, and
+    /// tuples and lists of those, compared element by element.
     fn orderable(&self, ty: Ty) -> bool {
-        matches!(self.types.kind(ty), TyKind::Error | TyKind::Bool | TyKind::Int | TyKind::Float | TyKind::Str)
+        match self.types.kind(ty) {
+            TyKind::Error | TyKind::Bool | TyKind::Int | TyKind::Float | TyKind::Str => true,
+            TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Param(_) => self.implements(ty, self.builtin().ord),
+            TyKind::Tuple(items) => items.iter().all(|t| self.orderable(*t)),
+            TyKind::List(t) => self.orderable(*t),
+            _ => false,
+        }
     }
 
     // ---- bodies -------------------------------------------------------------------------
 
-    fn function(&mut self, id: FuncId) -> hir::Function {
-        let body = &self.bodies[id.0];
-        let (ast, self_ty, quiet) = (body.ast, body.self_ty, body.quiet);
+    /// Check function `id`, or `None` for a closure, whose HIR is made where it appears.
+    fn function(&mut self, id: FuncId) -> Option<hir::Function> {
+        let body = self.bodies[id.0].as_ref()?;
+        let (ast, self_ty, bindings, mode) = (body.ast, body.self_ty, body.bindings.clone(), body.mode);
         let signature = self.signatures[id.0].clone();
-        self.diags.quiet = quiet;
-        let function = self.check_body(&signature, ast, self_ty);
-        self.diags.quiet = false;
-        function
+        let generic = matches!(mode, BodyMode::GenericCheck | BodyMode::Skip)
+            || bindings.iter().any(|(_, t)| self.types.contains_param(*t))
+            || self_ty.is_some_and(|t| self.types.contains_param(t));
+        if mode == BodyMode::Skip {
+            return Some(hir::Function {
+                name: signature.name,
+                params: Vec::new(),
+                locals: Vec::new(),
+                ret: signature.ret,
+                body: Vec::new(),
+                generic: true,
+                closure: false,
+            });
+        }
+        let saved_mode = std::mem::replace(&mut self.mode, mode);
+        let mut function =
+            self.with_scope(bindings, mode == BodyMode::Quiet, |this| this.check_body(&signature, ast, self_ty));
+        self.mode = saved_mode;
+        function.generic = generic;
+        Some(function)
     }
 
     fn check_body(&mut self, signature: &Signature, function: &ast::Function, self_ty: Option<Ty>) -> hir::Function {
@@ -904,41 +1104,19 @@ impl<'a, 'm> Checker<'a, 'm> {
         prescan(&function.body, &mut cx.first_assignment);
 
         let (mut body, diverges) = self.block(&mut cx, &function.body);
-
-        if !diverges && self.returns_ok_none(ret) {
-            // A function returning `Result[None]` succeeds by reaching its end.
-            body.push(hir::Stmt::Return(Some(self.ok_none(ret, function.name.span))));
-        } else if !diverges && !matches!(ret, Ty::NONE | Ty::ERROR) {
-            let shown = self.display(ret);
-            let mut diagnostic = Diagnostic::error(
-                codes::MISSING_RETURN,
-                format!("function `{name}` can finish without returning a value"),
-                function.name.span,
-                "can reach its end without `return`",
-            )
-            .with_help("add a `return` statement at the end of the function");
-            if let Some(span) = ret_span {
-                diagnostic = diagnostic.with_label(span, format!("declared to return `{shown}`"));
-            }
-            self.error(diagnostic);
-        }
-
-        for (local, info) in cx.locals.iter().zip(&cx.info) {
-            if !info.read && !info.is_param && !info.hidden && !local.name.starts_with('_') {
-                self.diags.push(
-                    Diagnostic::warning(
-                        codes::UNUSED_VARIABLE,
-                        format!("variable `{}` is assigned but never used", local.name),
-                        info.decl_span,
-                        "assigned here",
-                    )
-                    .with_help(format!("if this is intentional, start the name with an underscore: `_{}`", local.name)),
-                );
-            }
-        }
-
+        // A function returning `Result[None]` succeeds by reaching its end.
+        self.finish_body(&cx, &mut body, diverges, function.name.span);
+        self.warn_unused(&cx);
         self.self_ty = saved_self;
-        hir::Function { name, params: (0..param_count).map(LocalId).collect(), locals: cx.locals, ret, body }
+        hir::Function {
+            name,
+            params: (0..param_count).map(LocalId).collect(),
+            locals: cx.locals,
+            ret,
+            body,
+            generic: false,
+            closure: false,
+        }
     }
 
     // ---- shared helpers -----------------------------------------------------------------
@@ -961,9 +1139,11 @@ impl<'a, 'm> Checker<'a, 'm> {
             Some((Global::Enum(_), _)) => Some("an enum"),
             Some((Global::Trait(_), _)) => Some("a trait"),
             Some((Global::Const(_), _)) => Some("a constant"),
-            None if BUILTIN_FUNCTIONS.contains(&name) || BUILTIN_CONSTRUCTORS.contains(&name) => {
-                Some("a built-in function")
-            }
+            Some((Global::GenericFunction(_), _)) => Some("a function"),
+            Some((Global::GenericStruct(_), _)) => Some("a struct"),
+            Some((Global::GenericEnum(_), _)) => Some("an enum"),
+            // Built-in functions can be shadowed by local variables, as in Python.
+            None if BUILTIN_CONSTRUCTORS.contains(&name) => Some("a built-in function"),
             None => None,
         }
     }

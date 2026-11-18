@@ -48,6 +48,8 @@ pub struct BuiltinTraits {
     pub add: TraitId,
     pub sub: TraitId,
     pub mul: TraitId,
+    pub ord: TraitId,
+    pub number: TraitId,
 }
 
 #[derive(Debug)]
@@ -55,6 +57,8 @@ pub struct EnumDef {
     pub name: String,
     pub ty: Ty,
     pub variants: Vec<VariantDef>,
+    /// As for [`StructDef::generic`].
+    pub generic: bool,
 }
 
 #[derive(Debug)]
@@ -95,6 +99,9 @@ pub struct StructDef {
     pub name: String,
     pub ty: Ty,
     pub fields: Vec<FieldDef>,
+    /// An instance of a generic struct whose type arguments are still parameters, used only
+    /// to check generic code. It has no layout and generates no code.
+    pub generic: bool,
 }
 
 #[derive(Debug)]
@@ -119,12 +126,23 @@ pub struct Function {
     pub locals: Vec<Local>,
     pub ret: Ty,
     pub body: Block,
+    /// Checked against its bounds but not compiled: a generic function before instantiation,
+    /// or code using such types. Code generation skips it.
+    pub generic: bool,
+    /// A lambda or nested function. It takes a hidden first argument, its environment: the
+    /// cells of the variables it captures.
+    pub closure: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Local {
     pub name: String,
     pub ty: Ty,
+    /// Kept in a heap cell rather than on the stack, because a closure captures it.
+    pub boxed: bool,
+    /// In a closure: the variable is the enclosing function's, found in this slot of the
+    /// environment.
+    pub capture: Option<usize>,
 }
 
 pub type Block = Vec<Stmt>;
@@ -241,6 +259,11 @@ pub enum LoopSource {
     DictValues(Expr),
     /// Elements are `tuple[K, V]`.
     DictItems(Expr),
+    /// A user-defined iterator: `next` is called until it returns `None`.
+    Iterator {
+        iterator: Expr,
+        next: FuncId,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -343,6 +366,28 @@ pub enum ExprKind {
     Try {
         value: Box<Expr>,
         conversion: Conversion,
+    },
+    /// A lambda or nested function value, capturing these locals' cells.
+    Closure {
+        func: FuncId,
+        captures: Vec<LocalId>,
+    },
+    /// A named function used as a value.
+    FuncRef(FuncId),
+    /// `object.method` without a call: a function value that calls the method on the object.
+    BoundMethod {
+        receiver: Box<Expr>,
+        func: FuncId,
+    },
+    /// A call to a function value.
+    CallValue {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    /// Statements, then a value: what a comprehension becomes.
+    Block {
+        stmts: Vec<Stmt>,
+        value: Box<Expr>,
     },
 }
 
@@ -464,4 +509,21 @@ pub enum Builtin {
     Copy,
     /// `x.hash()` for a type with a derived `Hash`.
     Hash,
+    /// `a.cmp(b)`: negative, zero or positive.
+    Cmp,
+    /// `min(a, b, ...)` and `max(a, b, ...)` over two or more values.
+    Min,
+    Max,
+    /// `min(list)` and `max(list)`; panic on an empty list.
+    MinList,
+    MaxList,
+    Sum,
+    /// `enumerate(list)`, `zip(a, b)`, `any(list)`, `all(list)`.
+    Enumerate,
+    Zip,
+    Any,
+    All,
+    /// `list.sort(key=f, reverse=r)`: args are the list, the key function or `None`, and the
+    /// `reverse` flag.
+    ListSortBy,
 }

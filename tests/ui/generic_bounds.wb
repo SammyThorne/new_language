@@ -1,0 +1,18 @@
+struct Point:
+    x: int
+
+def largest[T: Ord](items: list[T]) -> T:
+    best = items[0]
+    for item in items:
+        if item > best:
+            best = item
+    return best
+
+def show[T](value: T) -> str:
+    return value.to_str()
+
+def smaller[T](a: T, b: T) -> bool:
+    return a < b
+
+def main():
+    print(largest([Point(1), Point(2)]))

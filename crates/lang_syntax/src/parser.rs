@@ -370,10 +370,7 @@ impl Parser<'_> {
     fn function(&mut self, visibility: Visibility, in_trait: bool) -> PResult<Function> {
         self.expect(TokenKind::Def, "")?;
         let name = self.expect_name("a function name")?;
-        if self.at(&TokenKind::LBracket) {
-            let span = self.span();
-            return Err(self.not_supported("generic functions are", span));
-        }
+        let generics = self.generic_params()?;
         self.expect(TokenKind::LParen, "after the function name")?;
 
         let mut self_param = None;
@@ -391,11 +388,8 @@ impl Parser<'_> {
             } else {
                 let name = self.expect_name("a parameter name")?;
                 let ty = if self.eat(&TokenKind::Colon) { Some(self.type_expr()?) } else { None };
-                if self.at(&TokenKind::Assign) {
-                    let span = self.span();
-                    return Err(self.not_supported("default parameter values are", span));
-                }
-                params.push(Param { name, ty });
+                let default = if self.eat(&TokenKind::Assign) { Some(self.expr()?) } else { None };
+                params.push(Param { name, ty, default });
             }
             if !self.eat(&TokenKind::Comma) {
                 break;
@@ -405,7 +399,16 @@ impl Parser<'_> {
         let ret = if self.eat(&TokenKind::Arrow) { Some(self.type_expr()?) } else { None };
         if in_trait && self.at_line_end() {
             self.end_of_statement()?;
-            return Ok(Function { visibility, name, self_param, params, ret, body: Vec::new(), has_body: false });
+            return Ok(Function {
+                visibility,
+                name,
+                generics,
+                self_param,
+                params,
+                ret,
+                body: Vec::new(),
+                has_body: false,
+            });
         }
         if !self.at(&TokenKind::Colon) {
             let found = self.peek().describe();
@@ -419,16 +422,37 @@ impl Parser<'_> {
         }
         self.bump();
         let body = self.block()?;
-        Ok(Function { visibility, name, self_param, params, ret, body, has_body: true })
+        Ok(Function { visibility, name, generics, self_param, params, ret, body, has_body: true })
+    }
+
+    /// `[T, U: Ord + Display]` after a declaration's name; empty when there is none.
+    fn generic_params(&mut self) -> PResult<Vec<GenericParam>> {
+        let mut params = Vec::new();
+        if !self.eat(&TokenKind::LBracket) {
+            return Ok(params);
+        }
+        while !self.at(&TokenKind::RBracket) {
+            let name = self.expect_name("a type parameter name")?;
+            let mut bounds = Vec::new();
+            if self.eat(&TokenKind::Colon) {
+                bounds.push(self.expect_name("a trait name")?);
+                while self.eat(&TokenKind::Plus) {
+                    bounds.push(self.expect_name("a trait name")?);
+                }
+            }
+            params.push(GenericParam { name, bounds });
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::RBracket, "to close the type parameters")?;
+        Ok(params)
     }
 
     fn struct_decl(&mut self, annotations: Vec<Annotation>, visibility: Visibility) -> PResult<StructDecl> {
         self.bump();
         let name = self.expect_name("a struct name")?;
-        if self.at(&TokenKind::LBracket) {
-            let span = self.span();
-            return Err(self.not_supported("generic structs are", span));
-        }
+        let generics = self.generic_params()?;
         if self.at(&TokenKind::LParen) {
             let span = self.span();
             return Err(self.error(
@@ -474,7 +498,7 @@ impl Parser<'_> {
                 },
             }
         }
-        Ok(StructDecl { annotations, visibility, name, fields })
+        Ok(StructDecl { annotations, visibility, name, generics, fields })
     }
 
     fn field(&mut self) -> PResult<FieldDecl> {
@@ -499,10 +523,7 @@ impl Parser<'_> {
     fn enum_decl(&mut self, annotations: Vec<Annotation>, visibility: Visibility) -> PResult<EnumDecl> {
         self.bump();
         let name = self.expect_name("an enum name")?;
-        if self.at(&TokenKind::LBracket) {
-            let span = self.span();
-            return Err(self.not_supported("generic enums are", span));
-        }
+        let generics = self.generic_params()?;
         self.expect(TokenKind::Colon, "after the enum name")?;
         self.block_start()?;
         let mut variants = Vec::new();
@@ -538,7 +559,7 @@ impl Parser<'_> {
                 },
             }
         }
-        Ok(EnumDecl { annotations, visibility, name, variants })
+        Ok(EnumDecl { annotations, visibility, name, generics, variants })
     }
 
     /// `Name` or `Name(field: type, ...)`.
@@ -628,13 +649,17 @@ impl Parser<'_> {
 
     fn impl_decl(&mut self) -> PResult<ImplDecl> {
         self.bump();
-        if self.at(&TokenKind::LBracket) {
-            let span = self.span();
-            return Err(self.not_supported("generic `impl` blocks are", span));
-        }
+        let generics = self.generic_params()?;
         let first = self.expect_name("a type or trait name after `impl`")?;
+        let mut target_args = self.type_args()?;
         let (trait_name, target) = if self.eat(&TokenKind::For) {
-            (Some(first), self.expect_name("a type name after `for`")?)
+            if !target_args.is_empty() {
+                let span = first.span;
+                return Err(self.not_supported("generic traits are", span));
+            }
+            let target = self.expect_name("a type name after `for`")?;
+            target_args = self.type_args()?;
+            (Some(first), target)
         } else {
             (None, first)
         };
@@ -670,7 +695,7 @@ impl Parser<'_> {
                 }
             }
         }
-        Ok(ImplDecl { trait_name, target, methods })
+        Ok(ImplDecl { generics, trait_name, target, target_args, methods })
     }
 
     fn const_decl(&mut self, visibility: Visibility) -> PResult<ConstDecl> {
@@ -683,9 +708,38 @@ impl Parser<'_> {
         Ok(ConstDecl { visibility, name, ty, value })
     }
 
+    /// `[A, B]` type arguments after a type name; empty when there are none.
+    fn type_args(&mut self) -> PResult<Vec<TypeExpr>> {
+        let mut args = Vec::new();
+        if self.eat(&TokenKind::LBracket) {
+            loop {
+                args.push(self.type_expr()?);
+                if !self.eat(&TokenKind::Comma) || self.at(&TokenKind::RBracket) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RBracket, "to close the type arguments")?;
+        }
+        Ok(args)
+    }
+
     fn type_expr(&mut self) -> PResult<TypeExpr> {
         let start = self.span();
         let mut ty = match self.peek().clone() {
+            TokenKind::Def => {
+                self.bump();
+                self.expect(TokenKind::LParen, "after `def` in a function type")?;
+                let mut params = Vec::new();
+                while !self.at(&TokenKind::RParen) {
+                    params.push(self.type_expr()?);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen, "to close the parameter types")?;
+                let ret = if self.eat(&TokenKind::Arrow) { Some(Box::new(self.type_expr()?)) } else { None };
+                TypeExpr { kind: TypeExprKind::Func { params, ret }, span: start.to(self.prev_span()) }
+            }
             TokenKind::NoneKw => {
                 self.bump();
                 TypeExpr { kind: TypeExprKind::None, span: start }
@@ -803,7 +857,11 @@ impl Parser<'_> {
             kind @ (TokenKind::With | TokenKind::Spawn) => {
                 return Err(self.not_supported(&format!("{} statements are", kind.describe()), start));
             }
-            TokenKind::Def => return Err(self.not_supported("nested functions are", start)),
+            TokenKind::Def => {
+                let function = self.function(Visibility::Default, false)?;
+                let span = start.to(function.name.span);
+                return Ok(Stmt { kind: StmtKind::Def(Box::new(function)), span });
+            }
             kind @ (TokenKind::Struct
             | TokenKind::Trait
             | TokenKind::Impl
@@ -1136,8 +1194,18 @@ impl Parser<'_> {
 
     fn expr(&mut self) -> PResult<Expr> {
         if self.at(&TokenKind::Lambda) {
-            let span = self.span();
-            return Err(self.not_supported("`lambda` expressions are", span));
+            let start = self.bump().span;
+            let mut params = Vec::new();
+            while !self.at(&TokenKind::Colon) {
+                params.push(self.expect_name("a parameter name")?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::Colon, "after the lambda's parameters")?;
+            let body = self.expr()?;
+            let span = start.to(body.span);
+            return Ok(Expr { kind: ExprKind::Lambda { params, body: Box::new(body) }, span });
         }
         let value = self.binary(PREC_OR)?;
         if !self.at(&TokenKind::If) {
@@ -1349,8 +1417,12 @@ impl Parser<'_> {
                 }
                 let first = self.expr()?;
                 if self.at(&TokenKind::For) {
-                    let span = self.span();
-                    return Err(self.not_supported("list comprehensions are", span));
+                    let clauses = self.comp_clauses()?;
+                    let close = self.expect(TokenKind::RBracket, "to close the list comprehension")?;
+                    return Ok(Expr {
+                        kind: ExprKind::ListComp { element: Box::new(first), clauses },
+                        span: span.to(close),
+                    });
                 }
                 let (items, close) = self.sequence(TokenKind::RBracket, first, "list")?;
                 return Ok(Expr { kind: ExprKind::List(items), span: span.to(close) });
@@ -1367,6 +1439,14 @@ impl Parser<'_> {
                 }
                 self.bump();
                 let value = self.expr()?;
+                if self.at(&TokenKind::For) {
+                    let clauses = self.comp_clauses()?;
+                    let close = self.expect(TokenKind::RBrace, "to close the dict comprehension")?;
+                    return Ok(Expr {
+                        kind: ExprKind::DictComp { key: Box::new(key), value: Box::new(value), clauses },
+                        span: span.to(close),
+                    });
+                }
                 let mut pairs = vec![(key, value)];
                 while self.eat(&TokenKind::Comma) {
                     if self.at(&TokenKind::RBrace) {
@@ -1385,6 +1465,24 @@ impl Parser<'_> {
         };
         self.bump();
         Ok(Expr { kind, span })
+    }
+
+    /// `for target in iterable if condition ...`, one or more times.
+    fn comp_clauses(&mut self) -> PResult<Vec<CompClause>> {
+        let mut clauses = Vec::new();
+        while self.eat(&TokenKind::For) {
+            let target = self.for_target()?;
+            self.expect(TokenKind::In, "after the comprehension's variable")?;
+            // `or`-level expressions, so that a following `if` starts a condition rather than
+            // a conditional expression.
+            let iter = self.binary(PREC_OR)?;
+            let mut conditions = Vec::new();
+            while self.eat(&TokenKind::If) {
+                conditions.push(self.binary(PREC_OR)?);
+            }
+            clauses.push(CompClause { target, iter, conditions });
+        }
+        Ok(clauses)
     }
 
     /// Parse the `{expression}` pieces of an f-string with a sub-parser over their own tokens.
@@ -1480,6 +1578,17 @@ mod tests {
                 format!("({} if {} else {})", show(then), show(cond), show(otherwise))
             }
             ExprKind::Try(inner) => format!("{}?", show(inner)),
+            ExprKind::Lambda { params, body } => {
+                format!(
+                    "(lambda {}: {})",
+                    params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
+                    show(body)
+                )
+            }
+            ExprKind::ListComp { element, clauses } => format!("[{} for {}]", show(element), clauses.len()),
+            ExprKind::DictComp { key, value, clauses } => {
+                format!("{{{}: {} for {}}}", show(key), show(value), clauses.len())
+            }
         }
     }
 
@@ -1561,6 +1670,58 @@ def main():
             ["Circle(r)", "Shape.Square(_) | Empty", "(1, \"a\", (- 2), True)", "Some(Ok(x)) | None", "other"]
         );
         assert!(cases[0].guard.is_some());
+    }
+
+    #[test]
+    fn generics_closures_and_comprehensions() {
+        let text = "\
+def first[T: Ord + Display, U](items: list[T], fallback: U = 0) -> T?:
+    def inner(x: int) -> int:
+        return x
+    f: def(int, str) -> bool = lambda a, b: a > 0
+    squares = [x * x for x in range(10) if x % 2 == 0]
+    index = {name: i for i, name in pairs}
+    return None
+
+struct Stack[T]:
+    items: list[T] = []
+
+impl[T: Display] Stack[T]:
+    def push(self, item: T):
+        self.items.append(item)
+
+impl[T] Display for Stack[T]:
+    def to_str(self) -> str:
+        return \"stack\"
+";
+        let (module, diags) = parse_text(text);
+        assert!(diags.is_empty(), "{:?}", codes_of(&diags));
+        let f = function(&module, 0);
+        assert_eq!(f.generics.len(), 2);
+        assert_eq!(f.generics[0].bounds.len(), 2);
+        assert!(f.params[1].default.is_some());
+        assert!(matches!(f.body[0].kind, StmtKind::Def(_)));
+        assert!(matches!(
+            &f.body[1].kind,
+            StmtKind::Assign { ty: Some(TypeExpr { kind: TypeExprKind::Func { .. }, .. }), .. }
+        ));
+        assert!(matches!(
+            &f.body[2].kind,
+            StmtKind::Assign { value: Expr { kind: ExprKind::ListComp { .. }, .. }, .. }
+        ));
+        assert!(matches!(
+            &f.body[3].kind,
+            StmtKind::Assign { value: Expr { kind: ExprKind::DictComp { .. }, .. }, .. }
+        ));
+        let Item::Struct(stack) = &module.items[1] else { panic!() };
+        assert_eq!(stack.generics.len(), 1);
+        let Item::Impl(imp) = &module.items[2] else { panic!() };
+        assert_eq!((imp.generics.len(), imp.target_args.len()), (1, 1));
+        let Item::Impl(imp) = &module.items[3] else { panic!() };
+        assert_eq!(imp.trait_name.as_ref().unwrap().name, "Display");
+        assert_eq!(imp.target_args.len(), 1);
+        assert_eq!(expr_of("[a if c else b for a, b in xs if a]"), "[(a if c else b) for 1]");
+        assert_eq!(expr_of("sort(key=lambda u: u.age)"), "sort(key=(lambda u: u.age))");
     }
 
     #[test]

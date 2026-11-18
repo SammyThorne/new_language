@@ -1,0 +1,131 @@
+# expect: [30, 10, 40, 10, 50, 90, 20, 60]
+# expect: ['#3', '#1', '#4', '#1', '#5', '#9', '#2', '#6']
+# expect: [4, 2, 6]
+# expect: 31
+# expect: ABC
+# expect: 3
+# expect: 6 14 10 81
+# expect: [1, 4, 9]
+# expect: [5, 9, 6] [(1, 0), (2, 0), (2, 1)] {'one': 3, 'three': 5, 'five': 4}
+# expect: [[0, 1, 2], [3, 4, 5]]
+# expect: Hello, Ada! Hi, Bob! Hello, Cy? Yo, Di!
+# expect: clicked by me
+# expect: ['Bob', 'Cat', 'Ann']
+# expect: ['Bob', 'Ann', 'Cat']
+# expect: ['Bob (29)', 'Cat (35)', 'Ann (41)']
+# expect: Bob (29)
+# expect: ['Banana', 'Fig', 'apple', 'date', 'pear'] ['apple', 'Banana', 'date', 'Fig', 'pear'] ['Fig', 'pear', 'date', 'apple', 'Banana']
+# expect: [8, 5, 2] ['Banana', 'apple', 'pear', 'date', 'Fig']
+# expect: 3628800
+# expect: double 14
+# expect: square 49
+# Milestone 4 exit program: lambdas, nested functions with capture, function values,
+# comprehensions, sorting with key functions, default and keyword arguments.
+
+def map_list[T, U](items: list[T], f: def(T) -> U) -> list[U]:
+    out: list[U] = []
+    for item in items:
+        out.append(f(item))
+    return out
+
+def filter_list[T](items: list[T], keep: def(T) -> bool) -> list[T]:
+    return [item for item in items if keep(item)]
+
+def reduce_list[T, A](items: list[T], start: A, f: def(A, T) -> A) -> A:
+    acc = start
+    for item in items:
+        acc = f(acc, item)
+    return acc
+
+def make_counter() -> def() -> int:
+    count = [0]
+    def next_value() -> int:
+        count[0] += 1
+        return count[0]
+    return next_value
+
+def make_adder(n: int) -> def(int) -> int:
+    return lambda x: x + n
+
+def compose(f: def(int) -> int, g: def(int) -> int) -> def(int) -> int:
+    return lambda x: g(f(x))
+
+def apply_twice(f: def(int) -> int, x: int) -> int:
+    return f(f(x))
+
+def square(x: int) -> int:
+    return x * x
+
+def greet(name: str, greeting: str = "Hello", punctuation: str = "!") -> str:
+    return f"{greeting}, {name}{punctuation}"
+
+struct Button:
+    label: str
+    on_click: def(str) -> str
+
+@derive(Display)
+struct Employee:
+    name: str
+    age: int
+    salary: float
+
+impl Employee:
+    def summary(self) -> str:
+        return f"{self.name} ({self.age})"
+
+def factorial(n: int) -> int:
+    def go(k: int, acc: int) -> int:
+        if k <= 1:
+            return acc
+        return go(k - 1, acc * k)
+    return go(n, 1)
+
+def main():
+    numbers = [3, 1, 4, 1, 5, 9, 2, 6]
+    print(map_list(numbers, lambda n: n * 10))
+    print(map_list(numbers, lambda n: f"#{n}"))
+    print(filter_list(numbers, lambda n: n % 2 == 0))
+    print(reduce_list(numbers, 0, lambda acc, n: acc + n))
+    print(reduce_list(["a", "b", "c"], "", lambda acc, s: acc + s.upper()))
+
+    counter = make_counter()
+    counter()
+    counter()
+    print(counter())
+
+    add5 = make_adder(5)
+    times_then_add = compose(square, add5)
+    print(add5(1), times_then_add(3), apply_twice(add5, 0), apply_twice(square, 3))
+    print(map_list([1, 2, 3], square))
+
+    threshold = 4
+    big = [n for n in numbers if n > threshold]
+    pairs = [(a, b) for a in range(3) for b in range(a)]
+    lengths = {word: len(word) for word in ["one", "three", "five"]}
+    print(big, pairs, lengths)
+    grid = [[r * 3 + c for c in range(3)] for r in range(2)]
+    print(grid)
+
+    print(greet("Ada"), greet("Bob", "Hi"), greet("Cy", punctuation="?"), greet(greeting="Yo", name="Di"))
+
+    button = Button(label="ok", on_click=lambda who: f"clicked by {who}")
+    print(button.on_click("me"))
+
+    staff = [Employee("Ann", 41, 5200.0), Employee("Bob", 29, 6100.5), Employee("Cat", 35, 4800.0)]
+    staff.sort(key=lambda e: e.age)
+    print([e.name for e in staff])
+    by_salary = sorted(staff, key=lambda e: e.salary, reverse=True)
+    print(map_list(by_salary, lambda e: e.name))
+    summaries = map_list(staff, Employee.summary)
+    print(summaries)
+    describe = staff[0].summary
+    print(describe())
+
+    words = ["pear", "Fig", "apple", "date", "Banana"]
+    print(sorted(words), sorted(words, key=lambda w: w.lower()), sorted(words, key=len))
+    print(sorted([5, 2, 8], reverse=True), sorted(words, key=len, reverse=True))
+
+    print(factorial(10))
+    handlers: dict[str, def(int) -> int] = {"double": lambda x: x * 2, "square": square}
+    for name in ["double", "square"]:
+        print(name, handlers[name](7))

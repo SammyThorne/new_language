@@ -1,0 +1,25 @@
+error[E0315]: cannot tell which `Stack` this is
+  --> tests/ui/generic_inference.wb:12:9
+   |
+12 |     s = Stack.new()
+   |         ^^^^^^^^^^^ type arguments unknown
+   |
+   = help: give the type arguments, as in `Stack[int].new(...)`, or add a type hint where the value is used
+
+error[E0315]: cannot infer the type parameter `T` of `empty`
+  --> tests/ui/generic_inference.wb:13:10
+   |
+13 |     xs = empty()
+   |          ^^^^^^^ type unknown
+   |
+   = help: give the types explicitly, for example `empty[int](...)`, or add a type hint where the value is used
+
+error[E0309]: `Stack` takes 1 type argument
+  --> tests/ui/generic_inference.wb:16:8
+   |
+16 |     t: Stack[int, str] = Stack(items=[1])
+   |        ^^^^^^^^^^^^^^^ expected 1 type argument
+   |
+   = help: for example `Stack[int]`
+
+error: could not compile `tests/ui/generic_inference.wb` due to 3 errors

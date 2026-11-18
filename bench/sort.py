@@ -1,0 +1,32 @@
+# Sort a million records by a key function, then by a tuple key (milestone 4 benchmark).
+from dataclasses import dataclass
+
+
+@dataclass
+class Record:
+    id: int
+    score: int
+    name: str
+
+
+def checksum(records: list[Record]) -> int:
+    total = 0
+    for i in range(0, len(records), 1000):
+        total = (total * 31 + records[i].id) % 1000000007
+    return total
+
+
+def main():
+    n = 1000000
+    seed = 42
+    records: list[Record] = []
+    for i in range(n):
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        records.append(Record(i, seed % 100000, f"r{seed % 1000}"))
+    records.sort(key=lambda r: r.score)
+    print(checksum(records), records[0].score, records[n - 1].score)
+    by_name = sorted(records, key=lambda r: (r.name, r.id))
+    print(checksum(by_name), by_name[0].name, by_name[n - 1].name)
+
+
+main()

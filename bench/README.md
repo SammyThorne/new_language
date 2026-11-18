@@ -17,10 +17,30 @@ python3 bench/run.py --runs 5
 | `sieve` | List indexing and loops: a sieve of Eratosthenes over 20 million booleans, grown by appending |
 | `binary_trees` | Allocation and garbage collection: the classic binary-trees benchmark at depth 18 |
 | `word_count` | Strings and dicts: split, lower-case and count 20.5 million words |
+| `sort` | Sorting with a function: a million records sorted by a key closure, then copied and sorted by a tuple key (Go: `sort.SliceStable` with a comparator closure) |
 
 The Go versions are written the way a Go programmer would write them. Where that changes the work done, the comment in the file says so. For example, `counts[key] = counts[key] + 1` is one map access in Go but two lookups in the other versions.
 
 ## Results
+
+### 2026-11-18, end of milestone 4
+
+Same machine and versions as below. Best of 3 runs.
+
+| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+|---|---|---|---|---|---|---|
+| binary_trees | 0.963 s | 0.799 s | 20.125 s | 1.20x the time | 20.9x faster | 65 / 42 / 56 MB |
+| dispatch | 0.046 s | 0.027 s | 0.539 s | 1.70x the time | 11.8x faster | 13 / 13 / 13 MB |
+| fib | 0.018 s | 0.030 s | 0.616 s | 1.68x faster | 34.0x faster | 13 / 13 / 13 MB |
+| sieve | 0.067 s | 0.055 s | 1.857 s | 1.22x the time | 27.5x faster | 55 / 54 / 161 MB |
+| sort | 0.744 s | 1.115 s | 2.046 s | 1.50x faster | 2.8x faster | 169 / 77 / 302 MB |
+| word_count | 1.064 s | 0.716 s | 2.056 s | 1.49x the time | 1.9x faster | 13 / 13 / 13 MB |
+
+Notes on `sort`:
+
+- Weby computes each key once (as Python does) and then sorts with a comparison of the keys, so the closure runs a million times rather than once per comparison. Go's `sort.SliceStable` calls its comparator closure about 20 million times and swaps elements through reflection, which is where it loses.
+- CPython's sort is written in C, so its margin here is small: most of its time is building the records and calling the key lambda.
+- Weby's memory is higher than Go's because the keys of the tuple sort are kept in a separate list of `(str, int)` tuples, 24 bytes each.
 
 ### 2026-11-18, end of milestone 3
 

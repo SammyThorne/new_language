@@ -61,6 +61,16 @@ impl Checker<'_, '_> {
     pub(super) fn builtin_function(&mut self, cx: &mut FnCx, name: &str, args: &[ast::Arg], span: Span) -> hir::Expr {
         let builtin =
             |op: Op, args: Vec<hir::Expr>, ty: Ty| hir::Expr { kind: hir::ExprKind::Builtin { op, args }, ty, span };
+        if name == "sorted" {
+            return self.sorted(cx, args, span);
+        }
+        if matches!(name, "min" | "max" | "sum" | "enumerate" | "zip" | "any" | "all") {
+            if !self.no_keywords(args, &format!("`{name}`")) {
+                self.check_all_quietly(cx, args);
+                return error_expr(span);
+            }
+            return self.collection_function(cx, name, args, span);
+        }
         if !self.no_keywords(args, &format!("`{name}`")) {
             for arg in args {
                 self.expr(cx, &arg.value, None);
@@ -153,6 +163,282 @@ impl Checker<'_, '_> {
         hir::Expr { span, ..result }
     }
 
+    /// `min`, `max`, `sum`, `enumerate`, `zip`, `any` and `all`.
+    fn collection_function(&mut self, cx: &mut FnCx, name: &str, args: &[ast::Arg], span: Span) -> hir::Expr {
+        let builtin =
+            |op: Op, args: Vec<hir::Expr>, ty: Ty| hir::Expr { kind: hir::ExprKind::Builtin { op, args }, ty, span };
+        let wrong = |this: &mut Self, value: &hir::Expr, accepted: &str| {
+            let shown = this.display(value.ty);
+            this.error(Diagnostic::error(
+                codes::TYPE_MISMATCH,
+                format!("`{name}` cannot take a `{shown}`"),
+                value.span,
+                format!("expected {accepted}"),
+            ));
+            error_expr(span)
+        };
+        match name {
+            "min" | "max" if args.len() >= 2 => {
+                let first = self.expr(cx, &args[0].value, None);
+                let mut values = vec![first];
+                for arg in &args[1..] {
+                    let ty = values[0].ty;
+                    values.push(self.expect(cx, &arg.value, ty, None));
+                }
+                let ty = values[0].ty;
+                if ty == Ty::ERROR {
+                    return error_expr(span);
+                }
+                if !self.orderable(ty) {
+                    let first = values.swap_remove(0);
+                    return wrong(self, &first, "values that can be ordered with `<`");
+                }
+                builtin(if name == "min" { Op::Min } else { Op::Max }, values, ty)
+            }
+            "min" | "max" | "sum" | "enumerate" | "any" | "all" => {
+                let expected_args = if name == "sum" { args.len().clamp(1, 2) } else { 1 };
+                if !self.arity(name, args, expected_args, span) {
+                    self.check_all_quietly(cx, args);
+                    return error_expr(span);
+                }
+                let hint = matches!(name, "any" | "all").then(|| self.types.list(Ty::BOOL));
+                let list = self.expr(cx, &args[0].value, hint);
+                if list.ty == Ty::ERROR {
+                    return error_expr(span);
+                }
+                let TyKind::List(elem) = *self.types.kind(list.ty) else {
+                    return wrong(self, &list, "a list");
+                };
+                match name {
+                    "min" | "max" => {
+                        if !self.orderable(elem) {
+                            return wrong(self, &list, "a list of values that can be ordered with `<`");
+                        }
+                        builtin(if name == "min" { Op::MinList } else { Op::MaxList }, vec![list], elem)
+                    }
+                    "sum" => {
+                        if !matches!(elem, Ty::INT | Ty::FLOAT) {
+                            return wrong(self, &list, "a list of `int` or `float`");
+                        }
+                        let mut values = vec![list];
+                        if let Some(start) = args.get(1) {
+                            values.push(self.expect(cx, &start.value, elem, None));
+                        }
+                        builtin(Op::Sum, values, elem)
+                    }
+                    "enumerate" => {
+                        let pair = self.types.tuple(vec![Ty::INT, elem]);
+                        let ty = self.types.list(pair);
+                        builtin(Op::Enumerate, vec![list], ty)
+                    }
+                    _ => {
+                        if elem != Ty::BOOL {
+                            return wrong(self, &list, "a `list[bool]`");
+                        }
+                        builtin(if name == "any" { Op::Any } else { Op::All }, vec![list], Ty::BOOL)
+                    }
+                }
+            }
+            _ => {
+                if !self.arity(name, args, 2, span) {
+                    self.check_all_quietly(cx, args);
+                    return error_expr(span);
+                }
+                let a = self.expr(cx, &args[0].value, None);
+                let b = self.expr(cx, &args[1].value, None);
+                if a.ty == Ty::ERROR || b.ty == Ty::ERROR {
+                    return error_expr(span);
+                }
+                let (TyKind::List(x), TyKind::List(y)) = (self.types.kind(a.ty).clone(), self.types.kind(b.ty).clone())
+                else {
+                    let bad = if matches!(self.types.kind(a.ty), TyKind::List(_)) { b } else { a };
+                    return wrong(self, &bad, "a list");
+                };
+                let pair = self.types.tuple(vec![x, y]);
+                let ty = self.types.list(pair);
+                builtin(Op::Zip, vec![a, b], ty)
+            }
+        }
+    }
+
+    /// `sorted(items, key=f, reverse=True)`: a sorted copy.
+    fn sorted(&mut self, cx: &mut FnCx, args: &[ast::Arg], span: Span) -> hir::Expr {
+        let positional: Vec<&ast::Arg> = args.iter().filter(|a| a.name.is_none()).collect();
+        let [list_arg] = positional.as_slice() else {
+            self.error(Diagnostic::error(
+                codes::WRONG_ARG_COUNT,
+                "`sorted` takes one list, and optionally `key=` and `reverse=`",
+                span,
+                "expected one list",
+            ));
+            self.check_all_quietly(cx, args);
+            return error_expr(span);
+        };
+        let list = self.expr(cx, &list_arg.value, None);
+        if list.ty == Ty::ERROR {
+            self.check_all_quietly(cx, args);
+            return error_expr(span);
+        }
+        let TyKind::List(_) = self.types.kind(list.ty) else {
+            let shown = self.display(list.ty);
+            self.error(Diagnostic::error(
+                codes::TYPE_MISMATCH,
+                format!("`sorted` cannot take a `{shown}`"),
+                list.span,
+                "expected a list",
+            ));
+            return error_expr(span);
+        };
+        let keywords: Vec<&ast::Arg> = args.iter().filter(|a| a.name.is_some()).collect();
+        let list_ty = list.ty;
+        let copy = hir::Expr { kind: hir::ExprKind::Builtin { op: Op::ListCopy, args: vec![list] }, ty: list_ty, span };
+        let temp = cx.temp(list_ty, span);
+        let load = hir::Expr { kind: hir::ExprKind::Local(temp), ty: list_ty, span };
+        let Some(sort) = self.sort_by(cx, load.clone(), &keywords, span) else { return error_expr(span) };
+        hir::Expr {
+            kind: hir::ExprKind::Block {
+                stmts: vec![hir::Stmt::Assign { place: hir::Place::Local(temp), value: copy }, hir::Stmt::Expr(sort)],
+                value: Box::new(load),
+            },
+            ty: list_ty,
+            span,
+        }
+    }
+
+    /// Sort `list` in place, with the `key=` and `reverse=` keyword arguments.
+    fn sort_by(&mut self, cx: &mut FnCx, list: hir::Expr, keywords: &[&ast::Arg], span: Span) -> Option<hir::Expr> {
+        let TyKind::List(elem) = *self.types.kind(list.ty) else { return None };
+        let mut key: Option<hir::Expr> = None;
+        let mut reverse: Option<hir::Expr> = None;
+        for arg in keywords {
+            let keyword = arg.name.as_ref().expect("keyword arguments");
+            match keyword.name.as_str() {
+                "key" => {
+                    let value = match &arg.value.kind {
+                        ast::ExprKind::Lambda { params, body } if params.len() == 1 => {
+                            self.lambda_with(cx, params, body, vec![elem], None, arg.value.span)
+                        }
+                        _ => {
+                            // The return type is only a placeholder: the key can be any orderable type.
+                            let hint = self.types.func(vec![elem], Ty::ERROR);
+                            self.expr(cx, &arg.value, Some(hint))
+                        }
+                    };
+                    match self.types.kind(value.ty).clone() {
+                        TyKind::Func(params, ret) if params == [elem] => {
+                            // Code generation collects the keys in a list of this type.
+                            self.types.list(ret);
+                            if !self.orderable(ret) {
+                                let shown = self.display(ret);
+                                self.error(Diagnostic::error(
+                                    codes::BAD_OPERANDS,
+                                    format!("the sort key is a `{shown}`, which cannot be ordered"),
+                                    arg.value.span,
+                                    "keys must be comparable with `<`",
+                                ));
+                                return None;
+                            }
+                            key = Some(value);
+                        }
+                        TyKind::Error => return None,
+                        _ => {
+                            let (shown, want) = (self.display(value.ty), self.display(elem));
+                            self.error(
+                                Diagnostic::error(
+                                    codes::TYPE_MISMATCH,
+                                    format!("`key` must be a function taking a `{want}`, found `{shown}`"),
+                                    arg.value.span,
+                                    "not a key function",
+                                )
+                                .with_help("for example `key=lambda item: item.name`"),
+                            );
+                            return None;
+                        }
+                    }
+                }
+                "reverse" => reverse = Some(self.expect(cx, &arg.value, Ty::BOOL, None)),
+                other => {
+                    self.error(Diagnostic::error(
+                        codes::NO_SUCH_MEMBER,
+                        format!("sorting has no option `{other}`"),
+                        keyword.span,
+                        "the options are `key` and `reverse`",
+                    ));
+                    return None;
+                }
+            }
+        }
+        if key.is_none() && !self.orderable(elem) {
+            let shown = self.display(elem);
+            self.error(
+                Diagnostic::error(
+                    codes::BAD_OPERANDS,
+                    format!("a list of `{shown}` cannot be sorted"),
+                    span,
+                    "elements have no order",
+                )
+                .with_help(format!("pass `key=` to sort by part of each value, or implement `Ord` for `{shown}`")),
+            );
+            return None;
+        }
+        let key = key.unwrap_or(hir::Expr { kind: hir::ExprKind::None, ty: Ty::NONE, span });
+        let reverse = reverse.unwrap_or(hir::Expr { kind: hir::ExprKind::Bool(false), ty: Ty::BOOL, span });
+        Some(hir::Expr {
+            kind: hir::ExprKind::Builtin { op: Op::ListSortBy, args: vec![list, key, reverse] },
+            ty: Ty::NONE,
+            span,
+        })
+    }
+
+    /// The trait methods that built-in types have: `to_str`, `eq`, `cmp`, `hash`, and the
+    /// number traits' `add`, `sub` and `mul`. Generic code calls these through bounds.
+    fn builtin_trait_method(
+        &mut self,
+        cx: &mut FnCx,
+        receiver: hir::Expr,
+        name: &ast::Ident,
+        args: &[ast::Arg],
+        span: Span,
+    ) -> Result<hir::Expr, hir::Expr> {
+        let ty = receiver.ty;
+        let n = args.len();
+        let numeric = matches!(ty, Ty::INT | Ty::FLOAT);
+        let applies = match name.name.as_str() {
+            "to_str" => n == 0 && self.displayable(ty),
+            "hash" => n == 0 && self.hashable(ty),
+            "eq" => n == 1 && self.equatable(ty),
+            "cmp" => n == 1 && self.orderable(ty),
+            "add" | "sub" | "mul" => n == 1 && numeric,
+            _ => false,
+        };
+        if !applies || args.iter().any(|a| a.name.is_some()) {
+            return Err(receiver);
+        }
+        let other = args.first().map(|a| self.expect(cx, &a.value, ty, None));
+        let make = |kind: hir::ExprKind, ty: Ty| hir::Expr { kind, ty, span };
+        Ok(match (name.name.as_str(), other) {
+            ("to_str", _) => make(hir::ExprKind::Builtin { op: Op::ToStr, args: vec![receiver] }, Ty::STR),
+            ("hash", _) => make(hir::ExprKind::Builtin { op: Op::Hash, args: vec![receiver] }, Ty::INT),
+            ("eq", Some(other)) => make(
+                hir::ExprKind::Binary { op: hir::BinaryOp::Eq, lhs: Box::new(receiver), rhs: Box::new(other) },
+                Ty::BOOL,
+            ),
+            ("cmp", Some(other)) => make(hir::ExprKind::Builtin { op: Op::Cmp, args: vec![receiver, other] }, Ty::INT),
+            (method, Some(other)) => {
+                let op = match (method, ty) {
+                    ("add", Ty::INT) => hir::BinaryOp::IntAdd,
+                    ("sub", Ty::INT) => hir::BinaryOp::IntSub,
+                    ("mul", Ty::INT) => hir::BinaryOp::IntMul,
+                    ("add", _) => hir::BinaryOp::FloatAdd,
+                    ("sub", _) => hir::BinaryOp::FloatSub,
+                    _ => hir::BinaryOp::FloatMul,
+                };
+                make(hir::ExprKind::Binary { op, lhs: Box::new(receiver), rhs: Box::new(other) }, ty)
+            }
+            _ => unreachable!("arity checked above"),
+        })
+    }
+
     pub(super) fn is_builtin_method(&self, ty: Ty, name: &str) -> bool {
         let methods = match self.types.kind(ty) {
             TyKind::Str => STR_METHODS,
@@ -219,18 +505,19 @@ impl Checker<'_, '_> {
                     "remove" => Some((Op::ListRemove, vec![elem], Ty::NONE)),
                     "index" => Some((Op::ListIndex, vec![elem], Ty::INT)),
                     "clear" => Some((Op::ListClear, vec![], Ty::NONE)),
-                    "sort" if !self.orderable(elem) => {
-                        let shown = self.display(elem);
-                        self.error(
-                            Diagnostic::error(
-                                codes::BAD_OPERANDS,
-                                format!("a list of `{shown}` cannot be sorted yet"),
-                                name.span,
-                                "elements have no order",
-                            )
-                            .with_help("`sort` works on lists of numbers, strings and booleans"),
-                        );
-                        return error_expr(span);
+                    "sort" if !args.is_empty() || !self.orderable(elem) => {
+                        if let Some(arg) = args.iter().find(|a| a.name.is_none()) {
+                            self.error(Diagnostic::error(
+                                codes::WRONG_ARG_COUNT,
+                                "`sort` takes only the keyword arguments `key=` and `reverse=`",
+                                arg.value.span,
+                                "positional argument",
+                            ));
+                            self.check_all_quietly(cx, args);
+                            return error_expr(span);
+                        }
+                        let keywords: Vec<&ast::Arg> = args.iter().collect();
+                        return self.sort_by(cx, receiver, &keywords, span).unwrap_or_else(|| error_expr(span));
                     }
                     "sort" => Some((Op::ListSort, vec![], Ty::NONE)),
                     "reverse" => Some((Op::ListReverse, vec![], Ty::NONE)),
@@ -279,7 +566,10 @@ impl Checker<'_, '_> {
         };
 
         let Some((op, params, ret)) = signature else {
-            return self.unknown_builtin_method(cx, ty, &kind, name, args, span);
+            return match self.builtin_trait_method(cx, receiver, name, args, span) {
+                Ok(value) => value,
+                Err(_) => self.unknown_builtin_method(cx, ty, &kind, name, args, span),
+            };
         };
         if !self.no_keywords(args, &format!("`{}`", name.name)) || !self.arity(&name.name, args, params.len(), span) {
             for arg in args {
@@ -312,7 +602,8 @@ impl Checker<'_, '_> {
             TyKind::List(_) => LIST_METHODS,
             TyKind::Dict(..) => DICT_METHODS,
             TyKind::Result(..) => RESULT_METHODS,
-            _ => OPTION_METHODS,
+            TyKind::Option(_) => OPTION_METHODS,
+            _ => &[],
         };
         let help = match name.name.as_str() {
             "startswith" => Some("the method is called `starts_with`".to_string()),

@@ -4,5 +4,4 @@ def main():
     items = {1, 2}
     with open("data.txt") as f:
         print("no")
-    double = lambda x: x * 2
     print("still checked")

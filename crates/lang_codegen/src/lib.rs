@@ -18,11 +18,20 @@
 //! | `tuple[...]` | an LLVM struct of the elements |
 //! | user enum | `ptr` to an immutable object `{ ptr desc, i64 tag, fields... }`; variants without fields are static constants |
 //! | trait object | `{ ptr data, ptr vtable }` |
+//! | function value `def(A) -> R` | `{ ptr code, ptr env }`: code takes the environment first, then the arguments |
 //! | `T?` | the same as `T` with a null first pointer for `None` when `T` is a struct, list, dict, enum, `str` or trait object; otherwise `{ i1, T }` |
 //! | `Result[T, E]` | `{ i1 ok, T, E }`, leaving out `T` when it is `None` |
 //!
 //! A vtable is an array of pointers: the concrete type's descriptor, then the vtables of the
 //! trait's required traits in declaration order, then the methods in declaration order.
+//!
+//! Closures: a variable captured by a lambda or nested function lives in a heap cell, and its
+//! stack slot holds the cell's address. A closure's environment is an array of the cells it
+//! captures. Named functions and bound methods used as values get small adapter functions that
+//! take (and ignore, or unpack) an environment, so every function value is called the same way.
+//!
+//! Generic code is compiled only through its instances; HIR functions and types marked `generic`
+//! are skipped.
 //!
 //! Split across files: statements (`stmt.rs`), expressions (`expr.rs`), built-in functions and
 //! methods (`builtins.rs`), and per-type helper functions such as equality and printing
@@ -138,6 +147,8 @@ fn symbol_name(module: &str, function: &str) -> String {
 /// `i` i64, `f` double, `s` the `{ ptr, i64 }` string pair, `v` void.
 const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_alloc", "p", "ip"),
+    ("lrt_alloc_raw", "p", "i"),
+    ("lrt_list_sort_by", "v", "pppi"),
     ("lrt_panic", "v", "pipi"),
     ("lrt_panic_index", "v", "iipi"),
     ("lrt_int_pow", "i", "iipi"),
@@ -215,6 +226,8 @@ enum Helper {
     Push { repr: bool },
     /// `(T) -> i64`, fastcc: a derived `Hash`.
     Hash,
+    /// `(T, T) -> i64`, fastcc: three-way comparison of tuples, lists and types with `Ord`.
+    Cmp,
 }
 
 /// Per-function code generation state.
@@ -222,6 +235,8 @@ struct FnState<'ctx> {
     function: FunctionValue<'ctx>,
     /// One slot per HIR local; `None` for locals of type `None`.
     slots: Vec<Option<PointerValue<'ctx>>>,
+    /// Per local: whether its slot holds the address of a heap cell with the value.
+    boxed: Vec<bool>,
     /// Enclosing loops: (where `continue` goes, where `break` goes).
     loops: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
     /// The function's return type, for `?`.
@@ -235,8 +250,10 @@ struct Codegen<'ctx, 'a> {
     td: &'a TargetData,
     program: &'a Program,
     sources: &'a SourceMap,
-    /// Indexed by [`FuncId`].
-    functions: Vec<FunctionValue<'ctx>>,
+    /// Indexed by [`FuncId`]; `None` for generic functions, which are not compiled.
+    functions: Vec<Option<FunctionValue<'ctx>>>,
+    /// Adapters that let named functions and bound methods be called as function values.
+    adapters: HashMap<(FuncId, bool), FunctionValue<'ctx>>,
     /// Indexed by struct id: `{ ptr descriptor, fields... }`.
     struct_types: Vec<StructType<'ctx>>,
     /// Indexed by enum id, then variant: `{ ptr descriptor, i64 tag, fields... }`.
@@ -287,6 +304,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             program,
             sources,
             functions: Vec::new(),
+            adapters: HashMap::new(),
             struct_types,
             variant_types,
             dyn_type: cx.struct_type(&[ptr.into(), ptr.into()], false),
@@ -319,11 +337,17 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         };
         // Struct bodies can refer to each other, so they are filled in after all are declared.
         for (index, def) in program.structs.iter().enumerate() {
+            if def.generic {
+                continue;
+            }
             let mut fields: Vec<BasicTypeEnum> = vec![ptr.into()];
             fields.extend(def.fields.iter().map(|f| codegen.llty(f.ty).expect("fields always have a value type")));
             codegen.struct_types[index].set_body(&fields, false);
         }
         for (enum_index, def) in program.enums.iter().enumerate() {
+            if def.generic {
+                continue;
+            }
             for (variant_index, variant) in def.variants.iter().enumerate() {
                 let mut fields: Vec<BasicTypeEnum> = vec![ptr.into(), i64_type.into()];
                 fields.extend(
@@ -352,7 +376,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
 
     /// Values that are a pair whose first part is a non-null pointer: strings and trait objects.
     fn is_pointer_pair(&self, ty: Ty) -> bool {
-        matches!(self.kind(ty), TyKind::Str | TyKind::Dyn(_) | TyKind::SelfType(_))
+        matches!(self.kind(ty), TyKind::Str | TyKind::Dyn(_) | TyKind::SelfType(_) | TyKind::Func(..))
     }
 
     /// Whether `T?` represents `None` as a null pointer, with no separate flag.
@@ -370,7 +394,8 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             TyKind::Bool => self.cx.bool_type().into(),
             TyKind::Str => self.str_type.into(),
             TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..) | TyKind::Enum(_) => self.ptr_type().into(),
-            TyKind::Dyn(_) | TyKind::SelfType(_) => self.dyn_type.into(),
+            TyKind::Dyn(_) | TyKind::SelfType(_) | TyKind::Func(..) => self.dyn_type.into(),
+            TyKind::Param(_) => unreachable!("generic code is not compiled"),
             TyKind::Result(ok, err) => {
                 let mut fields: Vec<BasicTypeEnum> = vec![self.cx.bool_type().into()];
                 fields.extend(self.llty(*ok));
@@ -406,7 +431,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
     fn has_pointers(&self, ty: Ty) -> bool {
         match self.kind(ty) {
             TyKind::Str | TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..) => true,
-            TyKind::Enum(_) | TyKind::Dyn(_) | TyKind::SelfType(_) => true,
+            TyKind::Enum(_) | TyKind::Dyn(_) | TyKind::SelfType(_) | TyKind::Func(..) => true,
             TyKind::Option(inner) => self.has_pointers(*inner),
             TyKind::Result(ok, err) => self.has_pointers(*ok) || self.has_pointers(*err),
             TyKind::Tuple(items) => items.iter().any(|t| self.has_pointers(*t)),
@@ -627,7 +652,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         let saved_state = self.state.take();
         let entry = self.cx.append_basic_block(function, "entry");
         self.b.position_at_end(entry);
-        self.state = Some(FnState { function, slots: Vec::new(), loops: Vec::new(), ret: Ty::NONE });
+        self.state = Some(FnState { function, slots: Vec::new(), boxed: Vec::new(), loops: Vec::new(), ret: Ty::NONE });
         let result = body(self);
         self.state = saved_state;
         if let Some(block) = saved_block {
@@ -658,8 +683,20 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
 
     fn emit(mut self) {
         for (index, function) in self.program.functions.iter().enumerate() {
-            let params: Vec<BasicMetadataTypeEnum> =
-                function.params.iter().map(|local| self.value_type(function.locals[local.0].ty).into()).collect();
+            if function.generic {
+                self.functions.push(None);
+                continue;
+            }
+            let mut params: Vec<BasicMetadataTypeEnum> = Vec::new();
+            if function.closure {
+                params.push(self.ptr_type().into());
+            }
+            params.extend(
+                function
+                    .params
+                    .iter()
+                    .map(|local| -> BasicMetadataTypeEnum { self.value_type(function.locals[local.0].ty).into() }),
+            );
             let fn_type = match self.llty(function.ret) {
                 Some(ret) => ret.fn_type(&params, false),
                 None => self.cx.void_type().fn_type(&params, false),
@@ -676,31 +713,68 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
                 value
             };
             value.add_attribute(AttributeLoc::Function, self.nounwind);
-            for (param, local) in value.get_param_iter().zip(&function.params) {
+            let skip = usize::from(function.closure);
+            for (param, local) in value.get_param_iter().skip(skip).zip(&function.params) {
                 param.set_name(&function.locals[local.0].name);
             }
-            self.functions.push(value);
+            self.functions.push(Some(value));
         }
         for index in 0..self.program.functions.len() {
-            self.define(FuncId(index));
+            if !self.program.functions[index].generic {
+                self.define(FuncId(index));
+            }
         }
+    }
+
+    /// The LLVM function for a HIR function, which must not be generic.
+    fn function_value(&self, id: FuncId) -> FunctionValue<'ctx> {
+        self.functions[id.0].expect("generic functions are never called from compiled code")
     }
 
     fn define(&mut self, id: FuncId) {
         let function = &self.program.functions[id.0];
-        let value = self.functions[id.0];
+        let value = self.function_value(id);
         self.in_function(value, |this| {
+            let ptr = this.ptr_type();
             let slots: Vec<Option<PointerValue>> = function
                 .locals
                 .iter()
-                .map(|local| this.llty(local.ty).map(|ty| this.b.build_alloca(ty, &local.name).must()))
+                .map(|local| {
+                    let ty = this.llty(local.ty)?;
+                    let slot_type = if local.boxed { ptr.into() } else { ty };
+                    Some(this.b.build_alloca(slot_type, &local.name).must())
+                })
                 .collect();
-            for (param, local) in value.get_param_iter().zip(&function.params) {
+            // Captured variables: the cell comes from the environment. Other boxed variables
+            // get a new cell.
+            let env = function.closure.then(|| value.get_nth_param(0).unwrap().into_pointer_value());
+            for (index, local) in function.locals.iter().enumerate() {
+                let Some(slot) = slots[index] else { continue };
+                if let Some(capture) = local.capture {
+                    let env = env.expect("closures have an environment");
+                    // SAFETY (LLVM): the environment holds one pointer per capture.
+                    let at = unsafe { this.b.build_in_bounds_gep(ptr, env, &[this.i64(capture as i64)], "").must() };
+                    let cell = this.b.build_load(ptr, at, "cell").must();
+                    this.b.build_store(slot, cell).must();
+                } else if local.boxed {
+                    let size = this.i64(this.size_of(local.ty) as i64);
+                    let cell = this.call_rt("lrt_alloc_raw", &[size.into()]).unwrap();
+                    this.b.build_store(slot, cell).must();
+                }
+            }
+            let skip = usize::from(function.closure);
+            for (param, local) in value.get_param_iter().skip(skip).zip(&function.params) {
                 let slot = slots[local.0].expect("parameters have a slot");
-                this.b.build_store(slot, param).must();
+                if function.locals[local.0].boxed {
+                    let cell = this.b.build_load(ptr, slot, "").must().into_pointer_value();
+                    this.b.build_store(cell, param).must();
+                } else {
+                    this.b.build_store(slot, param).must();
+                }
             }
             let state = this.state.as_mut().unwrap();
             state.slots = slots;
+            state.boxed = function.locals.iter().map(|l| l.boxed).collect();
             state.ret = function.ret;
             this.stmts(&function.body);
             if function.ret == Ty::NONE {

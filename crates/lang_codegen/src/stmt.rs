@@ -21,9 +21,23 @@ impl<'ctx> Codegen<'ctx, '_> {
         self.state.as_ref().expect("inside a function").slots[local.0]
     }
 
-    pub(crate) fn load_local(&mut self, local: LocalId, ty: Ty) -> Option<BasicValueEnum<'ctx>> {
+    /// Where a local's value is: its stack slot, or the heap cell the slot points to.
+    fn local_ptr(&mut self, local: LocalId) -> Option<PointerValue<'ctx>> {
         let slot = self.slot(local)?;
-        Some(self.b.build_load(self.value_type(ty), slot, "").must())
+        if self.state.as_ref().expect("inside a function").boxed[local.0] {
+            return Some(self.b.build_load(self.ptr_type(), slot, "cell").must().into_pointer_value());
+        }
+        Some(slot)
+    }
+
+    /// The address of a boxed local's cell, for a closure's environment.
+    pub(crate) fn local_cell(&mut self, local: LocalId) -> PointerValue<'ctx> {
+        self.local_ptr(local).expect("captured variables have a value")
+    }
+
+    pub(crate) fn load_local(&mut self, local: LocalId, ty: Ty) -> Option<BasicValueEnum<'ctx>> {
+        let ptr = self.local_ptr(local)?;
+        Some(self.b.build_load(self.value_type(ty), ptr, "").must())
     }
 
     fn stmt(&mut self, stmt: &Stmt) {
@@ -97,8 +111,8 @@ impl<'ctx> Codegen<'ctx, '_> {
         let Some(value) = value else { return };
         match place {
             Place::Local(local) => {
-                if let Some(slot) = self.slot(*local) {
-                    self.b.build_store(slot, value).must();
+                if let Some(ptr) = self.local_ptr(*local) {
+                    self.b.build_store(ptr, value).must();
                 }
             }
             Place::Field { object, index } => {
@@ -223,6 +237,26 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.build_conditional_branch(done, exit, body_block).must();
                 self.b.position_at_end(body_block);
                 self.assign_target(target, ch);
+                self.loop_body(body, header, exit);
+                self.b.build_unconditional_branch(header).must();
+                self.b.position_at_end(exit);
+            }
+            LoopSource::Iterator { iterator, next } => {
+                // Call `next` until it returns `None`.
+                let iterator_value = self.value(iterator);
+                let next_function = self.function_value(*next);
+                let option_ty = self.program.functions[next.0].ret;
+                let (header, body_block, exit) = (self.block("for"), self.block("body"), self.block("endfor"));
+                self.b.build_unconditional_branch(header).must();
+                self.b.position_at_end(header);
+                let call = self.b.build_call(next_function, &[iterator_value.into()], "").must();
+                call.set_call_convention(crate::CALLCONV_FAST);
+                let item = call.try_as_basic_value().basic().expect("`next` returns an optional");
+                let present = self.opt_is_some(option_ty, item);
+                self.b.build_conditional_branch(present, body_block, exit).must();
+                self.b.position_at_end(body_block);
+                let element = self.opt_inner(option_ty, item);
+                self.assign_target(target, element);
                 self.loop_body(body, header, exit);
                 self.b.build_unconditional_branch(header).must();
                 self.b.position_at_end(exit);

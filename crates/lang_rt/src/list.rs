@@ -300,6 +300,36 @@ pub unsafe extern "C" fn lrt_list_sort(list: *mut List, cmp: CmpFn) {
     }
 }
 
+/// Sort a list stably by precomputed keys (`keys[i]` belongs to `list[i]`), or by the elements
+/// themselves when `keys` is null. With `reverse`, the order is descending but elements with equal
+/// keys keep their original order, as in Python.
+///
+/// # Safety
+/// `list` must be a list; `keys`, if not null, a list of the same length; `cmp` must compare two
+/// keys (or two elements).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lrt_list_sort_by(list: *mut List, keys: *mut List, cmp: CmpFn, reverse: i64) {
+    unsafe {
+        let len = (*list).len as usize;
+        if len < 2 {
+            return;
+        }
+        let by = if keys.is_null() { list } else { keys };
+        let mut order: Vec<usize> = (0..len).collect();
+        if reverse != 0 {
+            order.sort_by(|&a, &b| cmp(slot(by, b), slot(by, a)).cmp(&0));
+        } else {
+            order.sort_by(|&a, &b| cmp(slot(by, a), slot(by, b)).cmp(&0));
+        }
+        let size = elem_size(list);
+        let data = alloc_buffer((*list).desc, (*list).cap as usize);
+        for (to, &from) in order.iter().enumerate() {
+            std::ptr::copy_nonoverlapping(slot(list, from), data.add(to * size), size);
+        }
+        (*list).data = data;
+    }
+}
+
 /// # Safety
 /// Both must be lists of the same type and `eq` must compare two elements.
 #[unsafe(no_mangle)]

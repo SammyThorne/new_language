@@ -335,17 +335,24 @@ with open("data.csv") as f:
 ## Closures (M4)
 
 ```python
-double = lambda x: x * 2                 # parameter types inferred from use
+doubled = map_list(numbers, lambda x: x * 2)   # parameter types come from `map_list`
+names = sorted(users, key=lambda u: u.name)
 
 def make_counter() -> def() -> int:
-    count = 0
+    count = [0]
     def next() -> int:
-        count += 1                       # captures by reference
-        return count
+        count[0] += 1                    # captured by reference; the list is shared
+        return count[0]
     return next
 ```
 
-A function value is always a pair of code pointer and environment, so plain functions, methods bound to an object (`user.rename`) and closures are interchangeable where a `def(...) -> ...` type is expected.
+A function value is always a pair of code pointer and environment, so plain functions, methods bound to an object (`user.rename`), `Type.method` (taking the receiver first), built-in functions such as `len`, and closures are interchangeable where a `def(...) -> ...` type is expected.
+
+A closure reads the enclosing function's variables as they are when it runs, but cannot assign to them (D35): `count = count + 1` inside `next` would be an error, so changing state lives in a list or a struct field. A lambda's parameter types come from the function type expected where it is written; `double = lambda x: x * 2` on its own line has no such type and is an error that suggests `def`.
+
+Comprehensions build lists and dicts: `[f(x) for x in items if x > 0]`, `{k: v for k, v in pairs}`. Their loop variables belong to the comprehension.
+
+Parameters can have defaults, and calls can name arguments: `def greet(name: str, greeting: str = "Hello")`, `greet("Ada", greeting="Hi")`. A default is evaluated afresh at each call that leaves it out.
 
 ## Concurrency (M6)
 
