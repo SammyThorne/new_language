@@ -1978,7 +1978,7 @@ impl User:
     #[test]
     fn errors_recover_at_the_next_statement() {
         let (module, diags) =
-            parse_text("def main():\n    spawn x\n    print(1 +)\n    z()\n\ndef other():\n    w()\n");
+            parse_text("def main():\n    x = {1, 2}\n    print(1 +)\n    z()\n\ndef other():\n    w()\n");
         assert_eq!(codes_of(&diags), [codes::NOT_SUPPORTED_SYNTAX, codes::UNEXPECTED_TOKEN]);
         assert_eq!(module.items.len(), 2);
         assert_eq!(function(&module, 0).body.len(), 1, "only `z()` survives");
