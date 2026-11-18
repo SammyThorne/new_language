@@ -1,0 +1,90 @@
+# expect: {"id":7,"name":"Ada \"Countess\" Lovelace","emailAddress":null,"tier":"Pro","contacts":[{"type":"Email","address":"ada@example.org"},{"type":"Phone","number":"+44 20","mobile":true}],"addresses":[{"city":"London","zip":"W1"},{"city":"Paris","zip":"75001"}],"balance":1234.5,"tags":{"vip":1,"early":2},"location":[51.5,-0.12]}
+# expect: round trip equal: True
+# expect: decoded: Ada "Countess" Lovelace Phone(number='+44 20', mobile=True) Paris (51.5, -0.12)
+# expect: with defaults: Customer(id=1, name='Bo', email=None, tier=Free, contacts=[], addresses=[], balance=0.0, tags={}, location=(0.0, 0.0))
+# expect: error: tier: unknown variant; expected one of "Free", "Pro"
+# expect: error: id: expected an integer, found a string
+# expect: error: missing key "name"
+# expect: error: contacts[0]: missing key "mobile"
+# expect: error: addresses[0].zip: expected a string, found a number
+# expect: error: id: expected an integer, found 1.5
+# expect: Config(port=80, debug=False)
+# expect: unknown key 'verbose'
+# expect: [1.0,0.1,-2.5e-08,1e+100] ["tab\there","line\nbreak","é€😀"]
+# expect: [1, 2, 3] {'a': [True, False]}
+# Milestone 7 exit program: a nested, typed document encoded and decoded back, with renamed
+# fields, defaults, optional fields, tagged enums and error paths.
+
+import json
+
+@derive(Json, Eq, Display)
+struct Address:
+    city: str
+    zip: str
+
+@derive(Json, Eq, Display)
+enum Contact:
+    Email(address: str)
+    Phone(number: str, mobile: bool)
+
+@derive(Json, Eq, Display)
+enum Tier:
+    Free
+    Pro
+
+@derive(Json, Eq, Display)
+struct Customer:
+    id: int
+    name: str
+    @json(name="emailAddress")
+    email: str?
+    tier: Tier
+    contacts: list[Contact]
+    addresses: list[Address] = []
+    balance: float = 0.0
+    tags: dict[str, int] = {}
+    location: tuple[float, float] = (0.0, 0.0)
+
+@json(strict)
+@derive(Json, Display)
+struct Config:
+    port: int
+    debug: bool
+
+def main():
+    ada = Customer(
+        id=7,
+        name="Ada \"Countess\" Lovelace",
+        email=None,
+        tier=Pro,
+        contacts=[Email("ada@example.org"), Phone("+44 20", True)],
+        addresses=[Address("London", "W1"), Address("Paris", "75001")],
+        balance=1234.5,
+        tags={"vip": 1, "early": 2},
+        location=(51.5, -0.12),
+    )
+    text = json.encode(ada)
+    print(text)
+    back = json.decode[Customer](text).unwrap()
+    print("round trip equal:", back == ada)
+    print("decoded:", back.name, back.contacts[1], back.addresses[1].city, back.location)
+
+    minimal = json.decode[Customer]('{"id": 1, "name": "Bo", "tier": "Free", "contacts": [], "extra": [1, {"x": null}]}')
+    print("with defaults:", minimal.unwrap())
+    for broken in [
+        '{"id": 1, "name": "Bo", "tier": "Gold", "contacts": []}',
+        '{"id": "1", "name": "Bo", "tier": "Free", "contacts": []}',
+        '{"id": 1, "tier": "Free", "contacts": []}',
+        '{"id": 1, "name": "Bo", "tier": "Free", "contacts": [{"type": "Phone", "number": "1"}]}',
+        '{"id": 1, "name": "Bo", "tier": "Free", "contacts": [], "addresses": [{"city": "X", "zip": 9}]}',
+        '{"id": 1.5, "name": "Bo", "tier": "Free", "contacts": []}',
+    ]:
+        match json.decode[Customer](broken):
+            case Ok(_):
+                print("unexpectedly decoded")
+            case Err(error):
+                print("error:", error.message())
+    print(json.decode[Config]('{"port": 80, "debug": false}').unwrap())
+    print(json.decode[Config]('{"port": 80, "debug": false, "verbose": true}').unwrap_err().message())
+    print(json.encode([1.0, 0.1, -2.5e-8, 1e100]), json.encode(["tab\there", "line\nbreak", "é€😀"]))
+    print(json.decode[list[int]]("[1, 2, 3]").unwrap(), json.decode[dict[str, list[bool]]]('{"a": [true, false]}').unwrap())

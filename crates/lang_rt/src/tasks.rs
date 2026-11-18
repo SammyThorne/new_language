@@ -32,10 +32,14 @@ unsafe extern "C" {
     fn GC_free(ptr: *mut u8);
 }
 
-/// Called once from the main thread after the collector starts.
-pub fn init() {
-    // SAFETY: called on the main thread after `GC_init`.
-    unsafe { GC_allow_register_threads() };
+/// Let other threads register with the collector. This puts the collector into its
+/// multi-threaded mode, which makes every allocation about half again as slow, so it happens
+/// on the first `spawn` rather than at startup. The first `spawn` is always on the main thread,
+/// since no other thread exists before it, which is where the collector requires the call.
+fn allow_threads() {
+    static ALLOWED: std::sync::Once = std::sync::Once::new();
+    // SAFETY: called on the main thread (see above), after `GC_init`.
+    ALLOWED.call_once(|| unsafe { GC_allow_register_threads() });
 }
 
 // ---- the cap on live tasks ----------------------------------------------------------------
@@ -99,6 +103,7 @@ unsafe impl Send for SendPtr {}
 /// task it reports to.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrt_spawn(entry: extern "C" fn(*mut u8), env: *mut u8, task: *mut Task) {
+    allow_threads();
     {
         let mut live = LIVE.lock().unwrap_or_else(|p| p.into_inner());
         while *live >= max_tasks() {

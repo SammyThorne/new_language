@@ -1,0 +1,167 @@
+"""
+JSON: typed encoding and decoding with `@derive(Json)`, and dynamic values.
+
+    import json
+
+    @derive(Json)
+    struct User:
+        id: int
+        name: str
+        @json(name="emailAddress")
+        email: str?
+
+    user = json.decode[User](text)?          # Result[User, JsonError]
+    text = json.encode(user)
+
+    data = json.parse(text)?                  # json.Value
+    name = data["user"]["name"].as_str()      # str?: None if absent or not a string
+    payload = json.encode(json.object({"ok": True, "tags": ["a", "b"]}))
+
+Encoded JSON is compact: no spaces after `,` and `:`.
+"""
+
+pub struct JsonError:
+    """Why JSON could not be decoded, and where: `addresses[1].zip`."""
+    message: str
+    path: str
+
+impl Error for JsonError:
+    def message(self) -> str:
+        if self.path == "":
+            return self.message
+        return f"{self.path}: {self.message}"
+
+impl Display for JsonError:
+    def to_str(self) -> str:
+        return Error.message(self)
+
+@derive(Eq)
+pub enum Value:
+    """
+    Any JSON value. Indexing never fails: `value["key"]` and `value[0]` give `Null` when the key
+    or index is missing or the value has the wrong shape, so chains like
+    `data["user"]["name"].as_str()` check the type once at the end.
+    """
+    Null
+    Bool(value: bool)
+    Int(value: int)
+    Float(value: float)
+    Str(value: str)
+    Array(items: list[Value])
+    Object(fields: dict[str, Value])
+
+impl ToJson for Value:
+    pass
+
+impl FromJson for Value:
+    pass
+
+impl Display for Value:
+    def to_str(self) -> str:
+        return __json_encode(self)
+
+impl Value:
+    def get_item(self, key: str) -> Value:
+        """The value of a key of an object, or `Null`."""
+        match self:
+            case Object(fields):
+                match fields.get(key):
+                    case Some(value):
+                        return value
+                    case None:
+                        return Null
+            case _:
+                return Null
+
+    def get_index(self, index: int) -> Value:
+        """An element of an array (negative indexes count from the end), or `Null`."""
+        match self:
+            case Array(items):
+                at = index + len(items) if index < 0 else index
+                if at < 0 or at >= len(items):
+                    return Null
+                return items[at]
+            case _:
+                return Null
+
+    def as_str(self) -> str?:
+        match self:
+            case Str(value):
+                return value
+            case _:
+                return None
+
+    def as_int(self) -> int?:
+        match self:
+            case Int(value):
+                return value
+            case _:
+                return None
+
+    def as_float(self) -> float?:
+        """A number as a `float`; integers convert."""
+        match self:
+            case Float(value):
+                return value
+            case Int(number):
+                return float(number)
+            case _:
+                return None
+
+    def as_bool(self) -> bool?:
+        match self:
+            case Bool(value):
+                return value
+            case _:
+                return None
+
+    def as_list(self) -> list[Value]?:
+        match self:
+            case Array(items):
+                return items
+            case _:
+                return None
+
+    def as_dict(self) -> dict[str, Value]?:
+        match self:
+            case Object(fields):
+                return fields
+            case _:
+                return None
+
+    def is_null(self) -> bool:
+        match self:
+            case Null:
+                return True
+            case _:
+                return False
+
+    def len(self) -> int:
+        """The number of elements of an array or keys of an object; 0 for anything else."""
+        match self:
+            case Array(items):
+                return len(items)
+            case Object(fields):
+                return len(fields)
+            case _:
+                return 0
+
+pub def parse(text: str) -> Result[Value, JsonError]:
+    """Read any JSON text as a `Value`."""
+    return __json_decode(text)
+
+pub def decode[T: FromJson](text: str) -> Result[T, JsonError]:
+    """Read JSON text into a typed value."""
+    return __json_decode(text)
+
+pub def encode[T: ToJson](value: T) -> str:
+    """The compact JSON text of a value."""
+    return __json_encode(value)
+
+pub def object(fields: dict[str, Value]) -> Value:
+    """A JSON object. Plain values in the dict literal become `Value`s."""
+    return Object(fields)
+
+pub def array(items: list[Value]) -> Value:
+    """A JSON array. Plain values in the list literal become `Value`s."""
+    return Array(items)

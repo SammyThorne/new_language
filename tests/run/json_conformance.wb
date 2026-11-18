@@ -1,0 +1,36 @@
+# Milestone 7 exit program: every document in tests/json/ named y_*.json must parse, and every
+# one named n_*.json must be rejected (a corpus in the style of JSONTestSuite).
+# expect: accepted 67 of 67 valid documents
+# expect: rejected 94 of 94 invalid documents
+
+import io
+import json
+
+def main():
+    directory = "tests/json"
+    accepted = 0
+    valid = 0
+    rejected = 0
+    invalid = 0
+    for name in io.list_dir(directory).unwrap():
+        text = io.read_file(f"{directory}/{name}")
+        ok = False
+        match text:
+            case Ok(document):
+                ok = json.parse(document).is_ok()
+            case Err(_):
+                ok = False
+        if name.starts_with("y_"):
+            valid += 1
+            if ok:
+                accepted += 1
+            else:
+                print("should have parsed:", name)
+        elif name.starts_with("n_"):
+            invalid += 1
+            if not ok:
+                rejected += 1
+            else:
+                print("should have been rejected:", name)
+    print(f"accepted {accepted} of {valid} valid documents")
+    print(f"rejected {rejected} of {invalid} invalid documents")

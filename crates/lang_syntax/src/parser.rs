@@ -582,6 +582,7 @@ impl Parser<'_> {
     }
 
     fn field(&mut self) -> PResult<FieldDecl> {
+        let annotations = self.annotations()?;
         let visibility = self.visibility();
         let name = self.expect_name("a field name")?;
         if !self.at(&TokenKind::Colon) {
@@ -597,7 +598,7 @@ impl Parser<'_> {
         let ty = self.type_expr()?;
         let default = if self.eat(&TokenKind::Assign) { Some(self.expr()?) } else { None };
         self.end_of_statement()?;
-        Ok(FieldDecl { visibility, name, ty, default })
+        Ok(FieldDecl { annotations, visibility, name, ty, default })
     }
 
     fn enum_decl(&mut self, annotations: Vec<Annotation>, visibility: Visibility) -> PResult<EnumDecl> {
@@ -664,7 +665,13 @@ impl Parser<'_> {
                     let span = self.span();
                     return Err(self.not_supported("default values for variant fields are", span));
                 }
-                fields.push(FieldDecl { visibility: Visibility::Default, name: field_name, ty, default: None });
+                fields.push(FieldDecl {
+                    annotations: Vec::new(),
+                    visibility: Visibility::Default,
+                    name: field_name,
+                    ty,
+                    default: None,
+                });
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
@@ -1476,6 +1483,22 @@ impl Parser<'_> {
                             kind: ExprKind::Slice { object: Box::new(expr), start, stop },
                         };
                     } else {
+                        // `x[a, b]` indexes with a tuple; it is how `dict[str, int]` is written
+                        // as an expression, for type arguments.
+                        let mut start = start;
+                        if self.at(&TokenKind::Comma) {
+                            let first = *start.take().expect("an index expression");
+                            let first_span = first.span;
+                            let mut items = vec![first];
+                            while self.eat(&TokenKind::Comma) {
+                                if self.at(&TokenKind::RBracket) {
+                                    break;
+                                }
+                                items.push(self.expr()?);
+                            }
+                            let span = first_span.to(self.prev_span());
+                            start = Some(Box::new(Expr { kind: ExprKind::Tuple(items), span }));
+                        }
                         let close = self.expect(TokenKind::RBracket, "to close the index")?;
                         let index = start.expect("an index without `:` has an expression");
                         expr =

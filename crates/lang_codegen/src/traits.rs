@@ -41,6 +41,22 @@ impl<'ctx> Codegen<'ctx, '_> {
             return object.into();
         }
         let values: Vec<BasicValueEnum> = fields.iter().map(|f| self.value(f)).collect();
+        self.variant_values(ty, index, values)
+    }
+
+    /// A value of variant `index` with these field values.
+    pub(crate) fn variant_values(
+        &mut self,
+        ty: Ty,
+        index: usize,
+        values: Vec<BasicValueEnum<'ctx>>,
+    ) -> BasicValueEnum<'ctx> {
+        if values.is_empty() {
+            return self.variant(ty, index, &[]);
+        }
+        let enum_index = self.enum_index(ty);
+        let variant_type = self.variant_types[enum_index][index];
+        let desc = self.desc(ty);
         let size = self.i64(self.td.get_abi_size(&variant_type) as i64);
         let object = self.call_rt("lrt_alloc", &[size.into(), desc.into()]).unwrap().into_pointer_value();
         let tag = self.b.build_struct_gep(variant_type, object, 1, "").must();
@@ -383,6 +399,20 @@ impl<'ctx> Codegen<'ctx, '_> {
     }
 
     /// The `ParseError` from the prelude, for a failed `int.parse` or `float.parse`.
+    /// A new struct object with these field values.
+    pub(crate) fn new_struct(&mut self, ty: Ty, values: &[BasicValueEnum<'ctx>]) -> PointerValue<'ctx> {
+        let TyKind::Struct(id) = *self.kind(ty) else { unreachable!("not a struct") };
+        let struct_type = self.struct_types[id.0];
+        let size = self.i64(self.td.get_abi_size(&struct_type) as i64);
+        let desc = self.desc(ty);
+        let object = self.call_rt("lrt_alloc", &[size.into(), desc.into()]).unwrap().into_pointer_value();
+        for (index, value) in values.iter().enumerate() {
+            let ptr = self.b.build_struct_gep(struct_type, object, index as u32 + 1, "").must();
+            self.b.build_store(ptr, *value).must();
+        }
+        object
+    }
+
     pub(crate) fn parse_error(&mut self, text: BasicValueEnum<'ctx>, expected: &str) -> BasicValueEnum<'ctx> {
         let id = self.program.parse_error;
         let struct_type = self.struct_types[id.0];

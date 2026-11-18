@@ -29,6 +29,7 @@ pub struct Program {
     pub builtins: BuiltinTraits,
     /// The prelude's `ParseError`, the error type of `int.parse` and `float.parse`.
     pub parse_error: StructId,
+    pub json: Option<JsonTypes>,
 }
 
 impl Program {
@@ -51,6 +52,17 @@ pub struct BuiltinTraits {
     pub ord: TraitId,
     pub number: TraitId,
     pub shareable: TraitId,
+    pub to_json: TraitId,
+    pub from_json: TraitId,
+}
+
+/// The standard library's `json` module, when the program imports it.
+#[derive(Clone, Copy, Debug)]
+pub struct JsonTypes {
+    /// `json.Value`, whose encoding is the JSON value itself rather than a tagged object.
+    pub value: crate::types::EnumId,
+    /// `json.JsonError`, the error of decoding.
+    pub error: StructId,
 }
 
 #[derive(Debug)]
@@ -103,12 +115,18 @@ pub struct StructDef {
     /// An instance of a generic struct whose type arguments are still parameters, used only
     /// to check generic code. It has no layout and generates no code.
     pub generic: bool,
+    /// `@json(strict)`: decoding rejects keys that are not fields.
+    pub json_strict: bool,
 }
 
 #[derive(Debug)]
 pub struct FieldDef {
     pub name: String,
     pub ty: Ty,
+    /// The key in JSON: the field's name, or the one given by `@json(name="...")`.
+    pub json_name: String,
+    /// The default value, for decoding JSON that leaves the field out.
+    pub default: Option<Expr>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -463,6 +481,8 @@ pub enum BinaryOp {
     FloatMod,
     FloatPow,
     StrConcat,
+    /// `text * n`: the string repeated; empty when `n` is not positive.
+    StrRepeat,
     ListConcat,
     Eq,
     NotEq,
@@ -588,4 +608,8 @@ pub enum Builtin {
     AtomicAdd,
     /// `compare_and_set(expected, new)`: whether the value was `expected` and is now `new`.
     AtomicCas,
+    /// The JSON text of a value.
+    JsonEncode,
+    /// Parse JSON text into the `Ok` type of the result type, or a `json.JsonError`.
+    JsonDecode,
 }

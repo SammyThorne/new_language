@@ -369,6 +369,18 @@ As specified in docs/04, with these choices: an enum is shareable when all its v
 
 The roadmap asks for the runtime to be run under ThreadSanitizer. That needs a nightly Rust toolchain (`-Zsanitizer=thread`), which this machine does not have; installing one is a download left to the user. The concurrency programs instead run a thousand times in release mode and a hundred times with the collector running before every allocation (`tests/stress.sh`). The command to run when a nightly toolchain is present: `RUSTFLAGS=-Zsanitizer=thread cargo +nightly build -p lang_rt --target x86_64-unknown-linux-gnu`, then link a test program against that `liblang_rt.a` with `WEBY_RUNTIME`.
 
+### D46. The collector's multi-threaded mode starts with the first `spawn`
+
+Boehm needs `GC_allow_register_threads` before any other thread registers, and once called, every allocation takes its thread-safe path, about 50% slower on allocation-heavy code. It is called on the first `spawn`, which is always on the main thread. Single-threaded programs never pay for threads; a program that spawns pays from then on.
+
+### D47. JSON: generated code, a strict scanner, and a hand-written corpus
+
+`json` is a standard library module written in the language. Its `Value` is an ordinary enum; `encode`, `decode` and `parse` are thin wrappers over two compiler intrinsics. Code generation writes an encoder and a decoder per type: keys are matched in generated code, values go straight into fields, and there is no intermediate tree. The scanner follows RFC 8259 strictly (no comments, trailing commas, `NaN`, leading zeros or lone surrogates; at most 512 levels of nesting). Encoding is compact, like Go's; floats are written as Python writes them (`1.0`, `1e+100`), and NaN and the infinities as `null`. Integers that do not fit in `int` decode as floats in a `json.Value` and are an error for an `int` field. The conformance corpus in `tests/json/` was written for this project in the style of JSONTestSuite, since fetching the suite is a download not yet approved; running the real suite is a small follow-up.
+
+### D48. Indexing user types, and literals as `json.Value`
+
+`x[i]` on a struct or enum calls `get_index(self, i: int)` when the index is an `int`, and `get_item(self, key)` otherwise, if the type has them. That is how `data["user"]["name"]` and `data["items"][0]` work on `json.Value`, and it is open to any type. Where a `json.Value` is expected, `True`, numbers, strings, `None`, and list and dict literals become values, so `json.object({"ok": True, "tags": ["a"]})` needs no wrapping.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

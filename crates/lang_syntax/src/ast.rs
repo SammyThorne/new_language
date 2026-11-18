@@ -103,6 +103,8 @@ pub struct StructDecl {
 
 #[derive(Debug)]
 pub struct FieldDecl {
+    /// `@json(name="...")` lines before the field.
+    pub annotations: Vec<Annotation>,
     pub visibility: Visibility,
     pub name: Ident,
     pub ty: TypeExpr,

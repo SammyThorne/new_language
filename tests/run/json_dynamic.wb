@@ -1,0 +1,74 @@
+# expect: id: 42 paid: True note is null: True
+# expect: A-1 x2 at 9.5
+# expect: B-7 x1 at 0.0
+# expect: total: 19.0
+# expect: missing: None True "B-7"
+# expect: order:
+# expect:   id:
+# expect:     42
+# expect:   items:
+# expect:     2 items
+# expect:       price:
+# expect:         9.5
+# expect:       qty:
+# expect:         2
+# expect:       sku:
+# expect:         "A-1"
+# expect:       qty:
+# expect:         1
+# expect:       sku:
+# expect:         "B-7"
+# expect:   note:
+# expect:     null
+# expect:   paid:
+# expect:     true
+# expect: {"order":42,"skus":["A-1","B-7"],"total":19.0,"shipped":false,"meta":{"source":"test","version":2},"notes":null}
+# expect: encodes the same after a round trip: True
+# Milestone 7 exit program: walking a document whose shape is not known in advance, and
+# building one on the fly.
+
+import json
+
+def describe(value: json.Value, depth: int) -> list[str]:
+    pad = "  " * depth
+    lines: list[str] = []
+    match value:
+        case json.Value.Object(fields):
+            for key in sorted(fields.keys()):
+                lines.append(f"{pad}{key}:")
+                lines.extend(describe(fields[key], depth + 1))
+        case json.Value.Array(items):
+            lines.append(f"{pad}{len(items)} items")
+            for item in items:
+                lines.extend(describe(item, depth + 1))
+        case _:
+            lines.append(f"{pad}{value}")
+    return lines
+
+def main():
+    text = '{"order": {"id": 42, "items": [{"sku": "A-1", "qty": 2, "price": 9.5}, {"sku": "B-7", "qty": 1}], "paid": true, "note": null}}'
+    data = json.parse(text).unwrap()
+    order = data["order"]
+    print("id:", order["id"].as_int(), "paid:", order["paid"].as_bool(), "note is null:", order["note"].is_null())
+    total = 0.0
+    for item in order["items"].as_list().unwrap_or([]):
+        sku = item["sku"].as_str().unwrap_or("?")
+        qty = item["qty"].as_int().unwrap_or(0)
+        price = item["price"].as_float().unwrap_or(0.0)
+        print(f"{sku} x{qty} at {price}")
+        total += float(qty) * price
+    print("total:", total)
+    print("missing:", data["order"]["customer"]["name"].as_str(), data["order"]["items"][5]["sku"].is_null(), order["items"][-1]["sku"])
+    for line in describe(data, 0):
+        print(line)
+
+    report = json.object({
+        "order": order["id"],
+        "skus": ["A-1", "B-7"],
+        "total": total,
+        "shipped": False,
+        "meta": {"source": "test", "version": 2},
+        "notes": None,
+    })
+    print(report)
+    print("encodes the same after a round trip:", json.encode(json.parse(json.encode(report)).unwrap()) == json.encode(report))

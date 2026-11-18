@@ -289,3 +289,29 @@ pub unsafe extern "C" fn lrt_dict_copy(d: *mut Dict) -> *mut Dict {
         copy
     }
 }
+
+/// Whether two dicts have the same keys with equal values (in any order). `value_eq` compares
+/// two values given pointers to them.
+///
+/// # Safety
+/// Both must be dicts of the same type, and `value_eq` must compare their values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lrt_dict_eq(a: *mut Dict, b: *mut Dict, value_eq: crate::EqFn) -> i64 {
+    unsafe {
+        if (*a).len != (*b).len {
+            return 0;
+        }
+        let value_offset = dict(a).value_offset();
+        let mut cursor = 0i64;
+        loop {
+            let entry = lrt_dict_next(a, &mut cursor);
+            if entry.is_null() {
+                return 1;
+            }
+            let other = lrt_dict_find(b, entry.add(8));
+            if other.is_null() || value_eq(entry.add(value_offset), other) == 0 {
+                return 0;
+            }
+        }
+    }
+}

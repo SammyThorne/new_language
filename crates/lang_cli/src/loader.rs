@@ -74,6 +74,18 @@ impl Loader<'_> {
         let span: Span = import.path[0].span.to(import.path.last().expect("a path").span);
         match self.states.get(&name) {
             Some(State::Done) => return,
+            Some(State::Loading) if self.stack.len() == 1 && lang_sema::stdlib::source(&name).is_some() => {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::IMPORT_CYCLE,
+                        format!("this file is named `{name}`, which hides the standard library module `{name}`"),
+                        span,
+                        "imports the file itself",
+                    )
+                    .with_help("rename the file"),
+                );
+                return;
+            }
             Some(State::Loading) => {
                 let start = self.stack.iter().position(|n| *n == name).unwrap_or(0);
                 let mut cycle: Vec<&str> = self.stack[start..].iter().map(String::as_str).collect();

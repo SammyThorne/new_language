@@ -339,6 +339,19 @@ pub unsafe extern "C" fn lrt_str_next_char(ptr: *const u8, len: i64, offset: *mu
     }
 }
 
+/// `text * n`: the string repeated `n` times; empty when `n` is not positive.
+///
+/// # Safety
+/// `ptr` and `len` must describe a UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lrt_str_repeat(ptr: *const u8, len: i64, n: i64) -> Str {
+    if n <= 0 || len <= 0 {
+        return Str::empty();
+    }
+    let text = unsafe { Str::from_raw(ptr, len) };
+    Str::from_bytes(text.repeat(n as usize).as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

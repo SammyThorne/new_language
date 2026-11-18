@@ -630,6 +630,10 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.call_rt("lrt_str_concat", &[lp, ll, rp, rl]).unwrap()
             }
             BinaryOp::ListConcat => self.call_rt("lrt_list_concat", &[l, r]).unwrap(),
+            BinaryOp::StrRepeat => {
+                let [ptr, len] = self.str_parts(l);
+                self.call_rt("lrt_str_repeat", &[ptr, len, r]).unwrap()
+            }
             BinaryOp::Eq => self.emit_eq(operand_ty, l, r).into(),
             BinaryOp::NotEq => {
                 let eq = self.emit_eq(operand_ty, l, r);
@@ -733,8 +737,13 @@ impl<'ctx> Codegen<'ctx, '_> {
                 call.set_call_convention(crate::CALLCONV_FAST);
                 call.try_as_basic_value().basic().unwrap().into_int_value()
             }
-            TyKind::Dict(..)
-            | TyKind::Dyn(_)
+            TyKind::Dict(_, value_ty) => {
+                let value_ty = *value_ty;
+                let eq = self.helper(Helper::EqPtr, value_ty).as_global_value().as_pointer_value();
+                let result = self.call_rt("lrt_dict_eq", &[a, b, eq.into()]).unwrap().into_int_value();
+                self.b.build_int_compare(IntPredicate::NE, result, self.i64(0), "").must()
+            }
+            TyKind::Dyn(_)
             | TyKind::SelfType(_)
             | TyKind::Func(..)
             | TyKind::Task(_)

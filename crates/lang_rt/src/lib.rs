@@ -14,6 +14,7 @@
 pub mod builder;
 pub mod dict;
 pub mod gc;
+pub mod json;
 pub mod list;
 pub mod num;
 pub mod out;
@@ -31,7 +32,6 @@ pub extern "C" fn main(argc: std::ffi::c_int, argv: *const *const std::ffi::c_ch
         fn lang_user_main();
     }
     gc::init();
-    tasks::init();
     sys::set_args(argc as i64, argv);
     // SAFETY: the code generator always defines `lang_user_main` as `void(void)` with the C
     // calling convention.

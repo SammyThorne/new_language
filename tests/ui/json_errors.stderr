@@ -1,0 +1,40 @@
+error[E0330]: cannot derive `ToJson`: field `by_id` has type `dict[int, str]`, which cannot be written as JSON
+ --> tests/ui/json_errors.wb:3:9
+  |
+3 | @derive(Json)
+  |         ^^^^ cannot be derived
+  ...
+5 |     by_id: dict[int, str]
+  |            -------------- `by_id` is declared here
+
+error[E0330]: `@json` on a field takes `name="key"`
+  --> tests/ui/json_errors.wb:12:11
+   |
+12 |     @json(rename="x")
+   |           ^^^^^^^^^^ not a known option
+
+error[E0330]: unknown annotation `@cache` on a field
+  --> tests/ui/json_errors.wb:14:6
+   |
+14 |     @cache
+   |      ^^^^^ not a known annotation
+   |
+   = help: fields can have `@json(name="key")`
+
+error[E0331]: `Plain` does not implement `ToJson`, which `encode` requires of `T`
+  --> tests/ui/json_errors.wb:18:11
+   |
+18 |     print(json.encode(Plain(1)))
+   |           ^^^^^^^^^^^^^^^^^^^^^ `T` is `Plain` here
+   |
+   = help: add `@derive(Json)` to `Plain`
+
+error[E0331]: `Plain` does not implement `FromJson`, which `decode` requires of `T`
+  --> tests/ui/json_errors.wb:19:11
+   |
+19 |     bad = json.decode[Plain]("{}")
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^ `T` is `Plain` here
+   |
+   = help: add `@derive(Json)` to `Plain`
+
+error: could not compile `tests/ui/json_errors.wb` due to 5 errors

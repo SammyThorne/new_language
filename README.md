@@ -4,7 +4,7 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 
 ## Status
 
-Milestones 0 to 6 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
+Milestones 0 to 7 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
 
 ```python
 trait Shape(Display):
@@ -44,7 +44,8 @@ def main():
 
 | Works now | Not yet |
 |---|---|
-| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | JSON, HTTP, WebSockets (milestones 7 to 9) |
+| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | HTTP and WebSockets (milestones 8 and 9) |
+| JSON: `@derive(Json)` with generated encoders and decoders, `@json(name=...)`, error paths, and dynamic `json.Value` | |
 | `spawn`, `Task`, `Channel`, `Mutex`, `Atomic`, `time.sleep`; the compiler rejects sharing mutable data between tasks | |
 | Immutable collections `tuple[T, ...]` and `frozendict[K, V]` | |
 | `int` (wrapping), `float` (printed exactly as Python prints it), `bool`, `str`, sized numbers (`i32`, `u8`, `f32`, ...) | |
@@ -62,7 +63,7 @@ def main():
 
 Constructs from the design that are not implemented are rejected with an error saying they are not supported yet.
 
-Compiled programs run between 1.2x and 1.7x Go's time on allocation, collections, strings and dynamic dispatch, and faster than Go on plain function calls and on sorting with a key function. Against CPython they are 11x to 35x faster, except about 2x on string-and-dict-heavy code; see [bench/README.md](bench/README.md).
+Compiled programs run between 1.2x and 1.7x Go's time on allocation, collections, strings and dynamic dispatch, and faster than Go on plain function calls, on sorting with a key function, and on typed JSON. Against CPython they are 11x to 35x faster, except about 2x on string-and-dict-heavy code; see [bench/README.md](bench/README.md).
 
 ## Building and running
 

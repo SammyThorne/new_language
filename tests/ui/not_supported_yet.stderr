@@ -1,15 +1,7 @@
-error[E0334]: cannot find module `json`
- --> tests/ui/not_supported_yet.wb:1:8
-  |
-1 | import json
-  |        ^^^^ no such module
-  |
-  = help: looked for `tests/ui/json.wb` and for a standard library module; the standard library has `io`, `os`, `time`
-
 error[E0101]: set literals are not supported yet
- --> tests/ui/not_supported_yet.wb:4:13
+ --> tests/ui/not_supported_yet.wb:2:13
   |
-4 |     items = {1, 2}
+2 |     items = {1, 2}
   |             ^ not supported yet
 
-error: could not compile `tests/ui/not_supported_yet.wb` due to 2 errors
+error: could not compile `tests/ui/not_supported_yet.wb` due to 1 error

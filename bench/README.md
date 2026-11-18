@@ -17,11 +17,31 @@ python3 bench/run.py --runs 5
 | `sieve` | List indexing and loops: a sieve of Eratosthenes over 20 million booleans, grown by appending |
 | `binary_trees` | Allocation and garbage collection: the classic binary-trees benchmark at depth 18 |
 | `word_count` | Strings and dicts: split, lower-case and count 20.5 million words |
+| `json_orders` | Typed JSON: 20,000 orders with five line items each, encoded and decoded ten times (Go: `encoding/json` with struct tags; Python: `json` plus building dataclasses) |
 | `sort` | Sorting with a function: a million records sorted by a key closure, then copied and sorted by a tuple key (Go: `sort.SliceStable` with a comparator closure) |
 
 The Go versions are written the way a Go programmer would write them. Where that changes the work done, the comment in the file says so. For example, `counts[key] = counts[key] + 1` is one map access in Go but two lookups in the other versions.
 
 ## Results
+
+### 2026-11-18, end of milestone 7
+
+Same machine and versions. Best of 3 runs.
+
+| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+|---|---|---|---|---|---|---|
+| binary_trees | 0.968 s | 0.789 s | 20.137 s | 1.23x the time | 20.8x faster | 57 / 38 / 56 MB |
+| dispatch | 0.045 s | 0.026 s | 0.503 s | 1.68x the time | 11.3x faster | 13 / 13 / 13 MB |
+| fib | 0.019 s | 0.031 s | 0.609 s | 1.61x faster | 31.9x faster | 13 / 13 / 13 MB |
+| json_orders | 0.524 s | 0.543 s | 3.231 s | 1.04x faster | 6.2x faster | 75 / 62 / 129 MB |
+| sieve | 0.067 s | 0.054 s | 1.947 s | 1.23x the time | 29.1x faster | 52 / 72 / 161 MB |
+| sort | 0.748 s | 1.124 s | 2.063 s | 1.50x faster | 2.8x faster | 169 / 75 / 303 MB |
+| word_count | 1.059 s | 0.739 s | 2.018 s | 1.43x the time | 1.9x faster | 13 / 13 / 13 MB |
+
+Notes:
+
+- **Typed JSON** meets the docs/07 target of "within 1.5x of Go's `encoding/json`": it is slightly faster. The encoder and decoder are generated per type, so there is no reflection and no intermediate tree; Go's default encoder uses reflection. Weby writes compact JSON, as Go does.
+- **A regression found and fixed.** Midway through milestone 7, `word_count` measured 1.51 s instead of 1.06 s. The cause was milestone 6's call to `GC_allow_register_threads` at startup, which puts Boehm into its multi-threaded mode and makes every allocation slower, even in programs that never start a task. It is now called on the first `spawn` instead (D46), and single-threaded programs are back to their earlier speed. A program that spawns pays the cost from then on.
 
 ### 2026-11-18, end of milestone 4
 

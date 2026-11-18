@@ -1,0 +1,21 @@
+import json
+
+@derive(Json)
+struct Index:
+    by_id: dict[int, str]
+
+struct Plain:
+    x: int
+
+@derive(Json)
+struct Renamed:
+    @json(rename="x")
+    value: int
+    @cache
+    other: int
+
+def main():
+    print(json.encode(Plain(1)))
+    bad = json.decode[Plain]("{}")
+    data = json.parse("[1]").unwrap()
+    print(data[0].as_int(), bad)

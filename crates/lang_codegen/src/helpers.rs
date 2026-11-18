@@ -19,12 +19,16 @@ impl<'ctx> Codegen<'ctx, '_> {
         }
         let ptr = self.ptr_type();
         let i64_type = self.cx.i64_type();
-        let value = self.value_type(ty);
+        let value = self.llty(ty).unwrap_or(ptr.into());
         let name = self.program.types.display(ty);
         let (label, fn_type, fast) = match helper {
             Helper::Eq => ("eq", self.cx.bool_type().fn_type(&[value.into(), value.into()], false), true),
             Helper::Hash => ("hash", i64_type.fn_type(&[value.into()], false), true),
             Helper::Cmp => ("cmp", i64_type.fn_type(&[value.into(), value.into()], false), true),
+            Helper::JsonEncode => {
+                ("json_encode", self.cx.void_type().fn_type(&[ptr.into(), value.into()], false), true)
+            }
+            Helper::JsonDecode => ("json_decode", self.cx.bool_type().fn_type(&[ptr.into(), ptr.into()], false), true),
             Helper::EqPtr => ("eq_ptr", i64_type.fn_type(&[ptr.into(), ptr.into()], false), false),
             Helper::HashPtr => ("hash_ptr", i64_type.fn_type(&[ptr.into()], false), false),
             Helper::CmpPtr => ("cmp_ptr", i64_type.fn_type(&[ptr.into(), ptr.into()], false), false),
@@ -67,6 +71,8 @@ impl<'ctx> Codegen<'ctx, '_> {
             }
             Helper::Push { repr } => this.push_body(function, ty, repr),
             Helper::Cmp => this.cmp_body(function, ty),
+            Helper::JsonEncode => this.json_encode_body(function, ty),
+            Helper::JsonDecode => this.json_decode_body(function, ty),
         });
         function
     }

@@ -40,6 +40,7 @@
 mod builtins;
 mod expr;
 mod helpers;
+mod json;
 mod matching;
 mod stmt;
 mod traits;
@@ -163,6 +164,33 @@ const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_mutex_lock", "p", "p"),
     ("lrt_mutex_unlock", "v", "p"),
     ("lrt_dict_copy", "p", "p"),
+    ("lrt_dict_eq", "i", "ppp"),
+    ("lrt_json_reader_new", "p", "pi"),
+    ("lrt_json_reader_free", "v", "p"),
+    ("lrt_json_finish", "i", "p"),
+    ("lrt_json_failed", "i", "p"),
+    ("lrt_json_error_message", "s", "p"),
+    ("lrt_json_error_path", "s", "p"),
+    ("lrt_json_push_key", "v", "ppi"),
+    ("lrt_json_push_index", "v", "pi"),
+    ("lrt_json_pop", "v", "p"),
+    ("lrt_json_fail_expected", "v", "ppi"),
+    ("lrt_json_fail", "v", "ppi"),
+    ("lrt_json_read_null", "i", "p"),
+    ("lrt_json_read_bool", "i", "p"),
+    ("lrt_json_read_int", "i", "pp"),
+    ("lrt_json_read_float", "i", "pp"),
+    ("lrt_json_read_number", "i", "ppp"),
+    ("lrt_json_read_str", "s", "p"),
+    ("lrt_json_array_start", "i", "p"),
+    ("lrt_json_array_next", "i", "p"),
+    ("lrt_json_object_start", "i", "p"),
+    ("lrt_json_object_key", "s", "p"),
+    ("lrt_json_skip_value", "i", "p"),
+    ("lrt_json_peek_kind", "i", "p"),
+    ("lrt_json_peek_tag", "s", "ppi"),
+    ("lrt_builder_push_json_str", "v", "ppi"),
+    ("lrt_builder_push_json_float", "v", "pf"),
     ("lrt_builder_push_uint", "v", "pi"),
     ("lrt_io_read_line", "s", ""),
     ("llvm.fptosi.sat.i64.f64", "i", "f"),
@@ -182,6 +210,7 @@ const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_builder_finish", "s", "p"),
     ("lrt_builder_print", "v", "p"),
     ("lrt_str_concat", "s", "pipi"),
+    ("lrt_str_repeat", "s", "pii"),
     ("lrt_str_eq", "i", "pipi"),
     ("lrt_str_cmp", "i", "pipi"),
     ("lrt_str_hash", "i", "pi"),
@@ -246,6 +275,10 @@ enum Helper {
     Hash,
     /// `(T, T) -> i64`, fastcc: three-way comparison of tuples, lists and types with `Ord`.
     Cmp,
+    /// `(builder, T)`, fastcc: append the value's JSON.
+    JsonEncode,
+    /// `(reader, ptr out) -> i1`, fastcc: decode a value from JSON into `out`.
+    JsonDecode,
 }
 
 /// Per-function code generation state.

@@ -467,27 +467,30 @@ impl Checker<'_, '_> {
         };
         let variant_name = match path {
             [variant] => variant,
-            [enum_name, variant] => {
-                if !matches!(self.globals.get(&enum_name.name), Some(&(Global::Enum(id), _)) if id == enum_id) {
+            [prefix @ .., variant] => {
+                // `Enum.Variant`, or `module.Enum.Variant`.
+                let type_name = prefix.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(".");
+                let type_span = prefix[0].span.to(prefix[prefix.len() - 1].span);
+                let same = match self.type_global(&type_name, type_span) {
+                    Some(Global::Enum(id)) => id == enum_id,
+                    Some(Global::GenericEnum(template)) => {
+                        self.instance_of.get(&ty).is_some_and(|(t, _)| *t == template)
+                    }
+                    Some(Global::Missing) => return wild,
+                    _ => false,
+                };
+                if !same {
                     self.error(Diagnostic::error(
                         codes::BAD_PATTERN,
-                        format!("the value being matched is `{shown}`, not `{}`", enum_name.name),
-                        enum_name.span,
+                        format!("the value being matched is `{shown}`, not `{type_name}`"),
+                        type_span,
                         "wrong enum",
                     ));
                     return wild;
                 }
                 variant
             }
-            _ => {
-                self.error(Diagnostic::error(
-                    codes::BAD_PATTERN,
-                    "a pattern can name at most `Enum.Variant`",
-                    span,
-                    "too many parts",
-                ));
-                return wild;
-            }
+            [] => unreachable!("a pattern path has at least one part"),
         };
         let Some(index) = self.enums[enum_id.0].variants.iter().position(|v| v.name == variant_name.name) else {
             let candidates: Vec<String> = self.enums[enum_id.0].variants.iter().map(|v| v.name.clone()).collect();

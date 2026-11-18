@@ -1,0 +1,36 @@
+# Encode and decode 20,000 typed orders (100,000 line items) ten times (milestone 7 benchmark).
+
+import json
+
+@derive(Json)
+struct Item:
+    sku: str
+    qty: int
+    price: float
+
+@derive(Json)
+struct Order:
+    id: int
+    customer: str
+    paid: bool
+    items: list[Item]
+    note: str?
+
+def main():
+    orders: list[Order] = []
+    for i in range(20000):
+        items = [Item(f"SKU-{i % 100}-{j}", j + 1, float(i % 1000) / 10.0 + float(j)) for j in range(5)]
+        note: str? = None if i % 3 == 0 else f"note {i}"
+        orders.append(Order(i, f"customer {i}", i % 2 == 0, items, note))
+    items_seen = 0
+    quantity = 0
+    value = 0.0
+    for _ in range(10):
+        text = json.encode(orders)
+        back = json.decode[list[Order]](text).unwrap()
+        for order in back:
+            items_seen += len(order.items)
+            for item in order.items:
+                quantity += item.qty
+                value += item.price
+    print(items_seen, quantity, int(value))

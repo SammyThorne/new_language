@@ -13,7 +13,7 @@ use lang_syntax::ast;
 use std::collections::HashMap;
 
 /// The traits `@derive` can implement.
-const DERIVABLE: &[&str] = &["Eq", "Hash", "Display", "Copy", "Ord"];
+const DERIVABLE: &[&str] = &["Eq", "Hash", "Display", "Copy", "Ord", "Json"];
 
 impl<'m> Checker<'_, 'm> {
     /// Register a new top-level name. Returns false (after reporting) if it is taken.
@@ -69,6 +69,7 @@ impl<'m> Checker<'_, 'm> {
                         fields: Vec::new(),
                         frozen: false,
                         generic: false,
+                        json_strict: false,
                     });
                     self.globals.insert(name, (Global::Struct(id), decl.name.span));
                     self.export(&decl.name, Global::Struct(id), decl.visibility);
@@ -193,6 +194,8 @@ impl<'m> Checker<'_, 'm> {
             ord: trait_named(self, "Ord"),
             number: trait_named(self, "Number"),
             shareable: trait_named(self, "Shareable"),
+            to_json: trait_named(self, "ToJson"),
+            from_json: trait_named(self, "FromJson"),
         };
         self.types.error_trait = Some(builtins.error);
         self.builtins = Some(builtins);
@@ -357,15 +360,50 @@ impl<'m> Checker<'_, 'm> {
                     "a `None` field carries no information",
                 ));
             }
+            let json_name = self.field_annotations(field);
             fields.push(FieldInfo {
                 name: field.name.name.clone(),
                 span: field.ty.span,
                 ty,
                 default: None,
                 private: field.visibility == ast::Visibility::Priv,
+                json_name,
             });
         }
         fields
+    }
+
+    /// `@json(name="key")` on a field: its key in JSON.
+    fn field_annotations(&mut self, field: &ast::FieldDecl) -> Option<String> {
+        let mut json_name = None;
+        for annotation in &field.annotations {
+            if annotation.name.name != "json" {
+                self.error(
+                    Diagnostic::error(
+                        codes::BAD_ANNOTATION,
+                        format!("unknown annotation `@{}` on a field", annotation.name.name),
+                        annotation.name.span,
+                        "not a known annotation",
+                    )
+                    .with_help("fields can have `@json(name=\"key\")`"),
+                );
+                continue;
+            }
+            for arg in &annotation.args {
+                match (&arg.keyword, &arg.value) {
+                    (Some(keyword), ast::AnnotationValue::Str(name)) if keyword.name == "name" => {
+                        json_name = Some(name.clone());
+                    }
+                    _ => self.error(Diagnostic::error(
+                        codes::BAD_ANNOTATION,
+                        "`@json` on a field takes `name=\"key\"`",
+                        arg.span,
+                        "not a known option",
+                    )),
+                }
+            }
+        }
+        json_name
     }
 
     // ---- annotations --------------------------------------------------------------------
@@ -398,6 +436,22 @@ impl<'m> Checker<'_, 'm> {
                             self.structs[id.0].frozen = true;
                         }
                     }
+                    "json" if is_struct => {
+                        for arg in self.annotation_names(annotation) {
+                            if arg.name == "strict" {
+                                if let Some(id) = self.struct_of(ty) {
+                                    self.structs[id.0].json_strict = true;
+                                }
+                            } else {
+                                self.error(Diagnostic::error(
+                                    codes::BAD_ANNOTATION,
+                                    format!("unknown option `{}` for `@json` on a struct", arg.name),
+                                    arg.span,
+                                    "the struct option is `strict`",
+                                ));
+                            }
+                        }
+                    }
                     "frozen" => self.error(Diagnostic::error(
                         codes::BAD_ANNOTATION,
                         "`@frozen` only applies to structs",
@@ -411,8 +465,10 @@ impl<'m> Checker<'_, 'm> {
                             annotation.name.span,
                             "not a known annotation",
                         )
-                        .with_help("the annotations available so far are `@derive(...)` and `@frozen`");
-                        if matches!(other, "json" | "test" | "extern") {
+                        .with_help(
+                            "the annotations of structs and enums are `@derive(...)`, `@frozen` and `@json(strict)`",
+                        );
+                        if matches!(other, "test") {
                             diagnostic = Diagnostic::error(
                                 codes::NOT_SUPPORTED,
                                 format!("`@{other}` is not supported yet"),
@@ -446,29 +502,23 @@ impl<'m> Checker<'_, 'm> {
     }
 
     fn derive(&mut self, ty: Ty, arg: &ast::Ident) {
-        let Some(trait_id) = self.derivable(arg) else { return };
-        let methods = vec![None; self.traits[trait_id.0].methods.len()];
-        self.add_impl(ImplInfo { trait_id, ty, span: arg.span, methods, derived: true });
+        for trait_id in self.derivable(arg) {
+            let methods = vec![None; self.traits[trait_id.0].methods.len()];
+            self.add_impl(ImplInfo { trait_id, ty, span: arg.span, methods, derived: true });
+        }
     }
 
-    /// The trait `@derive(name)` implements, or `None` after reporting that it cannot be derived.
-    pub(super) fn derivable(&mut self, arg: &ast::Ident) -> Option<TraitId> {
+    /// The traits `@derive(name)` implements (`Json` is `ToJson` and `FromJson`), or none after
+    /// reporting that it cannot be derived.
+    pub(super) fn derivable(&mut self, arg: &ast::Ident) -> Vec<TraitId> {
         let b = self.builtin();
-        Some(match arg.name.as_str() {
+        vec![match arg.name.as_str() {
             "Eq" => b.eq,
             "Hash" => b.hash,
             "Display" => b.display,
             "Copy" => b.copy,
             "Ord" => b.ord,
-            "Json" => {
-                self.error(Diagnostic::error(
-                    codes::NOT_SUPPORTED,
-                    format!("deriving `{}` is not supported yet", arg.name),
-                    arg.span,
-                    "arrives in milestone 7",
-                ));
-                return None;
-            }
+            "Json" => return vec![b.to_json, b.from_json],
             other => {
                 let mut diagnostic = Diagnostic::error(
                     codes::BAD_ANNOTATION,
@@ -481,9 +531,9 @@ impl<'m> Checker<'_, 'm> {
                     diagnostic = diagnostic.with_help(format!("did you mean `{s}`?"));
                 }
                 self.error(diagnostic);
-                return None;
+                return Vec::new();
             }
-        })
+        }]
     }
 
     pub(super) fn add_impl(&mut self, info: ImplInfo) -> bool {
@@ -1011,6 +1061,8 @@ impl<'m> Checker<'_, 'm> {
                     (self.displayable(field.ty), "be printed")
                 } else if trait_id == b.ord {
                     (self.orderable(field.ty), "be ordered with `<`")
+                } else if trait_id == b.to_json {
+                    (self.json_capable(field.ty), "be written as JSON")
                 } else {
                     (true, "")
                 };

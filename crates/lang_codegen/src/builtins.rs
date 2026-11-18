@@ -34,6 +34,14 @@ impl<'ctx> Codegen<'ctx, '_> {
             self.call_rt("lrt_builder_print", &[builder.into()]);
             return self.call_rt("lrt_io_read_line", &[]);
         }
+        if op == Builtin::JsonEncode {
+            let value = self.expr(&args[0]);
+            return Some(self.json_encode(args[0].ty, value));
+        }
+        if op == Builtin::JsonDecode {
+            let text = self.value(&args[0]);
+            return Some(self.json_decode(expr.ty, text));
+        }
         if op == Builtin::NumConvert {
             let value = self.value(&args[0]);
             return Some(self.num_convert(args[0].ty, expr.ty, value));
@@ -465,7 +473,9 @@ impl<'ctx> Codegen<'ctx, '_> {
                 });
                 self.b.build_load(self.cx.bool_type(), result, "").must()
             }
-            Builtin::ListSortBy | Builtin::Input | Builtin::NumConvert => unreachable!("handled above"),
+            Builtin::ListSortBy | Builtin::Input | Builtin::NumConvert | Builtin::JsonEncode | Builtin::JsonDecode => {
+                unreachable!("handled above")
+            }
             Builtin::Freeze => match self.kind(args[0].ty) {
                 TyKind::List(_) => self.call_rt("lrt_list_copy", &[values[0]]).unwrap(),
                 _ => self.call_rt("lrt_dict_copy", &[values[0]]).unwrap(),

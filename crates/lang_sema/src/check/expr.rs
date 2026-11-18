@@ -32,6 +32,10 @@ impl Checker<'_, '_> {
         if let Some(conversion) = self.conversion(value.ty, expected) {
             return self.convert(value, conversion, expected);
         }
+        let value = match self.json_value_of(value, expected) {
+            Ok(converted) => return converted,
+            Err(value) => value,
+        };
         if let Some(inner) = self.types.option_inner(expected) {
             if matches!(value.kind, K::None) && value.ty == Ty::NONE {
                 return hir::Expr { ty: expected, ..value };
@@ -112,6 +116,9 @@ impl Checker<'_, '_> {
 
     pub(super) fn expr(&mut self, cx: &mut FnCx, expr: &ast::Expr, expected: Option<Ty>) -> hir::Expr {
         let span = expr.span;
+        if let Some(value) = self.json_literal(cx, expr, expected) {
+            return value;
+        }
         match &expr.kind {
             ast::ExprKind::Int(value) => {
                 if expected == Some(Ty::FLOAT) {
@@ -497,6 +504,9 @@ impl Checker<'_, '_> {
             ast::ExprKind::Name(name) if !cx.sees(name) => {
                 if let Some(global) = self.globals.get(name).map(|(global, _)| *global) {
                     return self.call_global(cx, global, name, callee.span, args, span, expected);
+                }
+                if name.starts_with("__json_") && self.in_json_module() {
+                    return self.json_intrinsic(cx, name, args, span, expected);
                 }
                 if super::concurrency::SYNC_TYPES.contains(&name.as_str()) && name != "Task" {
                     return self.sync_constructor(cx, name, None, args, span, expected);
@@ -1544,6 +1554,14 @@ impl Checker<'_, '_> {
 
     fn index(&mut self, cx: &mut FnCx, object: &ast::Expr, index: &ast::Expr, span: Span) -> hir::Expr {
         let container = self.expr(cx, object, None);
+        let container = if matches!(self.types.kind(container.ty), TyKind::Struct(_) | TyKind::Enum(_)) {
+            match self.index_protocol(cx, container, index, span) {
+                Ok(value) => return value,
+                Err(container) => container,
+            }
+        } else {
+            container
+        };
         match self.types.kind(container.ty).clone() {
             TyKind::List(elem) | TyKind::FrozenList(elem) => {
                 let index = self.expect(cx, index, Ty::INT, None);
@@ -2167,6 +2185,7 @@ impl Checker<'_, '_> {
             (A::Mod, TyKind::Float, TyKind::Float) => (B::FloatMod, Ty::FLOAT),
             (A::Pow, TyKind::Float, TyKind::Float) => (B::FloatPow, Ty::FLOAT),
             (A::Add, TyKind::Str, TyKind::Str) => (B::StrConcat, Ty::STR),
+            (A::Mul, TyKind::Str, TyKind::Int) => (B::StrRepeat, Ty::STR),
             (A::Add, TyKind::List(_), TyKind::List(_)) if l.ty == r.ty => (B::ListConcat, l.ty),
             _ => return self.bad_operands(op, &l, &r, span),
         };

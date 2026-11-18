@@ -351,7 +351,15 @@ impl<'m> Checker<'_, 'm> {
             TypeDecl::Struct(d) => {
                 let (id, ty) = self.types.add_struct(&shown);
                 let frozen = d.annotations.iter().any(|a| a.name.name == "frozen");
-                self.structs.push(StructInfo { name: shown, span: decl_span, ty, fields: Vec::new(), frozen, generic });
+                self.structs.push(StructInfo {
+                    name: shown,
+                    span: decl_span,
+                    ty,
+                    fields: Vec::new(),
+                    frozen,
+                    generic,
+                    json_strict: false,
+                });
                 self.generic_types[index].instances.insert(args.clone(), ty);
                 self.instance_of.insert(ty, (index, args.clone()));
                 let fields = self.with_scope(bindings, !is_pattern, |this| this.fields(&d.fields));
@@ -409,17 +417,17 @@ impl<'m> Checker<'_, 'm> {
             let names = self.with_scope(Vec::new(), !is_pattern, |this| this.annotation_names(annotation));
             for arg in names {
                 // Unknown names are reported once, for the pattern.
-                let Some(trait_id) = self.with_scope(Vec::new(), !is_pattern, |this| this.derivable(arg)) else {
-                    continue;
-                };
-                // An instance gets a derived trait when every type argument has it, as with a
-                // bound on each parameter. The pattern always gets it, so generic code can use it.
-                if is_pattern || args.iter().all(|a| self.supports(*a, trait_id)) {
-                    let methods = vec![None; self.traits[trait_id.0].methods.len()];
-                    let span = arg.span;
-                    self.with_scope(Vec::new(), true, |this| {
-                        this.add_impl(ImplInfo { trait_id, ty, span, methods, derived: true })
-                    });
+                let traits = self.with_scope(Vec::new(), !is_pattern, |this| this.derivable(arg));
+                for trait_id in traits {
+                    // An instance gets a derived trait when every type argument has it, as with a
+                    // bound on each parameter. The pattern always gets it, for generic code.
+                    if is_pattern || args.iter().all(|a| self.supports(*a, trait_id)) {
+                        let methods = vec![None; self.traits[trait_id.0].methods.len()];
+                        let span = arg.span;
+                        self.with_scope(Vec::new(), true, |this| {
+                            this.add_impl(ImplInfo { trait_id, ty, span, methods, derived: true })
+                        });
+                    }
                 }
             }
         }
@@ -434,6 +442,9 @@ impl<'m> Checker<'_, 'm> {
     /// the other built-in types.
     pub(super) fn supports(&self, ty: Ty, trait_id: TraitId) -> bool {
         let b = self.builtin();
+        if [b.to_json, b.from_json, b.shareable].contains(&trait_id) {
+            return self.implements(ty, trait_id);
+        }
         match self.types.kind(ty) {
             TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Dyn(_) | TyKind::SelfType(_) | TyKind::Param(_) => {
                 self.implements(ty, trait_id)
@@ -704,7 +715,10 @@ impl<'m> Checker<'_, 'm> {
                         format!("`{}` is `{shown}` here", param.name),
                     )
                     .with_label(param.span, format!("`{}: {tr}` is required here", param.name));
-                    if matches!(self.types.kind(*arg), TyKind::Struct(_) | TyKind::Enum(_)) {
+                    let json = [self.builtin().to_json, self.builtin().from_json].contains(&required);
+                    if json && matches!(self.types.kind(*arg), TyKind::Struct(_) | TyKind::Enum(_)) {
+                        diagnostic = diagnostic.with_help(format!("add `@derive(Json)` to `{shown}`"));
+                    } else if matches!(self.types.kind(*arg), TyKind::Struct(_) | TyKind::Enum(_)) {
                         diagnostic = diagnostic.with_help(format!("implement `{tr}` for `{shown}`, or derive it"));
                     } else if let TyKind::Param(_) = self.types.kind(*arg) {
                         diagnostic =

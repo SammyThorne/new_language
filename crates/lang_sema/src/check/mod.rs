@@ -23,6 +23,7 @@ mod concurrency;
 mod expr;
 mod generics;
 mod items;
+mod json;
 mod modules;
 mod patterns;
 mod stmt;
@@ -68,6 +69,8 @@ const BUILTIN_FUNCTIONS: &[&str] = &[
     "f32",
     "tuple",
     "frozendict",
+    "__json_encode",
+    "__json_decode",
 ];
 
 /// Constructors of the built-in enums.
@@ -163,6 +166,7 @@ pub fn check_modules(inputs: &[ModuleInput], sources: &mut SourceMap, diags: &mu
         }
     }
     checker.import_all(&modules);
+    checker.find_json_types();
     checker.resolve_declarations();
     checker.check_consts();
     checker.register_derives();
@@ -229,6 +233,8 @@ struct StructInfo {
     frozen: bool,
     /// An instance of a generic struct with type parameters still in its arguments.
     generic: bool,
+    /// `@json(strict)` on the struct.
+    json_strict: bool,
 }
 
 #[derive(Clone)]
@@ -240,6 +246,8 @@ struct FieldInfo {
     default: Option<hir::Expr>,
     /// Declared `priv`: only visible in the file that defines the type.
     private: bool,
+    /// The key in JSON, from `@json(name="...")`.
+    json_name: Option<String>,
 }
 
 struct EnumInfo {
@@ -435,6 +443,8 @@ struct Checker<'a, 'm> {
     exports: Vec<HashMap<String, (Global, Span, bool)>>,
     /// Which module each source file is.
     file_module: HashMap<FileId, usize>,
+    /// `json.Value` and `json.JsonError`, when the program imports `json`.
+    json: Option<hir::JsonTypes>,
 }
 
 /// Per-function state while checking a body.
@@ -657,12 +667,22 @@ impl<'a, 'm> Checker<'a, 'm> {
             module_scopes: Vec::new(),
             exports: Vec::new(),
             file_module: HashMap::new(),
+            json: None,
         }
     }
 
     fn into_program(self, module_name: &str, functions: Vec<hir::Function>, entry: FuncId) -> hir::Program {
-        let fields =
-            |fields: &[FieldInfo]| fields.iter().map(|f| hir::FieldDef { name: f.name.clone(), ty: f.ty }).collect();
+        let fields = |fields: &[FieldInfo]| {
+            fields
+                .iter()
+                .map(|f| hir::FieldDef {
+                    name: f.name.clone(),
+                    ty: f.ty,
+                    json_name: f.json_name.clone().unwrap_or_else(|| f.name.clone()),
+                    default: f.default.clone(),
+                })
+                .collect()
+        };
         // Instances of generic types print with the template's name: `Box(value=1)`.
         let base_name = |ty: Ty, name: &str| match self.instance_of.get(&ty) {
             Some((template, _)) => self.generic_types[*template].name.clone(),
@@ -676,6 +696,7 @@ impl<'a, 'm> Checker<'a, 'm> {
                 ty: s.ty,
                 fields: fields(&s.fields),
                 generic: s.generic,
+                json_strict: s.json_strict,
             })
             .collect();
         let enums = self
@@ -726,6 +747,7 @@ impl<'a, 'm> Checker<'a, 'm> {
             entry,
             builtins: self.builtins.expect("the prelude defines the built-in traits"),
             parse_error: self.parse_error.expect("the prelude defines ParseError"),
+            json: self.json,
         }
     }
 
@@ -1124,6 +1146,15 @@ impl<'a, 'm> Checker<'a, 'm> {
     }
 
     fn implements(&self, ty: Ty, trait_id: TraitId) -> bool {
+        let b = self.builtin();
+        if (trait_id == b.to_json || trait_id == b.from_json)
+            && !matches!(
+                self.types.kind(ty),
+                TyKind::Dyn(_) | TyKind::SelfType(_) | TyKind::Param(_) | TyKind::Struct(_) | TyKind::Enum(_)
+            )
+        {
+            return self.json_capable_for(ty, trait_id);
+        }
         if trait_id == self.builtin().shareable
             && !matches!(self.types.kind(ty), TyKind::Dyn(_) | TyKind::SelfType(_) | TyKind::Param(_))
         {
@@ -1172,16 +1203,12 @@ impl<'a, 'm> Checker<'a, 'm> {
             TyKind::Error | TyKind::None | TyKind::Bool | TyKind::Int | TyKind::Float | TyKind::Str => true,
             TyKind::Sized(_) => true,
             TyKind::List(t) | TyKind::Option(t) | TyKind::FrozenList(t) => self.equatable(*t),
-            TyKind::FrozenDict(..)
-            | TyKind::Task(_)
-            | TyKind::Channel(_)
-            | TyKind::Mutex(_)
-            | TyKind::Guard(_)
-            | TyKind::Atomic => false,
+            TyKind::Dict(_, v) | TyKind::FrozenDict(_, v) => self.equatable(*v),
+            TyKind::Task(_) | TyKind::Channel(_) | TyKind::Mutex(_) | TyKind::Guard(_) | TyKind::Atomic => false,
             TyKind::Result(k, v) => self.equatable(*k) && self.equatable(*v),
             TyKind::Tuple(items) => items.iter().all(|t| self.equatable(*t)),
             TyKind::Dyn(t) | TyKind::SelfType(t) => self.trait_closure(*t).contains(&self.builtin().eq),
-            TyKind::Dict(..) | TyKind::Func(..) => false,
+            TyKind::Func(..) => false,
         }
     }
 
