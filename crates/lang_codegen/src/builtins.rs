@@ -466,6 +466,129 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.build_load(self.cx.bool_type(), result, "").must()
             }
             Builtin::ListSortBy | Builtin::Input | Builtin::NumConvert => unreachable!("handled above"),
+            Builtin::Freeze => match self.kind(args[0].ty) {
+                TyKind::List(_) => self.call_rt("lrt_list_copy", &[values[0]]).unwrap(),
+                _ => self.call_rt("lrt_dict_copy", &[values[0]]).unwrap(),
+            },
+            Builtin::TaskJoin => {
+                self.call_rt("lrt_task_join", &[values[0]]);
+                let llty = self.llty(expr.ty)?;
+                let slot = self.call_rt("lrt_task_result", &[values[0]]).unwrap().into_pointer_value();
+                self.b.build_load(llty, slot, "").must()
+            }
+            Builtin::TaskJoinTimeout => {
+                let done = self.call_rt("lrt_task_join_timeout", &[values[0], values[1]]).unwrap().into_int_value();
+                let done = self.b.build_int_compare(IntPredicate::NE, done, self.i64(0), "").must();
+                if expr.ty == lang_sema::types::Ty::BOOL {
+                    return Some(done.into());
+                }
+                let option = expr.ty;
+                let TyKind::Option(inner) = *self.kind(option) else { unreachable!() };
+                let task = values[0];
+                return self.choose(
+                    done,
+                    option,
+                    |this| {
+                        let slot = this.call_rt("lrt_task_result", &[task]).unwrap().into_pointer_value();
+                        let value = this.b.build_load(this.value_type(inner), slot, "").must();
+                        Some(this.wrap_some(option, value))
+                    },
+                    |this| Some(this.none_value(option)),
+                );
+            }
+            Builtin::TaskIsDone => {
+                let done = self.call_rt("lrt_task_is_done", &[values[0]]).unwrap();
+                int_to_bool(self, done)
+            }
+            Builtin::ChannelNew => {
+                let TyKind::Channel(elem) = *self.kind(expr.ty) else { unreachable!() };
+                let size = self.llty(elem).map_or(0, |t| self.td.get_abi_size(&t));
+                self.call_rt("lrt_channel_new", &[self.i64(size as i64).into(), values[0]]).unwrap()
+            }
+            Builtin::ChannelSend => {
+                let value = self.spill(values[1]);
+                let (loc, loc_len) = self.location(span);
+                self.call_rt("lrt_channel_send", &[values[0], value.into(), loc.into(), loc_len.into()]);
+                return None;
+            }
+            Builtin::ChannelRecv | Builtin::ChannelTryRecv => {
+                let option = expr.ty;
+                let TyKind::Option(inner) = *self.kind(option) else { unreachable!() };
+                let inner_type = self.value_type(inner);
+                let out = self.alloca(inner_type, "received");
+                let wait = self.i64(i64::from(op == Builtin::ChannelRecv));
+                let got = self.call_rt("lrt_channel_recv", &[values[0], out.into(), wait.into()]).unwrap();
+                let got = self.b.build_int_compare(IntPredicate::NE, got.into_int_value(), self.i64(0), "").must();
+                return self.choose(
+                    got,
+                    option,
+                    |this| {
+                        let value = this.b.build_load(inner_type, out, "").must();
+                        Some(this.wrap_some(option, value))
+                    },
+                    |this| Some(this.none_value(option)),
+                );
+            }
+            Builtin::ChannelClose => {
+                self.call_rt("lrt_channel_close", &[values[0]]);
+                return None;
+            }
+            Builtin::MutexNew => {
+                let size = self.size_of(args[0].ty);
+                let mutex = self.call_rt("lrt_mutex_new", &[self.i64(size as i64).into()]).unwrap();
+                let slot = self.call_rt("lrt_mutex_value", &[mutex]).unwrap().into_pointer_value();
+                self.b.build_store(slot, values[0]).must();
+                mutex
+            }
+            Builtin::MutexLock => self.call_rt("lrt_mutex_lock", &[values[0]]).unwrap(),
+            Builtin::GuardGet => {
+                let slot = self.call_rt("lrt_mutex_value", &[values[0]]).unwrap().into_pointer_value();
+                self.b.build_load(self.value_type(expr.ty), slot, "").must()
+            }
+            Builtin::AtomicNew => {
+                let cell = self.call_rt("lrt_alloc_raw", &[self.i64(8).into()]).unwrap().into_pointer_value();
+                let store = self.b.build_store(cell, values[0]).must();
+                store.set_atomic_ordering(inkwell::AtomicOrdering::SequentiallyConsistent).must();
+                cell.into()
+            }
+            Builtin::AtomicGet => {
+                let load = self.b.build_load(self.cx.i64_type(), values[0].into_pointer_value(), "").must();
+                inkwell::values::BasicValue::as_instruction_value(&load)
+                    .unwrap()
+                    .set_atomic_ordering(inkwell::AtomicOrdering::SequentiallyConsistent)
+                    .must();
+                load
+            }
+            Builtin::AtomicSet => {
+                let store = self.b.build_store(values[0].into_pointer_value(), values[1]).must();
+                store.set_atomic_ordering(inkwell::AtomicOrdering::SequentiallyConsistent).must();
+                return None;
+            }
+            Builtin::AtomicAdd => {
+                let old = self
+                    .b
+                    .build_atomicrmw(
+                        inkwell::AtomicRMWBinOp::Add,
+                        values[0].into_pointer_value(),
+                        values[1].into_int_value(),
+                        inkwell::AtomicOrdering::SequentiallyConsistent,
+                    )
+                    .must();
+                self.b.build_int_add(old, values[1].into_int_value(), "").must().into()
+            }
+            Builtin::AtomicCas => {
+                let pair = self
+                    .b
+                    .build_cmpxchg(
+                        values[0].into_pointer_value(),
+                        values[1].into_int_value(),
+                        values[2].into_int_value(),
+                        inkwell::AtomicOrdering::SequentiallyConsistent,
+                        inkwell::AtomicOrdering::SequentiallyConsistent,
+                    )
+                    .must();
+                self.b.build_extract_value(pair, 1, "").must()
+            }
         })
     }
 

@@ -170,6 +170,25 @@ impl Checker<'_, '_> {
             ast::ExprKind::Slice { object, start, stop } => {
                 self.slice(cx, object, start.as_deref(), stop.as_deref(), span)
             }
+            ast::ExprKind::List(items) | ast::ExprKind::Tuple(items)
+                if expected.is_some_and(|t| matches!(self.types.kind(t), TyKind::FrozenList(_))) =>
+            {
+                // A literal written where a `tuple[T, ...]` is expected is built frozen.
+                let frozen = expected.expect("checked");
+                let TyKind::FrozenList(elem) = *self.types.kind(frozen) else { unreachable!() };
+                let list_ty = self.types.list(elem);
+                let list = self.list_literal(cx, items, span, Some(list_ty));
+                if list.ty == list_ty { hir::Expr { ty: frozen, ..list } } else { list }
+            }
+            ast::ExprKind::Dict(pairs)
+                if expected.is_some_and(|t| matches!(self.types.kind(t), TyKind::FrozenDict(..))) =>
+            {
+                let frozen = expected.expect("checked");
+                let TyKind::FrozenDict(k, v) = *self.types.kind(frozen) else { unreachable!() };
+                let dict_ty = self.types.dict(k, v);
+                let dict = self.dict_literal(cx, pairs, span, Some(dict_ty));
+                if dict.ty == dict_ty { hir::Expr { ty: frozen, ..dict } } else { dict }
+            }
             ast::ExprKind::List(items) => self.list_literal(cx, items, span, expected),
             ast::ExprKind::Dict(pairs) => self.dict_literal(cx, pairs, span, expected),
             ast::ExprKind::Tuple(items) => self.tuple_literal(cx, items, span, expected),
@@ -178,6 +197,7 @@ impl Checker<'_, '_> {
             ast::ExprKind::IfElse { cond, then, otherwise } => self.if_else(cx, cond, then, otherwise, span, expected),
             ast::ExprKind::Try(inner) => self.try_expr(cx, inner, span),
             ast::ExprKind::Lambda { params, body } => self.lambda(cx, params, body, expected, span),
+            ast::ExprKind::Spawn(call) => self.spawn_expr(cx, call, span),
             ast::ExprKind::ListComp { element, clauses } => {
                 self.comprehension(cx, element, None, clauses, span, expected)
             }
@@ -246,6 +266,27 @@ impl Checker<'_, '_> {
         if let Some(local) = self.lookup_local(cx, name) {
             cx.info[local.0].read = true;
             let ty = cx.locals[local.0].ty;
+            if cx.expired.contains(&local) {
+                self.error(
+                    Diagnostic::error(
+                        codes::GUARD_ESCAPE,
+                        format!("`{name}` was bound by a `with` block on a lock, and cannot be used after it"),
+                        span,
+                        "used after the lock was released",
+                    )
+                    .with_help("do the work inside the `with` block, or copy what you need out of it there"),
+                );
+                return error_expr(span);
+            }
+            if cx.locals[local.0].capture.is_some() && !self.shareable(ty) && Self::captures_guard(cx, name) {
+                self.error(Diagnostic::error(
+                    codes::GUARD_ESCAPE,
+                    format!("`{name}` is protected by a lock and cannot be captured by a nested function"),
+                    span,
+                    "captured here",
+                ));
+                return error_expr(span);
+            }
             if !cx.is_assigned(local) {
                 let decl_span = cx.info[local.0].decl_span;
                 self.error(
@@ -457,6 +498,9 @@ impl Checker<'_, '_> {
                 if let Some(global) = self.globals.get(name).map(|(global, _)| *global) {
                     return self.call_global(cx, global, name, callee.span, args, span, expected);
                 }
+                if super::concurrency::SYNC_TYPES.contains(&name.as_str()) && name != "Task" {
+                    return self.sync_constructor(cx, name, None, args, span, expected);
+                }
                 if BUILTIN_FUNCTIONS.contains(&name.as_str()) {
                     return self.builtin_function(cx, name, args, span);
                 }
@@ -497,6 +541,17 @@ impl Checker<'_, '_> {
                     return error_expr(span);
                 }
                 self.call_value(cx, value, args, span)
+            }
+            ast::ExprKind::Index { object, index } if matches!(&object.kind, ast::ExprKind::Name(n) if (n == "Channel" || n == "Mutex") && !cx.sees(n) && !self.globals.contains_key(n)) =>
+            {
+                let ast::ExprKind::Name(name) = &object.kind else { unreachable!() };
+                match self.type_args_of(index) {
+                    Some(types) => self.sync_constructor(cx, name, Some(types), args, span, expected),
+                    None => {
+                        self.check_all_quietly(cx, args);
+                        error_expr(span)
+                    }
+                }
             }
             ast::ExprKind::Index { object, index } if self.generic_name(cx, object).is_some() => {
                 // `Box[int](...)` or `f[int](...)`: explicit type arguments.
@@ -1169,7 +1224,12 @@ impl Checker<'_, '_> {
                 self.check_all(cx, args);
                 error_expr(span)
             }
+            TyKind::Task(_) | TyKind::Channel(_) | TyKind::Mutex(_) | TyKind::Atomic | TyKind::Guard(_) => {
+                self.sync_method(cx, receiver, name, args, span)
+            }
             TyKind::Str
+            | TyKind::FrozenList(_)
+            | TyKind::FrozenDict(..)
             | TyKind::List(_)
             | TyKind::Dict(..)
             | TyKind::Option(_)
@@ -1485,11 +1545,11 @@ impl Checker<'_, '_> {
     fn index(&mut self, cx: &mut FnCx, object: &ast::Expr, index: &ast::Expr, span: Span) -> hir::Expr {
         let container = self.expr(cx, object, None);
         match self.types.kind(container.ty).clone() {
-            TyKind::List(elem) => {
+            TyKind::List(elem) | TyKind::FrozenList(elem) => {
                 let index = self.expect(cx, index, Ty::INT, None);
                 mk(K::Index { container: Box::new(container), index: Box::new(index) }, elem, span)
             }
-            TyKind::Dict(key, value) => {
+            TyKind::Dict(key, value) | TyKind::FrozenDict(key, value) => {
                 let index = self.expect(cx, index, key, None);
                 mk(K::Index { container: Box::new(container), index: Box::new(index) }, value, span)
             }
@@ -1572,7 +1632,7 @@ impl Checker<'_, '_> {
         let start = start.map(|e| Box::new(self.expect(cx, e, Ty::INT, None)));
         let stop = stop.map(|e| Box::new(self.expect(cx, e, Ty::INT, None)));
         match self.types.kind(container.ty) {
-            TyKind::List(_) | TyKind::Str => {
+            TyKind::List(_) | TyKind::Str | TyKind::FrozenList(_) => {
                 let ty = container.ty;
                 mk(K::Slice { container: Box::new(container), start, stop }, ty, span)
             }
@@ -2206,7 +2266,7 @@ impl Checker<'_, '_> {
         let haystack = self.expr(cx, container, None);
         let needle = match self.types.kind(haystack.ty).clone() {
             TyKind::Str => self.expect(cx, needle, Ty::STR, None),
-            TyKind::List(elem) => {
+            TyKind::List(elem) | TyKind::FrozenList(elem) => {
                 if !self.equatable(elem) {
                     let shown = self.display(elem);
                     self.error(
@@ -2222,7 +2282,7 @@ impl Checker<'_, '_> {
                 }
                 self.expect(cx, needle, elem, None)
             }
-            TyKind::Dict(key, _) => self.expect(cx, needle, key, None),
+            TyKind::Dict(key, _) | TyKind::FrozenDict(key, _) => self.expect(cx, needle, key, None),
             TyKind::Error => return error_expr(span),
             _ => {
                 let shown = self.display(haystack.ty);

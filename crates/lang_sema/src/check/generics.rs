@@ -179,7 +179,13 @@ impl<'m> Checker<'_, 'm> {
 
     fn depth(&self, ty: Ty) -> usize {
         let inner = match self.types.kind(ty) {
-            TyKind::List(t) | TyKind::Option(t) => self.depth(*t),
+            TyKind::List(t)
+            | TyKind::Option(t)
+            | TyKind::FrozenList(t)
+            | TyKind::Task(t)
+            | TyKind::Channel(t)
+            | TyKind::Mutex(t) => self.depth(*t),
+            TyKind::FrozenDict(k, v) => self.depth(*k).max(self.depth(*v)),
             TyKind::Dict(k, v) | TyKind::Result(k, v) => self.depth(*k).max(self.depth(*v)),
             TyKind::Tuple(items) => items.iter().map(|t| self.depth(*t)).max().unwrap_or(0),
             TyKind::Func(params, ret) => params.iter().map(|t| self.depth(*t)).max().unwrap_or(0).max(self.depth(*ret)),
@@ -489,7 +495,13 @@ impl<'m> Checker<'_, 'm> {
     fn mentions_param(&self, ty: Ty, index: u32) -> bool {
         match self.types.kind(ty) {
             TyKind::Param(i) => *i == index,
-            TyKind::List(t) | TyKind::Option(t) => self.mentions_param(*t, index),
+            TyKind::List(t)
+            | TyKind::Option(t)
+            | TyKind::FrozenList(t)
+            | TyKind::Task(t)
+            | TyKind::Channel(t)
+            | TyKind::Mutex(t) => self.mentions_param(*t, index),
+            TyKind::FrozenDict(k, v) => self.mentions_param(*k, index) || self.mentions_param(*v, index),
             TyKind::Dict(k, v) | TyKind::Result(k, v) => {
                 self.mentions_param(*k, index) || self.mentions_param(*v, index)
             }
@@ -575,7 +587,14 @@ impl<'m> Checker<'_, 'm> {
         }
         let ak = self.types.kind(actual).clone();
         match (pk, ak) {
-            (TyKind::List(p), TyKind::List(a)) => self.unify(p, a, params, found),
+            (TyKind::List(p), TyKind::List(a))
+            | (TyKind::FrozenList(p), TyKind::FrozenList(a))
+            | (TyKind::Task(p), TyKind::Task(a))
+            | (TyKind::Channel(p), TyKind::Channel(a))
+            | (TyKind::Mutex(p), TyKind::Mutex(a)) => self.unify(p, a, params, found),
+            (TyKind::FrozenDict(pk, pv), TyKind::FrozenDict(ak, av)) => {
+                self.unify(pk, ak, params, found) && self.unify(pv, av, params, found)
+            }
             (TyKind::Option(p), TyKind::Option(a)) => self.unify(p, a, params, found),
             (TyKind::Option(_), TyKind::None) => true,
             (TyKind::Option(p), _) => self.unify(p, actual, params, found),
@@ -617,6 +636,26 @@ impl<'m> Checker<'_, 'm> {
             TyKind::Option(t) => {
                 let t = self.subst(t, params, found)?;
                 self.types.option(t)
+            }
+            TyKind::FrozenList(t) => {
+                let t = self.subst(t, params, found)?;
+                self.types.frozen_list(t)
+            }
+            TyKind::FrozenDict(k, v) => {
+                let (k, v) = (self.subst(k, params, found)?, self.subst(v, params, found)?);
+                self.types.frozen_dict(k, v)
+            }
+            TyKind::Task(t) => {
+                let t = self.subst(t, params, found)?;
+                self.types.intern(TyKind::Task(t))
+            }
+            TyKind::Channel(t) => {
+                let t = self.subst(t, params, found)?;
+                self.types.intern(TyKind::Channel(t))
+            }
+            TyKind::Mutex(t) => {
+                let t = self.subst(t, params, found)?;
+                self.types.intern(TyKind::Mutex(t))
             }
             TyKind::Dict(k, v) => {
                 let (k, v) = (self.subst(k, params, found)?, self.subst(v, params, found)?);

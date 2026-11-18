@@ -192,6 +192,7 @@ impl<'m> Checker<'_, 'm> {
             mul: trait_named(self, "MulNumber"),
             ord: trait_named(self, "Ord"),
             number: trait_named(self, "Number"),
+            shareable: trait_named(self, "Shareable"),
         };
         self.types.error_trait = Some(builtins.error);
         self.builtins = Some(builtins);
@@ -714,6 +715,13 @@ impl<'m> Checker<'_, 'm> {
     ) {
         let trait_name = self.traits[trait_id.0].name.clone();
         let span = imp.trait_name.as_ref().map_or(imp.target.span, |t| t.span.to(imp.target.span));
+        if trait_id == self.builtin().shareable {
+            self.error(
+                Diagnostic::error(codes::BAD_IMPL, "`Shareable` cannot be implemented by hand", span, "decided by the compiler")
+                    .with_help("a type is shareable when it cannot be changed: mark a struct `@frozen` and give it shareable fields"),
+            );
+            return;
+        }
         let provided: HashMap<&str, &'m ast::Function> =
             imp.methods.iter().map(|m| (m.name.name.as_str(), m)).collect();
         for method in &imp.methods {

@@ -1,0 +1,30 @@
+"""
+Clocks and pausing.
+
+    import time
+
+    start = time.monotonic()
+    time.sleep(0.25)
+    print(f"took {time.monotonic() - start:.2f} s")
+"""
+
+@extern("lrt_time_sleep")
+def sleep_raw(seconds: float)
+
+@extern("lrt_time_monotonic")
+def monotonic_raw() -> float
+
+@extern("lrt_time_now")
+def now_raw() -> float
+
+pub def sleep(seconds: float):
+    """Pause the current task. Other tasks keep running."""
+    sleep_raw(seconds)
+
+pub def monotonic() -> float:
+    """Seconds since an arbitrary fixed point; for measuring durations."""
+    return monotonic_raw()
+
+pub def now() -> float:
+    """Seconds since 1970-01-01 UTC."""
+    return now_raw()

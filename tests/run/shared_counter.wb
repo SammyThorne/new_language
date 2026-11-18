@@ -1,0 +1,42 @@
+# Milestone 6 exit program: a counter protected by a mutex, hit by 100 tasks, next to an atomic
+# counter, a frozen configuration shared read-only, and `time.sleep`.
+# expect: mutex counter: 100000
+# expect: atomic counter: 100000
+# expect: per-name totals: {'even': 50000, 'odd': 50000}
+# expect: config shared: 100 tasks saw limit 1000
+# expect: slept: True
+
+import time
+
+@frozen
+struct Config:
+    limit: int
+    names: tuple[str, ...]
+
+def hit(id: int, config: Config, counter: Mutex[int], tally: Mutex[dict[str, int]], atomic: Atomic) -> int:
+    for _ in range(config.limit):
+        with counter.lock() as n:
+            n += 1
+        atomic.increment()
+    name = config.names[id % 2]
+    with tally.lock() as totals:
+        totals[name] = totals.get_or(name, 0) + config.limit
+    return config.limit
+
+def main():
+    config = Config(limit=1000, names=("even", "odd"))
+    counter = Mutex(0)
+    tally: Mutex[dict[str, int]] = Mutex({})
+    atomic = Atomic(0)
+    tasks = [spawn hit(i, config, counter, tally, atomic) for i in range(100)]
+    seen = [task.join() for task in tasks]
+    with counter.lock() as n:
+        print("mutex counter:", n)
+    print("atomic counter:", atomic.get())
+    with tally.lock() as totals:
+        print("per-name totals:", {name: totals[name] for name in sorted(totals.keys())})
+    print(f"config shared: {len(seen)} tasks saw limit {seen[0]}")
+    start = time.monotonic()
+    sleeper = spawn time.sleep(0.05)
+    sleeper.join()
+    print("slept:", time.monotonic() - start >= 0.05)

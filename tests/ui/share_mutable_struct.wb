@@ -1,0 +1,9 @@
+struct Counter:
+    hits: int
+
+def bump(counter: Counter):
+    counter.hits += 1
+
+def main():
+    counter = Counter(hits=0)
+    spawn bump(counter)

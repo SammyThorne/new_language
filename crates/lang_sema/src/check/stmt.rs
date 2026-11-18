@@ -106,7 +106,20 @@ impl Checker<'_, '_> {
         target: Option<&ast::Ident>,
         body: &[ast::Stmt],
     ) -> (Vec<hir::Stmt>, bool) {
-        let checked = self.expr(cx, value, None);
+        // `with m.lock() as value:` on a mutex.
+        let checked = match &value.kind {
+            ast::ExprKind::Call { callee, args } if args.is_empty() => match &callee.kind {
+                ast::ExprKind::Attr { object, name } if name.name == "lock" => {
+                    let receiver = self.expr(cx, object, None);
+                    if matches!(self.types.kind(receiver.ty), TyKind::Mutex(_)) {
+                        return self.lock_block(cx, receiver, target, body, value.span);
+                    }
+                    self.method_call(cx, receiver, name, args, value.span)
+                }
+                _ => self.expr(cx, value, None),
+            },
+            _ => self.expr(cx, value, None),
+        };
         let ty = checked.ty;
         let exit = self.method_of(ty, "exit").filter(|f| self.signatures[f.0].ret == Ty::NONE);
         let enter = self.method_of(ty, "enter");
@@ -171,7 +184,7 @@ impl Checker<'_, '_> {
         inner.extend(body);
         let stmts = vec![
             hir::Stmt::Assign { place: hir::Place::Local(temp), value: checked },
-            hir::Stmt::With { object: temp, exit, body: inner },
+            hir::Stmt::With { object: temp, exit: hir::WithExit::Method(exit), body: inner },
         ];
         (stmts, diverges)
     }
@@ -297,7 +310,7 @@ impl Checker<'_, '_> {
                 && matches!(name.name.as_str(), "keys" | "values" | "items")
             {
                 let receiver = self.expr(cx, object, None);
-                if let TyKind::Dict(key, value) = *self.types.kind(receiver.ty) {
+                if let TyKind::Dict(key, value) | TyKind::FrozenDict(key, value) = *self.types.kind(receiver.ty) {
                     return match name.name.as_str() {
                         "keys" => (hir::LoopSource::DictKeys(receiver), key),
                         "values" => (hir::LoopSource::DictValues(receiver), value),
@@ -321,6 +334,9 @@ impl Checker<'_, '_> {
             TyKind::Str => (hir::LoopSource::Str(iterable), Ty::STR),
             TyKind::Dict(key, _) => (hir::LoopSource::DictKeys(iterable), key),
             TyKind::Error => (hir::LoopSource::List(iterable), Ty::ERROR),
+            TyKind::FrozenList(elem) => (hir::LoopSource::List(iterable), elem),
+            TyKind::FrozenDict(key, _) => (hir::LoopSource::DictKeys(iterable), key),
+            TyKind::Channel(elem) => (hir::LoopSource::Channel(iterable), elem),
             TyKind::Struct(_) | TyKind::Enum(_) if self.iterator_parts(iterable.ty).is_some() => {
                 // An iterator: a type with `def next(self) -> T?`.
                 let (next, elem) = self.iterator_parts(iterable.ty).expect("checked");
@@ -545,7 +561,9 @@ impl Checker<'_, '_> {
             }
             (Some(expr), ret) => {
                 let reason = ret_span.map(|s| (s, "expected because of this return type".to_string()));
-                hir::Stmt::Return(Some(self.expect(cx, expr, ret, reason)))
+                let value = self.expect(cx, expr, ret, reason);
+                self.check_escape(cx, &value, "returned");
+                hir::Stmt::Return(Some(value))
             }
         }
     }
@@ -583,6 +601,7 @@ impl Checker<'_, '_> {
                     return Vec::new();
                 };
                 let value = self.expect(cx, value, ty, reason);
+                self.check_escape(cx, &value, "stored in a field or collection");
                 vec![hir::Stmt::Assign { place, value }]
             }
         }
@@ -637,6 +656,10 @@ impl Checker<'_, '_> {
             }
             let reason = Some((decl_span, format!("`{}` was declared as `{shown}` here", name.name)));
             let value = self.expect(cx, value, declared, reason);
+            if !cx.guarded.contains(&local) {
+                self.check_escape(cx, &value, "stored in another variable");
+            }
+            cx.expired.retain(|l| *l != local);
             if cx.locals[local.0].capture.is_some() {
                 self.error(Diagnostic::error(
                     codes::ASSIGN_CAPTURED,
@@ -677,6 +700,7 @@ impl Checker<'_, '_> {
                 }
             }
         };
+        self.check_escape(cx, &value, "stored in another variable");
         let local = cx.add_local(&name.name, ty, name.span, false);
         cx.set_assigned(local);
         vec![hir::Stmt::Assign { place: hir::Place::Local(local), value }]

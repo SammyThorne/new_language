@@ -17,6 +17,11 @@ impl<'ctx> Codegen<'ctx, '_> {
         }
     }
 
+    /// The type of a local of the function being generated.
+    pub(crate) fn local_type(&self, local: LocalId) -> Ty {
+        self.state.as_ref().expect("inside a function").local_types[local.0]
+    }
+
     fn slot(&self, local: LocalId) -> Option<PointerValue<'ctx>> {
         self.state.as_ref().expect("inside a function").slots[local.0]
     }
@@ -89,7 +94,10 @@ impl<'ctx> Codegen<'ctx, '_> {
             Stmt::For { target, source, body } => self.for_loop(target, source, body),
             Stmt::Match { subject, cases } => self.match_stmt(subject, cases),
             Stmt::With { object, exit, body } => {
-                let ty = self.program.functions[exit.0].locals[0].ty;
+                let ty = match exit {
+                    lang_sema::hir::WithExit::Method(func) => self.program.functions[func.0].locals[0].ty,
+                    lang_sema::hir::WithExit::Unlock { .. } => Ty::NONE,
+                };
                 self.state.as_mut().unwrap().cleanups.push((*object, *exit, ty));
                 self.stmts(body);
                 let depth = self.state.as_ref().unwrap().cleanups.len() - 1;
@@ -123,9 +131,25 @@ impl<'ctx> Codegen<'ctx, '_> {
     pub(crate) fn run_cleanups(&mut self, depth: usize) {
         let cleanups: Vec<_> = self.state.as_ref().unwrap().cleanups[depth..].iter().rev().copied().collect();
         for (object, exit, ty) in cleanups {
-            let value = self.load_local(object, ty).expect("`with` values are objects");
-            let call = self.b.build_call(self.function_value(exit), &[value.into()], "").must();
-            call.set_call_convention(crate::CALLCONV_FAST);
+            match exit {
+                lang_sema::hir::WithExit::Method(func) => {
+                    let value = self.load_local(object, ty).expect("`with` values are objects");
+                    let call = self.b.build_call(self.function_value(func), &[value.into()], "").must();
+                    call.set_call_convention(crate::CALLCONV_FAST);
+                }
+                lang_sema::hir::WithExit::Unlock { value } => {
+                    // Write the bound value back, then release the lock.
+                    let mutex = self.load_local(object, self.local_type(object)).expect("a mutex").into_pointer_value();
+                    if let Some(local) = value {
+                        let local_ty = self.local_type(local);
+                        if let Some(current) = self.load_local(local, local_ty) {
+                            let slot = self.call_rt("lrt_mutex_value", &[mutex.into()]).unwrap().into_pointer_value();
+                            self.b.build_store(slot, current).must();
+                        }
+                    }
+                    self.call_rt("lrt_mutex_unlock", &[mutex.into()]);
+                }
+            }
         }
     }
 
@@ -278,6 +302,26 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.build_conditional_branch(present, body_block, exit).must();
                 self.b.position_at_end(body_block);
                 let element = self.opt_inner(option_ty, item);
+                self.assign_target(target, element);
+                self.loop_body(body, header, exit);
+                self.b.build_unconditional_branch(header).must();
+                self.b.position_at_end(exit);
+            }
+            LoopSource::Channel(channel) => {
+                let TyKind::Channel(elem) = *self.kind(channel.ty) else { unreachable!() };
+                let channel_value = self.value(channel);
+                let out = self.alloca(self.value_type(elem), "received");
+                let (header, body_block, exit) = (self.block("for"), self.block("body"), self.block("endfor"));
+                self.b.build_unconditional_branch(header).must();
+                self.b.position_at_end(header);
+                let got = self
+                    .call_rt("lrt_channel_recv", &[channel_value, out.into(), self.i64(1).into()])
+                    .unwrap()
+                    .into_int_value();
+                let more = self.b.build_int_compare(IntPredicate::NE, got, self.i64(0), "").must();
+                self.b.build_conditional_branch(more, body_block, exit).must();
+                self.b.position_at_end(body_block);
+                let element = self.b.build_load(self.value_type(elem), out, "").must();
                 self.assign_target(target, element);
                 self.loop_body(body, header, exit);
                 self.b.build_unconditional_branch(header).must();

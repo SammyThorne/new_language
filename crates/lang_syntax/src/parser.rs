@@ -838,7 +838,21 @@ impl Parser<'_> {
                 let mut args = Vec::new();
                 if self.eat(&TokenKind::LBracket) {
                     loop {
-                        args.push(self.type_expr()?);
+                        // `tuple[T, ...]`: the `...` is kept as a type argument named "...".
+                        if self.at(&TokenKind::Dot)
+                            && *self.peek_nth(1) == TokenKind::Dot
+                            && *self.peek_nth(2) == TokenKind::Dot
+                        {
+                            let dots = self.bump().span;
+                            self.bump();
+                            let last = self.bump().span;
+                            args.push(TypeExpr {
+                                kind: TypeExprKind::Named { name: "...".to_string(), args: Vec::new() },
+                                span: dots.to(last),
+                            });
+                        } else {
+                            args.push(self.type_expr()?);
+                        }
                         if !self.eat(&TokenKind::Comma) || self.at(&TokenKind::RBracket) {
                             break;
                         }
@@ -944,9 +958,6 @@ impl Parser<'_> {
                 return Err(self.error("`case` outside a `match`", start, "no `match` before this", None));
             }
             TokenKind::With => return self.with_stmt(),
-            kind @ TokenKind::Spawn => {
-                return Err(self.not_supported(&format!("{} statements are", kind.describe()), start));
-            }
             TokenKind::Def => {
                 let function = self.function(Visibility::Default, false)?;
                 let span = start.to(function.name.span);
@@ -1366,6 +1377,18 @@ impl Parser<'_> {
             self.bump();
             let operand = self.binary(prec)?;
             Expr { span: start.to(operand.span), kind: ExprKind::Unary { op, operand: Box::new(operand) } }
+        } else if self.at(&TokenKind::Spawn) {
+            self.bump();
+            let call = self.postfix()?;
+            if !matches!(call.kind, ExprKind::Call { .. }) {
+                return Err(self.error(
+                    "`spawn` needs a function call",
+                    call.span,
+                    "not a call",
+                    Some("write `spawn worker(args)`; to run a block of code, put it in a function"),
+                ));
+            }
+            Expr { span: start.to(call.span), kind: ExprKind::Spawn(Box::new(call)) }
         } else {
             self.postfix()?
         };
@@ -1678,6 +1701,7 @@ mod tests {
                 format!("({} if {} else {})", show(then), show(cond), show(otherwise))
             }
             ExprKind::Try(inner) => format!("{}?", show(inner)),
+            ExprKind::Spawn(inner) => format!("spawn {}", show(inner)),
             ExprKind::Lambda { params, body } => {
                 format!(
                     "(lambda {}: {})",

@@ -19,6 +19,7 @@
 
 mod builtins;
 mod closures;
+mod concurrency;
 mod expr;
 mod generics;
 mod items;
@@ -65,20 +66,59 @@ const BUILTIN_FUNCTIONS: &[&str] = &[
     "u32",
     "u64",
     "f32",
+    "tuple",
+    "frozendict",
 ];
 
 /// Constructors of the built-in enums.
 const BUILTIN_CONSTRUCTORS: &[&str] = &["Some", "Ok", "Err"];
 
 /// Built-in type names, which cannot be redefined.
-const BUILTIN_TYPES: &[&str] = &["bool", "list", "dict", "tuple", "set", "bytes", "None", "Result", "Self"];
+const BUILTIN_TYPES: &[&str] = &[
+    "bool",
+    "list",
+    "dict",
+    "tuple",
+    "set",
+    "bytes",
+    "None",
+    "Result",
+    "Self",
+    "Task",
+    "Channel",
+    "Mutex",
+    "Atomic",
+    "frozendict",
+];
 
 /// Type names that exist in the language design but are not implemented yet.
 const PLANNED_TYPES: &[&str] = &["set", "bytes", "bytearray", "frozenset", "range"];
 
 const KNOWN_TYPES: &[&str] = &[
-    "int", "bool", "str", "float", "list", "dict", "tuple", "None", "Result", "i8", "i16", "i32", "i64", "u8", "u16",
-    "u32", "u64", "f32", "f64",
+    "int",
+    "bool",
+    "str",
+    "float",
+    "list",
+    "dict",
+    "tuple",
+    "None",
+    "Result",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "f32",
+    "f64",
+    "Task",
+    "Channel",
+    "Mutex",
+    "Atomic",
+    "frozendict",
 ];
 
 /// One module of a program: its dotted name (`services.billing`) and its syntax tree.
@@ -419,6 +459,9 @@ struct FnCx {
     /// Optional locals known not to be `None` at this point (flow narrowing): reading one gives
     /// the value inside.
     narrowed: Vec<LocalId>,
+    /// Locals bound by `with m.lock() as name:` inside their block, and after it.
+    guarded: Vec<LocalId>,
+    expired: Vec<LocalId>,
 }
 
 struct LocalInfo {
@@ -444,6 +487,8 @@ impl FnCx {
             outer: None,
             captures: Vec::new(),
             narrowed: Vec::new(),
+            guarded: Vec::new(),
+            expired: Vec::new(),
         }
     }
 
@@ -771,6 +816,11 @@ impl<'a, 'm> Checker<'a, 'm> {
             }
             return ty;
         }
+        if !self.globals.contains_key(name)
+            && let Some(ty) = self.special_type(name, args, span)
+        {
+            return ty;
+        }
         match name {
             "int" | "bool" | "str" | "float" => {
                 if !self.no_type_args(name, args, span) {
@@ -1074,6 +1124,11 @@ impl<'a, 'm> Checker<'a, 'm> {
     }
 
     fn implements(&self, ty: Ty, trait_id: TraitId) -> bool {
+        if trait_id == self.builtin().shareable
+            && !matches!(self.types.kind(ty), TyKind::Dyn(_) | TyKind::SelfType(_) | TyKind::Param(_))
+        {
+            return self.shareable(ty);
+        }
         match self.types.kind(ty) {
             TyKind::Dyn(t) | TyKind::SelfType(t) => self.trait_closure(*t).contains(&trait_id),
             TyKind::Param(index) => {
@@ -1091,7 +1146,14 @@ impl<'a, 'm> Checker<'a, 'm> {
         let b = self.builtin();
         match self.types.kind(ty) {
             TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Param(_) => self.implements(ty, b.display),
-            TyKind::Func(..) => false,
+            TyKind::Func(..)
+            | TyKind::Task(_)
+            | TyKind::Channel(_)
+            | TyKind::Mutex(_)
+            | TyKind::Guard(_)
+            | TyKind::Atomic => false,
+            TyKind::FrozenList(t) => self.displayable(*t),
+            TyKind::FrozenDict(k, v) => self.displayable(*k) && self.displayable(*v),
             TyKind::Dyn(t) | TyKind::SelfType(t) => {
                 let closure = self.trait_closure(*t);
                 closure.contains(&b.display) || closure.contains(&b.error)
@@ -1109,7 +1171,13 @@ impl<'a, 'm> Checker<'a, 'm> {
             TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Param(_) => self.implements(ty, self.builtin().eq),
             TyKind::Error | TyKind::None | TyKind::Bool | TyKind::Int | TyKind::Float | TyKind::Str => true,
             TyKind::Sized(_) => true,
-            TyKind::List(t) | TyKind::Option(t) => self.equatable(*t),
+            TyKind::List(t) | TyKind::Option(t) | TyKind::FrozenList(t) => self.equatable(*t),
+            TyKind::FrozenDict(..)
+            | TyKind::Task(_)
+            | TyKind::Channel(_)
+            | TyKind::Mutex(_)
+            | TyKind::Guard(_)
+            | TyKind::Atomic => false,
             TyKind::Result(k, v) => self.equatable(*k) && self.equatable(*v),
             TyKind::Tuple(items) => items.iter().all(|t| self.equatable(*t)),
             TyKind::Dyn(t) | TyKind::SelfType(t) => self.trait_closure(*t).contains(&self.builtin().eq),
@@ -1135,7 +1203,7 @@ impl<'a, 'm> Checker<'a, 'm> {
             TyKind::Error | TyKind::Bool | TyKind::Int | TyKind::Float | TyKind::Str | TyKind::Sized(_) => true,
             TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Param(_) => self.implements(ty, self.builtin().ord),
             TyKind::Tuple(items) => items.iter().all(|t| self.orderable(*t)),
-            TyKind::List(t) => self.orderable(*t),
+            TyKind::List(t) | TyKind::FrozenList(t) => self.orderable(*t),
             _ => false,
         }
     }

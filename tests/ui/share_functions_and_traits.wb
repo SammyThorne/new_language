@@ -1,0 +1,27 @@
+trait Store:
+    def get(self, key: str) -> str
+
+struct Memory:
+    data: dict[str, str]
+
+impl Store for Memory:
+    def get(self, key: str) -> str:
+        return self.data[key]
+
+def serve(store: Store):
+    print(store.get("a"))
+
+def apply(f: def(int) -> int, x: int) -> int:
+    return f(x)
+
+def double(x: int) -> int:
+    return x * 2
+
+def main():
+    store: Store = Memory({"a": "b"})
+    spawn serve(store)
+    seen: list[int] = []
+    def remember(x: int) -> int:
+        return len(seen) + x
+    spawn apply(remember, 1)
+    spawn apply(double, 2)

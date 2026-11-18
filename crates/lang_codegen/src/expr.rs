@@ -259,7 +259,81 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.stmts(stmts);
                 return self.expr(value);
             }
+            ExprKind::Spawn { func, callee, args } => self.spawn(expr.ty, *func, callee.as_deref(), args),
         })
+    }
+
+    /// `spawn`: put the arguments (and the function value, if any) in an environment, and start
+    /// a task running a generated entry function that unpacks them, makes the call, and stores
+    /// the result in the task.
+    fn spawn(
+        &mut self,
+        task_ty: Ty,
+        func: Option<lang_sema::hir::FuncId>,
+        callee: Option<&Expr>,
+        args: &[Expr],
+    ) -> BasicValueEnum<'ctx> {
+        let TyKind::Task(result_ty) = *self.kind(task_ty) else { unreachable!("spawn gives a task") };
+        let ptr = self.ptr_type();
+        let callee_value = callee.map(|c| self.value(c));
+        let arg_values: Vec<BasicValueEnum> = args.iter().map(|a| self.value(a)).collect();
+        let result_size = self.llty(result_ty).map_or(0, |t| self.td.get_abi_size(&t));
+        let task = self.call_rt("lrt_task_new", &[self.i64(result_size as i64).into()]).unwrap().into_pointer_value();
+
+        let mut fields: Vec<inkwell::types::BasicTypeEnum> = vec![ptr.into()];
+        if callee_value.is_some() {
+            fields.push(self.dyn_type.into());
+        }
+        fields.extend(arg_values.iter().map(|v| v.get_type()));
+        let env_type = self.cx.struct_type(&fields, false);
+        let env_size = self.i64(self.td.get_abi_size(&env_type) as i64);
+        let env = self.call_rt("lrt_alloc_raw", &[env_size.into()]).unwrap().into_pointer_value();
+        let mut stored: Vec<BasicValueEnum> = vec![task.into()];
+        stored.extend(callee_value);
+        stored.extend(arg_values);
+        for (index, value) in stored.iter().enumerate() {
+            let at = self.b.build_struct_gep(env_type, env, index as u32, "").must();
+            self.b.build_store(at, *value).must();
+        }
+
+        // The entry function, called by the runtime on the new thread with the C convention.
+        let entry_type = self.cx.void_type().fn_type(&[ptr.into()], false);
+        let entry = self.module.add_function("spawn.entry", entry_type, Some(inkwell::module::Linkage::Private));
+        entry.add_attribute(inkwell::attributes::AttributeLoc::Function, self.nounwind);
+        let has_callee = callee.is_some();
+        let callee_ty = callee.map(|c| c.ty);
+        self.in_function(entry, |this| {
+            let env = entry.get_nth_param(0).unwrap().into_pointer_value();
+            let load = |this: &mut Self, index: usize| {
+                let at = this.b.build_struct_gep(env_type, env, index as u32, "").must();
+                this.b.build_load(fields[index], at, "").must()
+            };
+            let task = load(this, 0).into_pointer_value();
+            let first_arg = if has_callee { 2 } else { 1 };
+            let values: Vec<BasicValueEnum> = (first_arg..fields.len()).map(|i| load(this, i)).collect();
+            let result = match func {
+                Some(func) => {
+                    let args: Vec<BasicMetadataValueEnum> = values.iter().map(|v| (*v).into()).collect();
+                    let call = this.b.build_call(this.function_value(func), &args, "").must();
+                    if func != this.program.entry {
+                        call.set_call_convention(crate::CALLCONV_FAST);
+                    }
+                    call.try_as_basic_value().basic()
+                }
+                None => {
+                    let pair = load(this, 1);
+                    this.call_function_value(callee_ty.expect("a callee"), pair, &values)
+                }
+            };
+            if let Some(result) = result {
+                let slot = this.call_rt("lrt_task_result", &[task.into()]).unwrap().into_pointer_value();
+                this.b.build_store(slot, result).must();
+            }
+            this.b.build_return(None).must();
+        });
+        let entry_ptr = entry.as_global_value().as_pointer_value();
+        self.call_rt("lrt_spawn", &[entry_ptr.into(), env.into(), task.into()]);
+        task.into()
     }
 
     /// The LLVM type of the code of a function value: environment first, then the arguments.
@@ -659,7 +733,15 @@ impl<'ctx> Codegen<'ctx, '_> {
                 call.set_call_convention(crate::CALLCONV_FAST);
                 call.try_as_basic_value().basic().unwrap().into_int_value()
             }
-            TyKind::Dict(..) | TyKind::Dyn(_) | TyKind::SelfType(_) | TyKind::Func(..) => {
+            TyKind::Dict(..)
+            | TyKind::Dyn(_)
+            | TyKind::SelfType(_)
+            | TyKind::Func(..)
+            | TyKind::Task(_)
+            | TyKind::Channel(_)
+            | TyKind::Mutex(_)
+            | TyKind::Guard(_)
+            | TyKind::Atomic => {
                 let i64_type = self.cx.i64_type();
                 let x = self.b.build_ptr_to_int(a.into_pointer_value(), i64_type, "").must();
                 let y = self.b.build_ptr_to_int(b.into_pointer_value(), i64_type, "").must();
@@ -671,7 +753,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 call.set_call_convention(crate::CALLCONV_FAST);
                 call.try_as_basic_value().basic().unwrap().into_int_value()
             }
-            TyKind::Error | TyKind::Param(_) => unreachable!(),
+            TyKind::Error | TyKind::Param(_) | TyKind::FrozenList(_) | TyKind::FrozenDict(..) => unreachable!(),
         }
     }
 

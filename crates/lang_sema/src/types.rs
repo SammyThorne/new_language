@@ -122,6 +122,20 @@ pub enum TyKind {
     Func(Vec<Ty>, Ty),
     /// `i8` to `u64` and `f32`.
     Sized(SizedKind),
+    /// `tuple[T, ...]`: an immutable list, which can be shared between tasks.
+    FrozenList(Ty),
+    /// `frozendict[K, V]`: an immutable dict.
+    FrozenDict(Ty, Ty),
+    /// `Task[T]`: a running `spawn`, whose `join()` gives a `T`.
+    Task(Ty),
+    /// `Channel[T]`: a queue between tasks.
+    Channel(Ty),
+    /// `Mutex[T]`: a value reachable only while holding its lock.
+    Mutex(Ty),
+    /// What `mutex.lock()` returns: usable only as the value of a `with` block.
+    Guard(Ty),
+    /// `Atomic`: an `int` updated without a lock.
+    Atomic,
 }
 
 #[derive(Debug)]
@@ -236,6 +250,19 @@ impl Types {
         self.intern(TyKind::Func(params, ret))
     }
 
+    /// `tuple[T, ...]`. The mutable `list[T]` is created too: code generation represents both
+    /// the same way.
+    pub fn frozen_list(&mut self, elem: Ty) -> Ty {
+        self.list(elem);
+        self.intern(TyKind::FrozenList(elem))
+    }
+
+    /// `frozendict[K, V]`, creating `dict[K, V]` too.
+    pub fn frozen_dict(&mut self, key: Ty, value: Ty) -> Ty {
+        self.dict(key, value);
+        self.intern(TyKind::FrozenDict(key, value))
+    }
+
     pub fn sized(&mut self, kind: SizedKind) -> Ty {
         self.intern(TyKind::Sized(kind))
     }
@@ -276,6 +303,13 @@ impl Types {
             TyKind::Float => "float".into(),
             TyKind::Str => "str".into(),
             TyKind::Sized(kind) => kind.name().into(),
+            TyKind::FrozenList(elem) => format!("tuple[{}, ...]", self.display(*elem)),
+            TyKind::FrozenDict(key, value) => format!("frozendict[{}, {}]", self.display(*key), self.display(*value)),
+            TyKind::Task(t) => format!("Task[{}]", self.display(*t)),
+            TyKind::Channel(t) => format!("Channel[{}]", self.display(*t)),
+            TyKind::Mutex(t) => format!("Mutex[{}]", self.display(*t)),
+            TyKind::Guard(t) => format!("MutexGuard[{}]", self.display(*t)),
+            TyKind::Atomic => "Atomic".into(),
             TyKind::List(elem) => format!("list[{}]", self.display(*elem)),
             TyKind::Dict(key, value) => format!("dict[{}, {}]", self.display(*key), self.display(*value)),
             TyKind::Tuple(items) => {
@@ -310,8 +344,16 @@ impl Types {
     pub fn contains_param(&self, ty: Ty) -> bool {
         match self.kind(ty) {
             TyKind::Param(_) => true,
-            TyKind::List(t) | TyKind::Option(t) => self.contains_param(*t),
-            TyKind::Dict(k, v) | TyKind::Result(k, v) => self.contains_param(*k) || self.contains_param(*v),
+            TyKind::List(t)
+            | TyKind::Option(t)
+            | TyKind::FrozenList(t)
+            | TyKind::Task(t)
+            | TyKind::Channel(t)
+            | TyKind::Mutex(t)
+            | TyKind::Guard(t) => self.contains_param(*t),
+            TyKind::Dict(k, v) | TyKind::Result(k, v) | TyKind::FrozenDict(k, v) => {
+                self.contains_param(*k) || self.contains_param(*v)
+            }
             TyKind::Tuple(items) => items.iter().any(|t| self.contains_param(*t)),
             TyKind::Func(params, ret) => params.iter().any(|t| self.contains_param(*t)) || self.contains_param(*ret),
             _ => false,
@@ -321,8 +363,16 @@ impl Types {
     pub fn contains_error(&self, ty: Ty) -> bool {
         match self.kind(ty) {
             TyKind::Error => true,
-            TyKind::List(t) | TyKind::Option(t) => self.contains_error(*t),
-            TyKind::Dict(k, v) | TyKind::Result(k, v) => self.contains_error(*k) || self.contains_error(*v),
+            TyKind::List(t)
+            | TyKind::Option(t)
+            | TyKind::FrozenList(t)
+            | TyKind::Task(t)
+            | TyKind::Channel(t)
+            | TyKind::Mutex(t)
+            | TyKind::Guard(t) => self.contains_error(*t),
+            TyKind::Dict(k, v) | TyKind::Result(k, v) | TyKind::FrozenDict(k, v) => {
+                self.contains_error(*k) || self.contains_error(*v)
+            }
             TyKind::Tuple(items) => items.iter().any(|t| self.contains_error(*t)),
             TyKind::Func(params, ret) => params.iter().any(|t| self.contains_error(*t)) || self.contains_error(*ret),
             _ => false,
@@ -338,7 +388,15 @@ impl Types {
     /// Values that are a single pointer to a mutable heap object, and so can be compared with
     /// `is`. Enums are heap objects too, but immutable values, so `is` does not apply.
     pub fn is_reference(&self, ty: Ty) -> bool {
-        matches!(self.kind(ty), TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..))
+        matches!(
+            self.kind(ty),
+            TyKind::Struct(_)
+                | TyKind::List(_)
+                | TyKind::Dict(..)
+                | TyKind::Channel(_)
+                | TyKind::Mutex(_)
+                | TyKind::Task(_)
+        )
     }
 
     pub fn option_inner(&self, ty: Ty) -> Option<Ty> {

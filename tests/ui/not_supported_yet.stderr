@@ -4,7 +4,7 @@ error[E0334]: cannot find module `json`
 1 | import json
   |        ^^^^ no such module
   |
-  = help: looked for `tests/ui/json.wb` and for a standard library module; the standard library has `io`, `os`
+  = help: looked for `tests/ui/json.wb` and for a standard library module; the standard library has `io`, `os`, `time`
 
 error[E0101]: set literals are not supported yet
  --> tests/ui/not_supported_yet.wb:4:13

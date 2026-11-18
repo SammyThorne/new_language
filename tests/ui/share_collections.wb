@@ -1,0 +1,22 @@
+@frozen
+struct Job:
+    id: int
+    tags: list[str]
+
+def total(items: list[int]) -> int:
+    return sum(items)
+
+def lookup(table: dict[str, int], key: str) -> int:
+    return table[key]
+
+def run(job: Job):
+    print(job.id)
+
+def main():
+    items = [1, 2, 3]
+    t = spawn total(items)
+    print(t.join())
+    spawn lookup({"a": 1}, "a")
+    spawn run(Job(1, ["x"]))
+    jobs = Channel[Job](10)
+    lists = Channel[list[int]](1)

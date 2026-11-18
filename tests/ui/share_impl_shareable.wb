@@ -1,0 +1,8 @@
+struct Cache:
+    entries: dict[str, int]
+
+impl Shareable for Cache:
+    pass
+
+def main():
+    print(1)

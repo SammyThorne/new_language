@@ -353,6 +353,22 @@ The command-line driver loads the main file, follows its imports depth-first (th
 
 `i8` to `u64` and `f32` exist for binding C functions and compact data. They support conversion (`i32(x)`, `int(x)`, `float(x)`; integers wrap and floats truncate, saturating), comparison, hashing, printing, `+`, `-`, `*`, bit operations and, for `f32`, `/`. Floor division, modulo and powers need `int` or `float`; the error says to convert. Integer literals take a sized type from context and are checked against its range. `i64` and `f64` are other names for `int` and `float`.
 
+### D42. Tasks are OS threads registered with Boehm, and shared objects live in collected memory
+
+`spawn f(args)` evaluates the arguments in the spawning task, stores them in an environment object, and starts a thread (8 MiB of stack, reserved but committed on use) that registers itself with the collector, calls the function, and stores the result in the task object. Until the new thread has registered, a two-word uncollectable root keeps the environment and task alive. A `Task`'s result slot, a `Channel`'s ring buffer and a `Mutex`'s value are in collected memory, which the collector scans; their locks are Rust's futex-based `Mutex` and `Condvar`, built in place, which hold no other memory. Received slots are cleared so a channel does not keep values alive. At most 10,000 tasks run at once (`WEBY_MAX_TASKS`); `spawn` waits beyond that.
+
+### D43. `with m.lock() as value:` gives the value, and writes it back
+
+A mutex is only reachable through `with m.lock() as value:`; `m.lock()` anywhere else is an error, since nothing would release the lock. `value` is the protected value; if the block assigns it (`n += 1` on a `Mutex[int]`), the new value is stored back before unlocking, on every way out of the block. `Mutex(x)` where `x` is a variable holding a mutable value is an error, since `x` would still reach the value without the lock.
+
+### D44. What `Shareable` allows
+
+As specified in docs/04, with these choices: an enum is shareable when all its variants' fields are; a trait object when its trait requires `Shareable`; a type parameter when it is bounded by `Shareable`; a function value only when it is a named function, a method bound to a shareable value, or a lambda or nested function whose captured variables are all shareable, judged where it is written, since a function type says nothing about captures. A guarded value may be read, changed and passed as an argument inside its block; storing it in a variable, field or collection, returning it, sending it, spawning with it, capturing it, or using it after the block are errors (E0339), unless the part taken out is shareable.
+
+### D45. ThreadSanitizer is deferred
+
+The roadmap asks for the runtime to be run under ThreadSanitizer. That needs a nightly Rust toolchain (`-Zsanitizer=thread`), which this machine does not have; installing one is a download left to the user. The concurrency programs instead run a thousand times in release mode and a hundred times with the collector running before every allocation (`tests/stress.sh`). The command to run when a nightly toolchain is present: `RUSTFLAGS=-Zsanitizer=thread cargo +nightly build -p lang_rt --target x86_64-unknown-linux-gnu`, then link a test program against that `liblang_rt.a` with `WEBY_RUNTIME`.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

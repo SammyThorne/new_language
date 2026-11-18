@@ -115,6 +115,10 @@ pub const PRIVATE: &str = "E0335";
 pub const IMPORT_CYCLE: &str = "E0336";
 /// A `with` statement whose value has no `exit` method.
 pub const BAD_WITH: &str = "E0337";
+/// A value that would be handed to another task but can be changed, so the tasks would race.
+pub const NOT_SHAREABLE: &str = "E0338";
+/// A value protected by a mutex leaving the `with` block that holds the lock.
+pub const GUARD_ESCAPE: &str = "E0339";
 
 /// A variable that is assigned but never read.
 pub const UNUSED_VARIABLE: &str = "W0001";

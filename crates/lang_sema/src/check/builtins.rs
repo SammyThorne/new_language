@@ -64,6 +64,9 @@ impl Checker<'_, '_> {
         if name == "sorted" {
             return self.sorted(cx, args, span);
         }
+        if name == "tuple" || name == "frozendict" {
+            return self.freeze_call(cx, name, args, span);
+        }
         if matches!(name, "min" | "max" | "sum" | "enumerate" | "zip" | "any" | "all") {
             if !self.no_keywords(args, &format!("`{name}`")) {
                 self.check_all_quietly(cx, args);
@@ -150,7 +153,10 @@ impl Checker<'_, '_> {
             return builtin(Op::NumConvert, vec![value], ty);
         }
         let result = match (name, &kind) {
-            ("len", TyKind::Str | TyKind::List(_) | TyKind::Dict(..)) => builtin(Op::Len, vec![value], Ty::INT),
+            (
+                "len",
+                TyKind::Str | TyKind::List(_) | TyKind::Dict(..) | TyKind::FrozenList(_) | TyKind::FrozenDict(..),
+            ) => builtin(Op::Len, vec![value], Ty::INT),
             ("str", TyKind::Str) => value,
             ("str", _) if self.displayable(value.ty) => builtin(Op::ToStr, vec![value], Ty::STR),
             ("int", TyKind::Int) => value,
@@ -558,6 +564,28 @@ impl Checker<'_, '_> {
                     _ => None,
                 }
             }
+            (TyKind::FrozenList(elem), method) => {
+                let elem = *elem;
+                match method {
+                    "index" if self.equatable(elem) => Some((Op::ListIndex, vec![elem], Ty::INT)),
+                    "copy" => Some((Op::ListCopy, vec![], self.types.list(elem))),
+                    _ => None,
+                }
+            }
+            (TyKind::FrozenDict(key, value), method) => {
+                let (key, value) = (*key, *value);
+                match method {
+                    "get" => Some((Op::DictGet, vec![key], self.types.option(value))),
+                    "get_or" => Some((Op::DictGetOr, vec![key, value], value)),
+                    "keys" => Some((Op::DictKeys, vec![], self.types.list(key))),
+                    "values" => Some((Op::DictValues, vec![], self.types.list(value))),
+                    "items" => {
+                        let pair = self.types.tuple(vec![key, value]);
+                        Some((Op::DictItems, vec![], self.types.list(pair)))
+                    }
+                    _ => None,
+                }
+            }
             (TyKind::Dict(key, value), method) => {
                 let (key, value) = (*key, *value);
                 match method {
@@ -612,7 +640,11 @@ impl Checker<'_, '_> {
         }
         let mut all = vec![receiver];
         for (arg, param) in args.iter().zip(params) {
-            all.push(self.expect(cx, &arg.value, param, None));
+            let value = self.expect(cx, &arg.value, param, None);
+            if matches!(op, Op::ListAppend | Op::ListInsert | Op::ListExtend) {
+                self.check_escape(cx, &value, "stored in a collection");
+            }
+            all.push(value);
         }
         hir::Expr { kind: hir::ExprKind::Builtin { op, args: all }, ty: ret, span }
     }
@@ -636,6 +668,8 @@ impl Checker<'_, '_> {
             TyKind::Dict(..) => DICT_METHODS,
             TyKind::Result(..) => RESULT_METHODS,
             TyKind::Option(_) => OPTION_METHODS,
+            TyKind::FrozenList(_) => &["index", "copy"],
+            TyKind::FrozenDict(..) => &["get", "get_or", "keys", "values", "items"],
             _ => &[],
         };
         let help = match name.name.as_str() {

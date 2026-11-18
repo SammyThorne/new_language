@@ -50,6 +50,7 @@ pub struct BuiltinTraits {
     pub mul: TraitId,
     pub ord: TraitId,
     pub number: TraitId,
+    pub shareable: TraitId,
 }
 
 #[derive(Debug)]
@@ -184,9 +185,18 @@ pub enum Stmt {
     /// including by `return`, `break`, `continue` and `?`.
     With {
         object: LocalId,
-        exit: FuncId,
+        exit: WithExit,
         body: Block,
     },
+}
+
+/// What ends a `with` block.
+#[derive(Clone, Copy, Debug)]
+pub enum WithExit {
+    /// The value's `exit` method.
+    Method(FuncId),
+    /// A mutex guard: store the bound local (if any) back into the mutex, then unlock it.
+    Unlock { value: Option<LocalId> },
 }
 
 #[derive(Clone, Debug)]
@@ -274,6 +284,8 @@ pub enum LoopSource {
         iterator: Expr,
         next: FuncId,
     },
+    /// Values received from a channel until it is closed and empty.
+    Channel(Expr),
 }
 
 #[derive(Clone, Debug)]
@@ -392,6 +404,13 @@ pub enum ExprKind {
     /// A call to a function value.
     CallValue {
         callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    /// `spawn f(args)`: the arguments are evaluated here, then the call runs in a new task. The
+    /// call is to `func`, or to the function value `callee`. The value is a `Task[T]`.
+    Spawn {
+        func: Option<FuncId>,
+        callee: Option<Box<Expr>>,
         args: Vec<Expr>,
     },
     /// Statements, then a value: what a comprehension becomes.
@@ -541,4 +560,32 @@ pub enum Builtin {
     NumConvert,
     /// `input()`: a line from standard input, or `None` at the end.
     Input,
+    /// `tuple(list)` and `frozendict(dict)`: an immutable copy.
+    Freeze,
+    TaskJoin,
+    /// `task.join_timeout(seconds)`: the result, or `None` if the task is still running.
+    TaskJoinTimeout,
+    TaskIsDone,
+    /// `Channel[T](capacity)`.
+    ChannelNew,
+    ChannelSend,
+    /// Waits; `None` once the channel is closed and empty.
+    ChannelRecv,
+    /// Does not wait; `None` if nothing is ready.
+    ChannelTryRecv,
+    ChannelClose,
+    /// `Mutex(value)`.
+    MutexNew,
+    /// Waits for the lock; gives the guard (the mutex itself, now locked).
+    MutexLock,
+    /// The value a guard protects.
+    GuardGet,
+    /// `Atomic(value)`.
+    AtomicNew,
+    AtomicGet,
+    AtomicSet,
+    /// Adds the second argument and gives the new value.
+    AtomicAdd,
+    /// `compare_and_set(expected, new)`: whether the value was `expected` and is now `new`.
+    AtomicCas,
 }

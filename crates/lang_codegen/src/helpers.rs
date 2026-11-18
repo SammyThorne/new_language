@@ -469,8 +469,11 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.push_text(builder, if items.len() == 1 { ",)" } else { ")" });
             }
             TyKind::List(elem) => {
+                // `tuple[T, ...]` prints like a Python tuple.
+                let frozen = matches!(self.program.types.kind(ty), TyKind::FrozenList(_));
+                let (open, close) = if frozen { ("(", ")") } else { ("[", "]") };
                 let list = value.into_pointer_value();
-                self.push_text(builder, "[");
+                self.push_text(builder, open);
                 let counter = self.alloca(self.cx.i64_type().into(), "i");
                 self.b.build_store(counter, self.i64(0)).must();
                 let (header, body, separator, element, exit) = (
@@ -499,7 +502,18 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.build_store(counter, next).must();
                 self.b.build_unconditional_branch(header).must();
                 self.b.position_at_end(exit);
-                self.push_text(builder, "]");
+                if frozen {
+                    // A one-element tuple is written `(x,)`.
+                    let len = self.list_len(list);
+                    let one = self.b.build_int_compare(IntPredicate::EQ, len, self.i64(1), "").must();
+                    let (comma, done) = (self.block("comma"), self.block("closed"));
+                    self.b.build_conditional_branch(one, comma, done).must();
+                    self.b.position_at_end(comma);
+                    self.push_text(builder, ",");
+                    self.b.build_unconditional_branch(done).must();
+                    self.b.position_at_end(done);
+                }
+                self.push_text(builder, close);
             }
             TyKind::Dict(key_ty, value_ty) => {
                 let dict = value.into_pointer_value();

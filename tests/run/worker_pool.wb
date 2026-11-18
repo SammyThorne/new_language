@@ -1,0 +1,48 @@
+# Milestone 6 exit program: a pool of worker tasks taking jobs from one channel and sending
+# results on another. Jobs and results are `@frozen`, so they can cross between tasks.
+# expect: processed 200 jobs with 4 workers
+# expect: sum of squares: 2646700
+# expect: results came from at most 4 workers: True
+# expect: first results: [(0, 0), (1, 1), (2, 4)]
+
+@frozen
+struct Job:
+    id: int
+    value: int
+
+@frozen
+@derive(Display)
+struct Outcome:
+    job: int
+    square: int
+    worker: int
+
+def worker(id: int, jobs: Channel[Job], results: Channel[Outcome]):
+    for job in jobs:
+        results.send(Outcome(job.id, job.value * job.value, id))
+
+def main():
+    workers = 4
+    count = 200
+    jobs = Channel[Job](16)
+    results = Channel[Outcome](16)
+    pool = [spawn worker(i, jobs, results) for i in range(workers)]
+
+    feeder = spawn feed(jobs, count)
+    outcomes: list[Outcome] = []
+    for _ in range(count):
+        outcomes.append(results.recv().unwrap())
+    feeder.join()
+    for task in pool:
+        task.join()
+
+    print(f"processed {len(outcomes)} jobs with {workers} workers")
+    print("sum of squares:", sum([o.square for o in outcomes]))
+    print(f"results came from at most {workers} workers:", len({o.worker: True for o in outcomes}) <= workers)
+    outcomes.sort(key=lambda o: o.job)
+    print("first results:", [(o.job, o.square) for o in outcomes[:3]])
+
+def feed(jobs: Channel[Job], count: int):
+    for i in range(count):
+        jobs.send(Job(i, i))
+    jobs.close()

@@ -263,3 +263,29 @@ pub unsafe extern "C" fn lrt_dict_clear(d: *mut Dict) {
         d.index_cap = 0;
     }
 }
+
+/// A new dict with the same entries, in the same order.
+///
+/// # Safety
+/// `d` must be a dict.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lrt_dict_copy(d: *mut Dict) -> *mut Dict {
+    unsafe {
+        let copy = lrt_dict_new((*d).desc);
+        let (key_size, value_offset, value_size) = {
+            let source = dict(d);
+            (source.key_size(), source.value_offset(), source.desc().value_size as usize)
+        };
+        let mut cursor = 0i64;
+        loop {
+            let entry = lrt_dict_next(d, &mut cursor);
+            if entry.is_null() {
+                break;
+            }
+            let _ = key_size;
+            let slot = lrt_dict_slot(copy, entry.add(8));
+            std::ptr::copy_nonoverlapping(entry.add(value_offset), slot, value_size);
+        }
+        copy
+    }
+}

@@ -1,0 +1,17 @@
+error[E0338]: a value of type `Store` cannot be passed to another task
+  --> tests/ui/share_functions_and_traits.wb:22:17
+   |
+22 |     spawn serve(store)
+   |                 ^^^^^ the trait `Store` does not require its implementations to be shareable
+   |
+   = help: declare it as `trait Store(Shareable):`
+
+error[E0338]: a value of type `def(int) -> int` cannot be passed to another task
+  --> tests/ui/share_functions_and_traits.wb:26:17
+   |
+26 |     spawn apply(remember, 1)
+   |                 ^^^^^^^^ a function value might capture variables that can be changed
+   |
+   = help: pass a named function, or the data the function needs
+
+error: could not compile `tests/ui/share_functions_and_traits.wb` due to 2 errors

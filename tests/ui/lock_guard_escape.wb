@@ -1,0 +1,26 @@
+@frozen
+@derive(Display)
+struct Item:
+    name: str
+
+def keep(items: list[Item]):
+    print(len(items))
+
+def main():
+    inventory: Mutex[list[Item]] = Mutex([])
+    saved: list[Item] = []
+    with inventory.lock() as items:
+        items.append(Item("apple"))
+        first = items[0]
+        keep(items)
+        saved = items
+        alias = items
+        spawn keep(items)
+        def count() -> int:
+            return len(items)
+        print(first.name, alias, count())
+    print(len(items), saved)
+    unlocked = inventory.lock()
+    shared = [Item("pear")]
+    later = Mutex(shared)
+    print(unlocked, later)

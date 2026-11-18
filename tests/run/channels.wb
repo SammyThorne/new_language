@@ -1,0 +1,52 @@
+# expect: ping 0
+# expect: ping 1
+# expect: ping 2
+# expect: after close: None
+# expect: empty: None
+# expect: ready: 5 None
+# expect: sum: 5 True
+# expect: finished: True
+# expect: ann 31 True
+# expect: bob 27 True
+# expect: ('ann', 'bob') {'ann': 31, 'bob': 27} 2 True None
+# expect: ['ann', 'bob', 'cy'] 2
+# Channels with capacity 0 (each send waits for its receiver), try_recv, closing, tasks with
+# and without results, and the immutable collections (milestone 6).
+
+def ping(out: Channel[str], count: int):
+    for i in range(count):
+        out.send(f"ping {i}")
+    out.close()
+
+def add(a: int, b: int) -> int:
+    return a + b
+
+def nothing():
+    pass
+
+def main():
+    rendezvous = Channel[str]()
+    spawn ping(rendezvous, 3)
+    for message in rendezvous:
+        print(message)
+    print("after close:", rendezvous.recv())
+
+    buffered = Channel[int](2)
+    print("empty:", buffered.try_recv())
+    buffered.send(5)
+    print("ready:", buffered.try_recv(), buffered.try_recv())
+
+    sum_task = spawn add(2, 3)
+    print("sum:", sum_task.join(), sum_task.is_done())
+    done = spawn nothing()
+    done.join()
+    print("finished:", done.join_timeout(1.0))
+
+    names: tuple[str, ...] = ("ann", "bob")
+    ages = frozendict({"ann": 31, "bob": 27})
+    for name in names:
+        print(name, ages[name], name in ages)
+    print(names, ages, len(ages), names == ("ann", "bob"), ages.get("cy"))
+    thawed = names.copy()
+    thawed.append("cy")
+    print(thawed, len(names))

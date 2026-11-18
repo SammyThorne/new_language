@@ -47,3 +47,12 @@ trait Ord(Eq):
 trait Number(AddNumber, SubNumber, MulNumber, Ord):
     """Implemented by `int` and `float`; a bound for generic arithmetic."""
     pass
+
+trait Shareable:
+    """
+    Types whose values can be handed to another task: immutable values, `@frozen` structs of
+    shareable fields, and `Mutex`, `Atomic`, `Channel` and `Task`. The compiler decides which
+    types have it; it cannot be implemented by hand. `trait Store(Shareable):` requires every
+    implementation of `Store` to be shareable.
+    """
+    pass

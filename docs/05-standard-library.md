@@ -373,8 +373,8 @@ def with_timeout():
 | `Task[T]` | `join`, `join_timeout`, `is_done` |
 | `Channel[T](capacity)` | `send`, `recv`, `try_recv`, `close`, iteration |
 | `Mutex[T](value)` | `lock()` returns a guard usable with `with` |
-| `Atomic[int]` | `get`, `set`, `increment`, `compare_and_set` |
-| `time.sleep(duration)` | Does not block other tasks |
+| `Atomic` | `get`, `set`, `add`, `increment`, `decrement`, `compare_and_set`; holds an `int` |
+| `time.sleep(seconds)` | Pauses the calling task only; `time.monotonic()` and `time.now()` give clocks in seconds |
 
 What may be passed to `spawn`, sent on a channel or put in a `Mutex` is checked at compile time ([04](04-runtime-and-memory.md#data-race-prevention)); in the example above `Page` must be a `@frozen` struct.
 

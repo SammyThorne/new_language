@@ -6,8 +6,11 @@
 use lang_names::SOURCE_EXTENSION;
 
 /// Each module's name and source.
-pub const MODULES: &[(&str, &str)] =
-    &[("io", include_str!("../../../stdlib/io.lang")), ("os", include_str!("../../../stdlib/os.lang"))];
+pub const MODULES: &[(&str, &str)] = &[
+    ("io", include_str!("../../../stdlib/io.lang")),
+    ("os", include_str!("../../../stdlib/os.lang")),
+    ("time", include_str!("../../../stdlib/time.lang")),
+];
 
 /// The source of a standard library module.
 pub fn source(name: &str) -> Option<&'static str> {

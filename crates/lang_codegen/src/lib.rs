@@ -148,6 +148,21 @@ fn symbol_name(module: &str, function: &str) -> String {
 const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_alloc", "p", "ip"),
     ("lrt_alloc_raw", "p", "i"),
+    ("lrt_task_new", "p", "i"),
+    ("lrt_task_result", "p", "p"),
+    ("lrt_spawn", "v", "ppp"),
+    ("lrt_task_join", "v", "p"),
+    ("lrt_task_join_timeout", "i", "pf"),
+    ("lrt_task_is_done", "i", "p"),
+    ("lrt_channel_new", "p", "ii"),
+    ("lrt_channel_send", "v", "pppi"),
+    ("lrt_channel_recv", "i", "ppi"),
+    ("lrt_channel_close", "v", "p"),
+    ("lrt_mutex_new", "p", "i"),
+    ("lrt_mutex_value", "p", "p"),
+    ("lrt_mutex_lock", "p", "p"),
+    ("lrt_mutex_unlock", "v", "p"),
+    ("lrt_dict_copy", "p", "p"),
     ("lrt_builder_push_uint", "v", "pi"),
     ("lrt_io_read_line", "s", ""),
     ("llvm.fptosi.sat.i64.f64", "i", "f"),
@@ -240,12 +255,13 @@ struct FnState<'ctx> {
     slots: Vec<Option<PointerValue<'ctx>>>,
     /// Per local: whether its slot holds the address of a heap cell with the value.
     boxed: Vec<bool>,
+    local_types: Vec<Ty>,
     /// Enclosing loops: where `continue` goes, where `break` goes, and how many `with` blocks
     /// were open when the loop started.
     loops: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>, usize)>,
     /// Open `with` blocks: the local holding the value and its `exit` method. Leaving a block
     /// early runs the `exit` of each one being left, innermost first.
-    cleanups: Vec<(lang_sema::hir::LocalId, FuncId, Ty)>,
+    cleanups: Vec<(lang_sema::hir::LocalId, lang_sema::hir::WithExit, Ty)>,
     /// The function's return type, for `?`.
     ret: Ty,
 }
@@ -366,8 +382,19 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         codegen
     }
 
+    /// The structure of a type. The immutable collections are represented exactly like their
+    /// mutable counterparts, so they are reported as those.
     fn kind(&self, ty: Ty) -> &'a TyKind {
-        self.program.types.kind(ty)
+        let types = &self.program.types;
+        match types.kind(ty) {
+            TyKind::FrozenList(elem) => {
+                types.kind(types.lookup(&TyKind::List(*elem)).expect("created with the frozen type"))
+            }
+            TyKind::FrozenDict(k, v) => {
+                types.kind(types.lookup(&TyKind::Dict(*k, *v)).expect("created with the frozen type"))
+            }
+            kind => kind,
+        }
     }
 
     // ---- types --------------------------------------------------------------------------
@@ -378,7 +405,18 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
 
     /// Whether values of this type are a single pointer to a collected object.
     fn is_reference(&self, ty: Ty) -> bool {
-        matches!(self.kind(ty), TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..) | TyKind::Enum(_))
+        matches!(
+            self.kind(ty),
+            TyKind::Struct(_)
+                | TyKind::List(_)
+                | TyKind::Dict(..)
+                | TyKind::Enum(_)
+                | TyKind::Task(_)
+                | TyKind::Channel(_)
+                | TyKind::Mutex(_)
+                | TyKind::Guard(_)
+                | TyKind::Atomic
+        )
     }
 
     /// Values that are a pair whose first part is a non-null pointer: strings and trait objects.
@@ -403,6 +441,10 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             TyKind::Bool => self.cx.bool_type().into(),
             TyKind::Str => self.str_type.into(),
             TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..) | TyKind::Enum(_) => self.ptr_type().into(),
+            TyKind::Task(_) | TyKind::Channel(_) | TyKind::Mutex(_) | TyKind::Guard(_) | TyKind::Atomic => {
+                self.ptr_type().into()
+            }
+            TyKind::FrozenList(_) | TyKind::FrozenDict(..) => unreachable!("normalised by `kind`"),
             TyKind::Dyn(_) | TyKind::SelfType(_) | TyKind::Func(..) => self.dyn_type.into(),
             TyKind::Param(_) => unreachable!("generic code is not compiled"),
             TyKind::Result(ok, err) => {
@@ -451,6 +493,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         match self.kind(ty) {
             TyKind::Str | TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..) => true,
             TyKind::Enum(_) | TyKind::Dyn(_) | TyKind::SelfType(_) | TyKind::Func(..) => true,
+            TyKind::Task(_) | TyKind::Channel(_) | TyKind::Mutex(_) | TyKind::Guard(_) | TyKind::Atomic => true,
             TyKind::Option(inner) => self.has_pointers(*inner),
             TyKind::Result(ok, err) => self.has_pointers(*ok) || self.has_pointers(*err),
             TyKind::Tuple(items) => items.iter().any(|t| self.has_pointers(*t)),
@@ -675,6 +718,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             function,
             slots: Vec::new(),
             boxed: Vec::new(),
+            local_types: Vec::new(),
             loops: Vec::new(),
             cleanups: Vec::new(),
             ret: Ty::NONE,
@@ -805,6 +849,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             let state = this.state.as_mut().unwrap();
             state.slots = slots;
             state.boxed = function.locals.iter().map(|l| l.boxed).collect();
+            state.local_types = function.locals.iter().map(|l| l.ty).collect();
             state.ret = function.ret;
             this.stmts(&function.body);
             if function.ret == Ty::NONE {

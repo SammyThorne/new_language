@@ -352,6 +352,8 @@ pub enum ExprKind {
     },
     /// `expr?`
     Try(Box<Expr>),
+    /// `spawn f(args)`: run a call in a new task. The parser checks that the operand is a call.
+    Spawn(Box<Expr>),
     /// `lambda x, y: body`
     Lambda {
         params: Vec<Ident>,

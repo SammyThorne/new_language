@@ -1,0 +1,8 @@
+struct Node:
+    children: list[Node]
+
+def main():
+    ok = Mutex([1, 2, 3])
+    nested = Mutex([[1], [2]])
+    graph = Mutex(Node([]))
+    print(ok, nested, graph)
