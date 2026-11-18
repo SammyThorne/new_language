@@ -16,7 +16,13 @@
 //! | `str` | `{ ptr, i64 }`: UTF-8 bytes and their length |
 //! | struct, `list`, `dict` | `ptr` to a collected object whose first word is its type descriptor |
 //! | `tuple[...]` | an LLVM struct of the elements |
-//! | `T?` | the same as `T` with a null pointer for `None` when `T` is a struct, list, dict or `str`; otherwise `{ i1, T }` |
+//! | user enum | `ptr` to an immutable object `{ ptr desc, i64 tag, fields... }`; variants without fields are static constants |
+//! | trait object | `{ ptr data, ptr vtable }` |
+//! | `T?` | the same as `T` with a null first pointer for `None` when `T` is a struct, list, dict, enum, `str` or trait object; otherwise `{ i1, T }` |
+//! | `Result[T, E]` | `{ i1 ok, T, E }`, leaving out `T` when it is `None` |
+//!
+//! A vtable is an array of pointers: the concrete type's descriptor, then the vtables of the
+//! trait's required traits in declaration order, then the methods in declaration order.
 //!
 //! Split across files: statements (`stmt.rs`), expressions (`expr.rs`), built-in functions and
 //! methods (`builtins.rs`), and per-type helper functions such as equality and printing
@@ -25,7 +31,9 @@
 mod builtins;
 mod expr;
 mod helpers;
+mod matching;
 mod stmt;
+mod traits;
 
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::basic_block::BasicBlock;
@@ -184,6 +192,8 @@ const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_dict_remove", "i", "ppp"),
     ("lrt_dict_next", "p", "pp"),
     ("lrt_dict_clear", "v", "p"),
+    ("lrt_parse_int", "i", "pip"),
+    ("lrt_parse_float", "i", "pip"),
     ("llvm.floor.f64", "f", "f"),
     ("llvm.fabs.f64", "f", "f"),
     ("llvm.pow.f64", "f", "ff"),
@@ -203,6 +213,8 @@ enum Helper {
     /// `(builder, T)`, fastcc: append how the value prints. `repr` quotes strings, as inside
     /// containers.
     Push { repr: bool },
+    /// `(T) -> i64`, fastcc: a derived `Hash`.
+    Hash,
 }
 
 /// Per-function code generation state.
@@ -212,6 +224,8 @@ struct FnState<'ctx> {
     slots: Vec<Option<PointerValue<'ctx>>>,
     /// Enclosing loops: (where `continue` goes, where `break` goes).
     loops: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
+    /// The function's return type, for `?`.
+    ret: Ty,
 }
 
 struct Codegen<'ctx, 'a> {
@@ -225,6 +239,15 @@ struct Codegen<'ctx, 'a> {
     functions: Vec<FunctionValue<'ctx>>,
     /// Indexed by struct id: `{ ptr descriptor, fields... }`.
     struct_types: Vec<StructType<'ctx>>,
+    /// Indexed by enum id, then variant: `{ ptr descriptor, i64 tag, fields... }`.
+    variant_types: Vec<Vec<StructType<'ctx>>>,
+    /// `{ ptr data, ptr vtable }`.
+    dyn_type: StructType<'ctx>,
+    /// The static objects of variants without fields.
+    unit_variants: HashMap<(usize, usize), PointerValue<'ctx>>,
+    vtables: HashMap<(Ty, lang_sema::types::TraitId), PointerValue<'ctx>>,
+    /// Functions for derived `Display` and `Hash` methods, for vtables.
+    derived_methods: HashMap<(lang_sema::types::TraitId, Ty), FunctionValue<'ctx>>,
     str_type: StructType<'ctx>,
     /// `{ ptr desc, i64 len, i64 cap, ptr data }`; matches `lang_rt::list::List`.
     list_type: StructType<'ctx>,
@@ -251,6 +274,11 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         let i64_type = cx.i64_type();
         let struct_types =
             program.structs.iter().map(|s| cx.opaque_struct_type(&format!("struct.{}", s.name))).collect();
+        let variant_types = program
+            .enums
+            .iter()
+            .map(|e| e.variants.iter().map(|v| cx.opaque_struct_type(&format!("enum.{}.{}", e.name, v.name))).collect())
+            .collect();
         let codegen = Codegen {
             cx,
             module,
@@ -260,6 +288,11 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             sources,
             functions: Vec::new(),
             struct_types,
+            variant_types,
+            dyn_type: cx.struct_type(&[ptr.into(), ptr.into()], false),
+            unit_variants: HashMap::new(),
+            vtables: HashMap::new(),
+            derived_methods: HashMap::new(),
             str_type: cx.struct_type(&[ptr.into(), i64_type.into()], false),
             list_type: cx.struct_type(&[ptr.into(), i64_type.into(), i64_type.into(), ptr.into()], false),
             dict_type: cx.struct_type(&[ptr.into(), i64_type.into()], false),
@@ -290,6 +323,15 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             fields.extend(def.fields.iter().map(|f| codegen.llty(f.ty).expect("fields always have a value type")));
             codegen.struct_types[index].set_body(&fields, false);
         }
+        for (enum_index, def) in program.enums.iter().enumerate() {
+            for (variant_index, variant) in def.variants.iter().enumerate() {
+                let mut fields: Vec<BasicTypeEnum> = vec![ptr.into(), i64_type.into()];
+                fields.extend(
+                    variant.fields.iter().map(|f| codegen.llty(f.ty).expect("fields always have a value type")),
+                );
+                codegen.variant_types[enum_index][variant_index].set_body(&fields, false);
+            }
+        }
         codegen
     }
 
@@ -305,12 +347,17 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
 
     /// Whether values of this type are a single pointer to a collected object.
     fn is_reference(&self, ty: Ty) -> bool {
-        matches!(self.kind(ty), TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..))
+        matches!(self.kind(ty), TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..) | TyKind::Enum(_))
+    }
+
+    /// Values that are a pair whose first part is a non-null pointer: strings and trait objects.
+    fn is_pointer_pair(&self, ty: Ty) -> bool {
+        matches!(self.kind(ty), TyKind::Str | TyKind::Dyn(_) | TyKind::SelfType(_))
     }
 
     /// Whether `T?` represents `None` as a null pointer, with no separate flag.
     fn option_is_nullable(&self, inner: Ty) -> bool {
-        self.is_reference(inner) || inner == Ty::STR
+        self.is_reference(inner) || self.is_pointer_pair(inner)
     }
 
     /// The LLVM type of a value, or `None` for the `None` type, which has no runtime value.
@@ -322,7 +369,14 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             TyKind::Float => self.cx.f64_type().into(),
             TyKind::Bool => self.cx.bool_type().into(),
             TyKind::Str => self.str_type.into(),
-            TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..) => self.ptr_type().into(),
+            TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..) | TyKind::Enum(_) => self.ptr_type().into(),
+            TyKind::Dyn(_) | TyKind::SelfType(_) => self.dyn_type.into(),
+            TyKind::Result(ok, err) => {
+                let mut fields: Vec<BasicTypeEnum> = vec![self.cx.bool_type().into()];
+                fields.extend(self.llty(*ok));
+                fields.push(self.llty(*err).expect("errors have a value type"));
+                self.cx.struct_type(&fields, false).into()
+            }
             TyKind::Tuple(items) => {
                 let fields: Vec<BasicTypeEnum> =
                     items.iter().map(|t| self.llty(*t).expect("tuple elements have values")).collect();
@@ -352,7 +406,9 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
     fn has_pointers(&self, ty: Ty) -> bool {
         match self.kind(ty) {
             TyKind::Str | TyKind::Struct(_) | TyKind::List(_) | TyKind::Dict(..) => true,
+            TyKind::Enum(_) | TyKind::Dyn(_) | TyKind::SelfType(_) => true,
             TyKind::Option(inner) => self.has_pointers(*inner),
+            TyKind::Result(ok, err) => self.has_pointers(*ok) || self.has_pointers(*err),
             TyKind::Tuple(items) => items.iter().any(|t| self.has_pointers(*t)),
             _ => false,
         }
@@ -459,6 +515,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
                     eq,
                 )
             }
+            TyKind::Enum(_) => (0, 0, 0, 0, 0, 0, null, null),
             other => unreachable!("no descriptor for {other:?}"),
         };
         let int = |v: u64| self.cx.i64_type().const_int(v, false).as_basic_value_enum();
@@ -570,7 +627,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         let saved_state = self.state.take();
         let entry = self.cx.append_basic_block(function, "entry");
         self.b.position_at_end(entry);
-        self.state = Some(FnState { function, slots: Vec::new(), loops: Vec::new() });
+        self.state = Some(FnState { function, slots: Vec::new(), loops: Vec::new(), ret: Ty::NONE });
         let result = body(self);
         self.state = saved_state;
         if let Some(block) = saved_block {
@@ -642,7 +699,9 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
                 let slot = slots[local.0].expect("parameters have a slot");
                 this.b.build_store(slot, param).must();
             }
-            this.state.as_mut().unwrap().slots = slots;
+            let state = this.state.as_mut().unwrap();
+            state.slots = slots;
+            state.ret = function.ret;
             this.stmts(&function.body);
             if function.ret == Ty::NONE {
                 this.b.build_return(None).must();
@@ -665,7 +724,7 @@ mod tests {
         let mut diags = Diagnostics::default();
         let tokens = lang_syntax::lex(file, text, &mut diags);
         let module = lang_syntax::parse(&tokens, &mut diags);
-        let program = lang_sema::check(&module, "test", &mut diags).expect("test program checks");
+        let program = lang_sema::check(&module, &mut sources, "test", &mut diags).expect("test program checks");
         assert_eq!(file, FileId(0));
         emit_llvm_ir(&program, &sources, opt).unwrap()
     }

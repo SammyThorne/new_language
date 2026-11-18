@@ -24,8 +24,8 @@ Reserved words:
 
 ```
 and as break case const continue def elif else enum False for from if impl
-import in is lambda match None not or priv pub return self spawn struct trait
-True while with
+import in is lambda match None not or pass priv pub return self spawn struct
+trait True while with
 ```
 
 ## Variables and constants (M1)
@@ -144,6 +144,8 @@ label = "even" if n % 2 == 0 else "odd"
 
 `for` works on anything that implements `Iterable[T]` ([02](02-type-system-and-traits.md#built-in-traits)). `range` is compiled to a plain counting loop.
 
+`pass` does nothing. It fills a block that needs no statements, such as an `impl` that only uses a trait's default methods.
+
 ## Functions (M1)
 
 ```python
@@ -259,6 +261,9 @@ def handle(msg: Message) -> str:
 - `match` must be exhaustive; `case _:` is the catch-all.
 - Patterns: variant with sub-patterns, literal, tuple, binding name, `_`, alternatives with `|`, and a guard (`case Text(body) if len(body) > 0:`).
 - `match` is a statement in the prototype. Expression form is deferred.
+- A variant is written `Message.Text("hi")`, or just `Text("hi")` when no other enum has a variant of that name. Variants without fields are values: `Message.Ping` or `Ping`. Fields can be given by position or by name, as for structs.
+- In a pattern, a bare name that is a variant of the matched enum is that variant; any other bare name binds the value. Patterns may also name the enum: `case Message.Close(code, _):`.
+- Enum values are immutable. Equality, hashing and printing come from `@derive(Eq, Hash, Display)`.
 
 ## Options (M2–M3)
 
@@ -310,6 +315,8 @@ def load_user(id: int) -> Result[User]:
 - A value of type `T` is wrapped as `Ok` where a `Result[T]` is expected, so the happy path has no `Ok(...)` noise.
 - A concrete error is converted to the `Error` trait object automatically at `?` and at `return Err(...)`.
 - Unused `Result` values are a compile error. Discard explicitly with `_ = f()`.
+- A function returning `Result[None]` succeeds by reaching its end or with a bare `return`, as a Python function does; only errors need writing out.
+- `int.parse(text)` and `float.parse(text)` return `Result[int, ParseError]` and `Result[float, ParseError]`, accepting what Python's `int()` and `float()` accept.
 - **Panics** are for bugs: index out of range, `unwrap` on `None`, integer division by zero, explicit `panic("...")`. They are not caught by user code. What a panic does to the process is defined in [04](04-runtime-and-memory.md#panics).
 
 ## Scoped cleanup with `with` (M5)

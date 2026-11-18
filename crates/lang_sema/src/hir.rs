@@ -4,8 +4,9 @@
 //! operand types, and sugar (augmented assignment, tuple unpacking, `elif`, field defaults) is
 //! gone. HIR only exists for programs without errors, so it never contains [`Ty::ERROR`].
 
-use crate::types::{StructId, Ty, Types};
+use crate::types::{StructId, TraitId, Ty, Types};
 use lang_diag::Span;
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct Program {
@@ -14,10 +15,79 @@ pub struct Program {
     pub types: Types,
     /// Indexed by [`StructId`].
     pub structs: Vec<StructDef>,
+    /// Indexed by [`crate::types::EnumId`].
+    pub enums: Vec<EnumDef>,
+    /// Indexed by [`TraitId`].
+    pub traits: Vec<TraitDef>,
+    /// Every trait implementation, explicit or derived.
+    pub impls: Vec<ImplDef>,
+    pub impl_index: HashMap<(TraitId, Ty), usize>,
     /// Functions and methods, indexed by [`FuncId`].
     pub functions: Vec<Function>,
     /// The program's `main`.
     pub entry: FuncId,
+    pub builtins: BuiltinTraits,
+    /// The prelude's `ParseError`, the error type of `int.parse` and `float.parse`.
+    pub parse_error: StructId,
+}
+
+impl Program {
+    pub fn impl_of(&self, trait_id: TraitId, ty: Ty) -> Option<&ImplDef> {
+        self.impl_index.get(&(trait_id, ty)).map(|&i| &self.impls[i])
+    }
+}
+
+/// The traits the compiler gives meaning to, all defined in the prelude.
+#[derive(Clone, Copy, Debug)]
+pub struct BuiltinTraits {
+    pub display: TraitId,
+    pub eq: TraitId,
+    pub hash: TraitId,
+    pub copy: TraitId,
+    pub error: TraitId,
+    pub add: TraitId,
+    pub sub: TraitId,
+    pub mul: TraitId,
+}
+
+#[derive(Debug)]
+pub struct EnumDef {
+    pub name: String,
+    pub ty: Ty,
+    pub variants: Vec<VariantDef>,
+}
+
+#[derive(Debug)]
+pub struct VariantDef {
+    pub name: String,
+    pub fields: Vec<FieldDef>,
+}
+
+#[derive(Debug)]
+pub struct TraitDef {
+    pub name: String,
+    /// Direct required traits, in declaration order. A vtable holds the vtables of these.
+    pub supertraits: Vec<TraitId>,
+    pub methods: Vec<TraitMethodDef>,
+}
+
+#[derive(Debug)]
+pub struct TraitMethodDef {
+    pub name: String,
+    /// Parameter types after `self`. Only meaningful for object-safe traits, whose methods never
+    /// mention `Self` except as the receiver.
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+}
+
+#[derive(Debug)]
+pub struct ImplDef {
+    pub trait_id: TraitId,
+    pub ty: Ty,
+    /// The function implementing each trait method, in the trait's order. `None` when the
+    /// implementation is derived, and code generation produces it.
+    pub methods: Vec<Option<FuncId>>,
+    pub derived: bool,
 }
 
 #[derive(Debug)]
@@ -82,8 +152,56 @@ pub enum Stmt {
         source: LoopSource,
         body: Block,
     },
+    /// Cases are tried in order; the type checker guarantees one matches.
+    Match {
+        subject: Expr,
+        cases: Vec<MatchCase>,
+    },
     Break,
     Continue,
+}
+
+#[derive(Clone, Debug)]
+pub struct MatchCase {
+    pub pattern: Pattern,
+    pub guard: Option<Expr>,
+    pub body: Block,
+}
+
+#[derive(Clone, Debug)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub ty: Ty,
+}
+
+#[derive(Clone, Debug)]
+pub enum PatternKind {
+    Wild,
+    Bind(LocalId),
+    /// Equal to a literal of type `int`, `float`, `str` or `bool`.
+    Literal(Expr),
+    /// A variant of a user enum, by index, with patterns for its fields.
+    Variant {
+        index: usize,
+        fields: Vec<Pattern>,
+    },
+    Some(Box<Pattern>),
+    None,
+    Ok(Box<Pattern>),
+    Err(Box<Pattern>),
+    Tuple(Vec<Pattern>),
+    Or(Vec<Pattern>),
+}
+
+/// How a value is converted to a related type: used for implicit conversions to trait objects
+/// and for the error of `?`.
+#[derive(Clone, Debug)]
+pub enum Conversion {
+    Identity,
+    /// A struct or enum to a trait object.
+    ToDyn(TraitId),
+    /// A trait object to one of its required traits, following vtable slots.
+    Upcast(Vec<usize>),
 }
 
 #[derive(Clone, Debug)]
@@ -194,6 +312,38 @@ pub enum ExprKind {
         stop: Option<Box<Expr>>,
     },
     FString(Vec<FPart>),
+    /// A user enum value: the variant's index and its field values.
+    Variant {
+        index: usize,
+        fields: Vec<Expr>,
+    },
+    Ok(Box<Expr>),
+    Err(Box<Expr>),
+    /// A struct or enum as a trait object (type `Dyn(trait_id)`).
+    ToDyn {
+        value: Box<Expr>,
+        trait_id: TraitId,
+    },
+    /// A trait object as an object of one of its required traits.
+    Upcast {
+        value: Box<Expr>,
+        path: Vec<usize>,
+    },
+    /// A method call through a trait object's vtable. `path` leads from the receiver's trait to
+    /// `trait_id`, which declares method number `method`.
+    DynCall {
+        receiver: Box<Expr>,
+        trait_id: TraitId,
+        path: Vec<usize>,
+        method: usize,
+        args: Vec<Expr>,
+    },
+    /// `value?`: the `Ok` or `Some` value, or an early return. `conversion` turns the error into
+    /// the function's error type.
+    Try {
+        value: Box<Expr>,
+        conversion: Conversion,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -302,4 +452,16 @@ pub enum Builtin {
     OptUnwrapOr,
     OptIsSome,
     OptIsNone,
+    ResultUnwrap,
+    ResultUnwrapOr,
+    ResultUnwrapErr,
+    ResultIsOk,
+    ResultIsErr,
+    /// `int.parse(text)`, giving `Result[int, ParseError]`.
+    ParseInt,
+    ParseFloat,
+    /// `x.copy()` for a type with a derived `Copy`.
+    Copy,
+    /// `x.hash()` for a type with a derived `Hash`.
+    Hash,
 }

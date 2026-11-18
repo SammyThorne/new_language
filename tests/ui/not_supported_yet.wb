@@ -2,8 +2,7 @@ import json
 
 def main():
     items = {1, 2}
-    match items:
-        case _:
-            print("no")
+    with open("data.txt") as f:
+        print("no")
     double = lambda x: x * 2
     print("still checked")

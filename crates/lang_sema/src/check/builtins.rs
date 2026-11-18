@@ -26,6 +26,7 @@ const LIST_METHODS: &[&str] =
     &["append", "extend", "insert", "pop", "remove", "clear", "sort", "reverse", "index", "copy"];
 const DICT_METHODS: &[&str] = &["get", "get_or", "pop", "keys", "values", "items", "clear"];
 const OPTION_METHODS: &[&str] = &["unwrap", "unwrap_or", "is_some", "is_none"];
+const RESULT_METHODS: &[&str] = &["unwrap", "unwrap_or", "unwrap_err", "is_ok", "is_err"];
 
 impl Checker<'_, '_> {
     fn no_keywords(&mut self, args: &[ast::Arg], what: &str) -> bool {
@@ -70,7 +71,7 @@ impl Checker<'_, '_> {
             let mut values = Vec::new();
             for arg in args {
                 let value = self.expr(cx, &arg.value, None);
-                if value.ty != Ty::ERROR && !self.types.is_displayable(value.ty) {
+                if value.ty != Ty::ERROR && !self.displayable(value.ty) {
                     self.not_displayable(value.ty, value.span);
                 }
                 values.push(value);
@@ -108,7 +109,7 @@ impl Checker<'_, '_> {
         let result = match (name, &kind) {
             ("len", TyKind::Str | TyKind::List(_) | TyKind::Dict(..)) => builtin(Op::Len, vec![value], Ty::INT),
             ("str", TyKind::Str) => value,
-            ("str", _) if self.types.is_displayable(value.ty) => builtin(Op::ToStr, vec![value], Ty::STR),
+            ("str", _) if self.displayable(value.ty) => builtin(Op::ToStr, vec![value], Ty::STR),
             ("int", TyKind::Int) => value,
             ("int", TyKind::Float) => builtin(Op::IntOfFloat, vec![value], Ty::INT),
             ("int", TyKind::Bool) => builtin(Op::IntOfBool, vec![value], Ty::INT),
@@ -158,6 +159,7 @@ impl Checker<'_, '_> {
             TyKind::List(_) => LIST_METHODS,
             TyKind::Dict(..) => DICT_METHODS,
             TyKind::Option(_) => OPTION_METHODS,
+            TyKind::Result(..) => RESULT_METHODS,
             _ => return false,
         };
         methods.contains(&name)
@@ -198,7 +200,7 @@ impl Checker<'_, '_> {
                     "insert" => Some((Op::ListInsert, vec![Ty::INT, elem], Ty::NONE)),
                     "pop" if n == 0 => Some((Op::ListPopLast, vec![], elem)),
                     "pop" => Some((Op::ListPopAt, vec![Ty::INT], elem)),
-                    "remove" | "index" if !self.types.is_equatable(elem) => {
+                    "remove" | "index" if !self.equatable(elem) => {
                         let shown = self.display(elem);
                         self.error(
                             Diagnostic::error(
@@ -217,7 +219,7 @@ impl Checker<'_, '_> {
                     "remove" => Some((Op::ListRemove, vec![elem], Ty::NONE)),
                     "index" => Some((Op::ListIndex, vec![elem], Ty::INT)),
                     "clear" => Some((Op::ListClear, vec![], Ty::NONE)),
-                    "sort" if !self.types.is_orderable(elem) => {
+                    "sort" if !self.orderable(elem) => {
                         let shown = self.display(elem);
                         self.error(
                             Diagnostic::error(
@@ -252,6 +254,17 @@ impl Checker<'_, '_> {
                     _ => None,
                 }
             }
+            (TyKind::Result(ok, err), method) => {
+                let (ok, err) = (*ok, *err);
+                match method {
+                    "unwrap" => Some((Op::ResultUnwrap, vec![], ok)),
+                    "unwrap_or" => Some((Op::ResultUnwrapOr, vec![ok], ok)),
+                    "unwrap_err" => Some((Op::ResultUnwrapErr, vec![], err)),
+                    "is_ok" => Some((Op::ResultIsOk, vec![], Ty::BOOL)),
+                    "is_err" => Some((Op::ResultIsErr, vec![], Ty::BOOL)),
+                    _ => None,
+                }
+            }
             (TyKind::Option(inner), method) => {
                 let inner = *inner;
                 match method {
@@ -266,7 +279,7 @@ impl Checker<'_, '_> {
         };
 
         let Some((op, params, ret)) = signature else {
-            return self.unknown_method(cx, ty, &kind, name, args, span);
+            return self.unknown_builtin_method(cx, ty, &kind, name, args, span);
         };
         if !self.no_keywords(args, &format!("`{}`", name.name)) || !self.arity(&name.name, args, params.len(), span) {
             for arg in args {
@@ -281,7 +294,7 @@ impl Checker<'_, '_> {
         hir::Expr { kind: hir::ExprKind::Builtin { op, args: all }, ty: ret, span }
     }
 
-    fn unknown_method(
+    fn unknown_builtin_method(
         &mut self,
         cx: &mut FnCx,
         ty: Ty,
@@ -298,6 +311,7 @@ impl Checker<'_, '_> {
             TyKind::Str => STR_METHODS,
             TyKind::List(_) => LIST_METHODS,
             TyKind::Dict(..) => DICT_METHODS,
+            TyKind::Result(..) => RESULT_METHODS,
             _ => OPTION_METHODS,
         };
         let help = match name.name.as_str() {

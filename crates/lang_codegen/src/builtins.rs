@@ -278,6 +278,81 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let present = self.opt_is_some(args[0].ty, values[0]);
                 if op == Builtin::OptIsNone { self.b.build_not(present, "").must().into() } else { present.into() }
             }
+
+            // ---- Result ----
+            Builtin::ResultUnwrap => {
+                let result_ty = args[0].ty;
+                let ok = self.result_is_ok(values[0]);
+                let failed = self.b.build_not(ok, "").must();
+                let value = values[0];
+                self.check(failed, |this| {
+                    let TyKind::Result(_, err_ty) = *this.kind(result_ty) else { unreachable!() };
+                    let error = this.result_err(result_ty, value);
+                    let builder = this.builder_new();
+                    this.push_text(builder, "unwrap() called on an error: ");
+                    this.push_error_text(builder, err_ty, error);
+                    let message = this.call_rt("lrt_builder_finish", &[builder.into()]).unwrap();
+                    let [ptr, len] = this.str_parts(message);
+                    let (loc, loc_len) = this.location(span);
+                    this.call_rt("lrt_panic", &[ptr, len, loc.into(), loc_len.into()]);
+                });
+                return self.result_ok(result_ty, value);
+            }
+            Builtin::ResultUnwrapOr => {
+                let ok = self.result_is_ok(values[0]);
+                let payload = self.result_ok(args[0].ty, values[0]);
+                let default = values[1];
+                return self.choose(ok, expr.ty, |_| payload, |_| Some(default));
+            }
+            Builtin::ResultUnwrapErr => {
+                let ok = self.result_is_ok(values[0]);
+                self.check(ok, |this| this.panic_message("unwrap_err() called on an Ok value", span));
+                self.result_err(args[0].ty, values[0])
+            }
+            Builtin::ResultIsOk | Builtin::ResultIsErr => {
+                let ok = self.result_is_ok(values[0]);
+                if op == Builtin::ResultIsErr { self.b.build_not(ok, "").must().into() } else { ok.into() }
+            }
+            Builtin::ParseInt | Builtin::ParseFloat => {
+                let (function, expected, number_type): (_, _, inkwell::types::BasicTypeEnum) =
+                    if op == Builtin::ParseInt {
+                        ("lrt_parse_int", "int", self.cx.i64_type().into())
+                    } else {
+                        ("lrt_parse_float", "float", self.cx.f64_type().into())
+                    };
+                let [ptr, len] = self.str_parts(values[0]);
+                let out = self.alloca(number_type, "parsed");
+                let parsed = self.call_rt(function, &[ptr, len, out.into()]).unwrap();
+                let ok = self.b.build_int_compare(IntPredicate::NE, parsed.into_int_value(), self.i64(0), "").must();
+                let result_ty = expr.ty;
+                let text = values[0];
+                return self.choose(
+                    ok,
+                    result_ty,
+                    |this| {
+                        let number = this.b.build_load(number_type, out, "").must();
+                        Some(this.make_result(result_ty, true, Some(number)))
+                    },
+                    |this| {
+                        let error = this.parse_error(text, expected);
+                        Some(this.make_result(result_ty, false, Some(error)))
+                    },
+                );
+            }
+            Builtin::Copy => {
+                // Enums are immutable, so a copy can be the same object.
+                let TyKind::Struct(id) = *self.kind(args[0].ty) else { return Some(values[0]) };
+                let struct_type = self.struct_types[id.0];
+                let size = self.td.get_abi_size(&struct_type);
+                let desc = self.desc(args[0].ty);
+                let copy = self
+                    .call_rt("lrt_alloc", &[self.i64(size as i64).into(), desc.into()])
+                    .unwrap()
+                    .into_pointer_value();
+                self.b.build_memcpy(copy, 8, values[0].into_pointer_value(), 8, self.i64(size as i64)).must();
+                copy.into()
+            }
+            Builtin::Hash => self.emit_hash(args[0].ty, values[0]).into(),
         })
     }
 }

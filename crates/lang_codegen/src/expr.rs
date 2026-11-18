@@ -191,6 +191,30 @@ impl<'ctx> Codegen<'ctx, '_> {
                 }
                 self.call_rt("lrt_builder_finish", &[builder.into()]).unwrap()
             }
+            ExprKind::Variant { index, fields } => self.variant(expr.ty, *index, fields),
+            ExprKind::Ok(payload) => {
+                let payload = self.expr(payload);
+                self.make_result(expr.ty, true, payload)
+            }
+            ExprKind::Err(error) => {
+                let error = self.value(error);
+                self.make_result(expr.ty, false, Some(error))
+            }
+            ExprKind::ToDyn { value, trait_id } => {
+                let data = self.value(value).into_pointer_value();
+                let vtable = self.vtable(value.ty, *trait_id);
+                self.make_dyn(data, vtable)
+            }
+            ExprKind::Upcast { value, path } => {
+                let object = self.value(value);
+                self.upcast(object, path)
+            }
+            ExprKind::DynCall { receiver, trait_id, path, method, args } => {
+                let receiver = self.value(receiver);
+                let args: Vec<BasicValueEnum> = args.iter().map(|a| self.value(a)).collect();
+                return self.dyn_call(receiver, *trait_id, path, *method, args);
+            }
+            ExprKind::Try { value, conversion } => return self.try_value(value, conversion),
         })
     }
 
@@ -232,13 +256,10 @@ impl<'ctx> Codegen<'ctx, '_> {
         }
     }
 
+    /// `None` of an optional type: all zeros, which is a null pointer for the nullable kinds and
+    /// a false flag for the others.
     pub(crate) fn none_value(&self, option: Ty) -> BasicValueEnum<'ctx> {
-        let inner = self.option_inner(option);
-        if inner == Ty::STR {
-            self.str_type.const_named_struct(&[self.ptr_type().const_null().into(), self.i64(0).into()]).into()
-        } else {
-            self.value_type(option).const_zero()
-        }
+        self.value_type(option).const_zero()
     }
 
     pub(crate) fn wrap_some(&mut self, option: Ty, value: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
@@ -253,7 +274,7 @@ impl<'ctx> Codegen<'ctx, '_> {
 
     pub(crate) fn opt_is_some(&mut self, option: Ty, value: BasicValueEnum<'ctx>) -> IntValue<'ctx> {
         let inner = self.option_inner(option);
-        if inner == Ty::STR {
+        if self.is_pointer_pair(inner) {
             let ptr = self.b.build_extract_value(value.into_struct_value(), 0, "").must().into_pointer_value();
             return self.b.build_is_not_null(ptr, "").must();
         }
@@ -510,13 +531,23 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.build_int_compare(IntPredicate::NE, eq, self.i64(0), "").must()
             }
             TyKind::None => self.bool(true),
-            TyKind::Struct(_) | TyKind::Dict(..) => {
+            TyKind::Struct(_) | TyKind::Enum(_) => {
+                let eq = self.program.builtins.eq;
+                if let Some(function) = self.explicit_method(eq, ty, 0) {
+                    return self.call_method(function, &[a, b]).unwrap().into_int_value();
+                }
+                let helper = self.helper(Helper::Eq, ty);
+                let call = self.b.build_call(helper, &[a.into(), b.into()], "").must();
+                call.set_call_convention(crate::CALLCONV_FAST);
+                call.try_as_basic_value().basic().unwrap().into_int_value()
+            }
+            TyKind::Dict(..) | TyKind::Dyn(_) | TyKind::SelfType(_) => {
                 let i64_type = self.cx.i64_type();
                 let x = self.b.build_ptr_to_int(a.into_pointer_value(), i64_type, "").must();
                 let y = self.b.build_ptr_to_int(b.into_pointer_value(), i64_type, "").must();
                 self.b.build_int_compare(IntPredicate::EQ, x, y, "").must()
             }
-            TyKind::List(_) | TyKind::Tuple(_) | TyKind::Option(_) => {
+            TyKind::List(_) | TyKind::Tuple(_) | TyKind::Option(_) | TyKind::Result(..) => {
                 let helper = self.helper(Helper::Eq, ty);
                 let call = self.b.build_call(helper, &[a.into(), b.into()], "").must();
                 call.set_call_convention(crate::CALLCONV_FAST);
@@ -619,6 +650,9 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let [ptr, len] = self.str_parts(value.unwrap());
                 let function = if repr { "lrt_builder_push_str_repr" } else { "lrt_builder_push" };
                 self.call_rt(function, &[builder.into(), ptr, len]);
+            }
+            TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Dyn(_) | TyKind::SelfType(_) => {
+                self.push_user_value(builder, ty, value.unwrap(), repr);
             }
             _ => {
                 let helper = self.helper(Helper::Push { repr }, ty);

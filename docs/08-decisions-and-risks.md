@@ -261,6 +261,58 @@ Each decision records what was chosen, why, what was rejected, and what evidence
 
 **Revisit if.** A collision attack against seeded non-cryptographic hashing becomes practical, as it would for Go too.
 
+### D26. The built-in traits live in a prelude written in the language
+
+**Status.** Decided while implementing milestone 3, 2026-11-18.
+
+**What it means.** `Display`, `Eq`, `Hash`, `Copy`, `Error`, `AddNumber`, `SubNumber`, `MulNumber` and the struct `ParseError` are declared in `crates/lang_sema/src/prelude.lang` and compiled with every program. Their method names are `to_str`, `eq`, `hash`, `copy`, `message`, `add`, `sub` and `mul`. User code implements them like any trait: `impl Display for Point: def to_str(self) -> str: ...`.
+
+**Why.** No special cases in the type checker for how these traits are declared, implemented or checked; the compiler only attaches meaning (printing, `==`, dict keys, `?`, operators). The prelude is also the first code in the language that the compiler itself depends on.
+
+### D27. Enum values are immutable heap objects
+
+**Status.** Decided while implementing milestone 3, 2026-11-18.
+
+**What it means.** An enum value is a pointer to an object holding its descriptor, its variant's tag and its fields. Variants without fields are static constants, so they cost nothing to create. Fields cannot be assigned, and `is` does not apply to enums: they are values, compared with `==` when they derive `Eq`.
+
+**Why.** docs/02 allowed the compiler to box enums. Boxing every enum keeps one representation, lets an enum be a trait object or the target of `Option` at no cost, and makes recursive enums (an expression tree) need nothing special.
+
+**Cost.** One allocation per value of a variant with fields. Escape analysis (docs/07, optimisation backlog) is the remedy if it shows up in profiles.
+
+### D28. Variants can be named with or without their enum
+
+**Status.** Decided while implementing milestone 3, 2026-11-18.
+
+**What it means.** `Shape.Circle(1.0)` always works. `Circle(1.0)` works when only one enum has a variant called `Circle`; otherwise the compiler asks for the qualified form. In a `case`, a bare name is looked up among the variants of the value being matched, so it is never ambiguous there.
+
+**Why.** docs/01's examples use bare names (`case Text(body):`, `Err(NotFound("user"))`), which reads best; qualification resolves the rare clash.
+
+### D29. `pass` is a keyword
+
+**Status.** Added while implementing milestone 3, 2026-11-18.
+
+**Why.** A block cannot be empty, so `impl Greeter for Person:` had no way to say "use every default". `pass` is Python's answer and is what Python programmers will type. It is allowed wherever a statement is, and in `struct`, `enum`, `trait` and `impl` bodies.
+
+### D30. Small conveniences around `Result`
+
+**Status.** Decided while implementing milestone 3, 2026-11-18.
+
+- A function returning `Result[None]` succeeds by reaching its end or with a bare `return`, as a Python function does.
+- `Ok(x)` with no expected type is a `Result[T]` (errors of any `Error` type). `Err(e)` needs an expected type, since the success type cannot be guessed.
+- `int.parse` and `float.parse` return `Result[int, ParseError]`; `?` converts a `ParseError` to `Error` where needed.
+- `unwrap()` on an error panics with the error's `message()`.
+- `Trait.method(value, ...)` calls a specific trait's method when two traits give a type methods of the same name.
+
+### D31. `match` is compiled as one test per case, in order
+
+**Status.** Decided while implementing milestone 3, 2026-11-18. The roadmap asked for decision-tree code generation.
+
+**What it means.** Each case's pattern becomes a chain of tests that falls through to the next case on the first failure. Exhaustiveness and unreachable cases are still checked with the full pattern-matrix algorithm, so the language is unaffected.
+
+**Why.** Simpler, and fast for the matches programs actually write, which test one tag and a few fields. A decision tree avoids re-testing the same tag across many cases.
+
+**Revisit if.** A benchmark of `match`-heavy code (an interpreter loop, a protocol parser) shows the repeated tests in a profile.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

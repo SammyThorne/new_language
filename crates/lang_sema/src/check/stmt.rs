@@ -12,7 +12,7 @@ use lang_diag::{Diagnostic, Span, codes};
 use lang_syntax::ast;
 
 /// Assignment state after two paths join: assigned only if assigned on both.
-fn merge(a: &[bool], b: &[bool]) -> Vec<bool> {
+pub(super) fn merge(a: &[bool], b: &[bool]) -> Vec<bool> {
     let n = a.len().max(b.len());
     (0..n).map(|i| a.get(i).copied().unwrap_or(false) && b.get(i).copied().unwrap_or(false)).collect()
 }
@@ -43,9 +43,22 @@ impl Checker<'_, '_> {
         match &stmt.kind {
             ast::StmtKind::Expr(expr) => {
                 let checked = self.expr(cx, expr, None);
+                if self.types.result_parts(checked.ty).is_some() && !self.types.contains_error(checked.ty) {
+                    self.error(
+                        Diagnostic::error(
+                            codes::UNUSED_RESULT,
+                            "this `Result` is not used",
+                            expr.span,
+                            "may hold an error that is being ignored",
+                        )
+                        .with_help("pass the error on with `?`, handle it with `match`, or discard it with `_ = ...`"),
+                    );
+                }
                 let diverges = matches!(checked.kind, hir::ExprKind::Builtin { op: hir::Builtin::Panic, .. });
                 (vec![hir::Stmt::Expr(checked)], diverges)
             }
+            ast::StmtKind::Match { subject, cases } => self.match_stmt(cx, subject, cases, stmt.span),
+            ast::StmtKind::Pass => (Vec::new(), false),
             ast::StmtKind::Assign { target, ty, value } => (self.assign(cx, target, ty.as_ref(), value), false),
             ast::StmtKind::AugAssign { target, op, value } => (self.aug_assign(cx, target, *op, value), false),
             ast::StmtKind::Return(value) => (vec![self.return_stmt(cx, stmt.span, value.as_ref())], true),
@@ -336,6 +349,7 @@ impl Checker<'_, '_> {
         let (ret, ret_span) = (cx.ret, cx.ret_span);
         match (value, ret) {
             (None, Ty::NONE | Ty::ERROR) => hir::Stmt::Return(None),
+            (None, ret) if self.returns_ok_none(ret) => hir::Stmt::Return(Some(self.ok_none(ret, span))),
             (None, ret) => {
                 let shown = self.display(ret);
                 let mut diagnostic = Diagnostic::error(
@@ -383,6 +397,10 @@ impl Checker<'_, '_> {
         value: &ast::Expr,
     ) -> Vec<hir::Stmt> {
         match &target.kind {
+            // `_ = value` evaluates and discards, which is how an unused `Result` is ignored.
+            ast::TargetKind::Name(name) if name.name == "_" && hint.is_none() => {
+                vec![hir::Stmt::Expr(self.expr(cx, value, None))]
+            }
             ast::TargetKind::Name(name) => self.assign_name(cx, name, hint, value),
             ast::TargetKind::Tuple(targets) => {
                 let checked = self.expr(cx, value, None);
@@ -585,6 +603,7 @@ impl Checker<'_, '_> {
             ast::TargetKind::Attr { object, field } => {
                 let object = self.expr(cx, object, None);
                 let (index, ty, span) = self.field_of(&object, field)?;
+                self.check_not_frozen(object.ty, field.span);
                 Some((
                     hir::Place::Field { object, index },
                     ty,
@@ -624,6 +643,24 @@ impl Checker<'_, '_> {
         }
     }
 
+    fn check_not_frozen(&mut self, ty: Ty, span: Span) {
+        if let Some(id) = self.struct_of(ty)
+            && self.structs[id.0].frozen
+        {
+            let (name, struct_span) = (self.structs[id.0].name.clone(), self.structs[id.0].span);
+            self.error(
+                Diagnostic::error(
+                    codes::FROZEN_FIELD,
+                    format!("cannot change a field of `{name}`, which is `@frozen`"),
+                    span,
+                    "frozen field",
+                )
+                .with_label(struct_span, format!("`{name}` is declared `@frozen` here"))
+                .with_help("build a new value instead, or remove `@frozen` if the struct should be mutable"),
+            );
+        }
+    }
+
     /// The index, type and declaration span of a struct field, reporting if there is none.
     pub(super) fn field_of(&mut self, object: &hir::Expr, field: &ast::Ident) -> Option<(usize, Ty, Span)> {
         if object.ty == Ty::ERROR {
@@ -631,12 +668,26 @@ impl Checker<'_, '_> {
         }
         let Some(id) = self.struct_of(object.ty) else {
             let shown = self.display(object.ty);
-            self.error(Diagnostic::error(
+            let help = match self.types.kind(object.ty) {
+                TyKind::Enum(_) => {
+                    Some("enum values have no fields to read directly; use `match` to get at a variant's fields")
+                }
+                TyKind::SelfType(_) => Some(
+                    "in a trait's default method, `self` can be any implementing type, so only the trait's methods are available",
+                ),
+                TyKind::Dyn(_) => Some("a trait object only offers the trait's methods"),
+                _ => None,
+            };
+            let mut diagnostic = Diagnostic::error(
                 codes::NO_SUCH_MEMBER,
                 format!("`{shown}` has no field `{}`", field.name),
                 field.span,
                 "no such field",
-            ));
+            );
+            if let Some(help) = help {
+                diagnostic = diagnostic.with_help(help);
+            }
+            self.error(diagnostic);
             return None;
         };
         let info = &self.structs[id.0];
@@ -646,7 +697,10 @@ impl Checker<'_, '_> {
         }
         let struct_name = info.name.clone();
         let struct_span = info.span;
-        let is_method = self.methods.contains_key(&(id, field.name.clone()));
+        let ty = self.structs[id.0].ty;
+        let is_method = self.inherent.contains_key(&(ty, field.name.clone()))
+            || self.trait_methods.contains_key(&(ty, field.name.clone()));
+        let info = &self.structs[id.0];
         let candidates: Vec<String> = info.fields.iter().map(|f| f.name.clone()).collect();
         let mut diagnostic = Diagnostic::error(
             codes::NO_SUCH_MEMBER,
@@ -710,6 +764,7 @@ impl Checker<'_, '_> {
                     self.expr(cx, value, None);
                     return Vec::new();
                 };
+                self.check_not_frozen(object.ty, field.span);
                 let temp = cx.temp(object.ty, object.span);
                 let object_ty = object.ty;
                 let load = |span: Span| hir::Expr { kind: hir::ExprKind::Local(temp), ty: object_ty, span };

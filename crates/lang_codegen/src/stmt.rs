@@ -72,6 +72,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.position_at_end(exit);
             }
             Stmt::For { target, source, body } => self.for_loop(target, source, body),
+            Stmt::Match { subject, cases } => self.match_stmt(subject, cases),
             Stmt::Break | Stmt::Continue => {
                 let &(continue_to, break_to) = self.state.as_ref().unwrap().loops.last().expect("inside a loop");
                 let to = if matches!(stmt, Stmt::Break) { break_to } else { continue_to };
@@ -92,7 +93,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         self.state.as_mut().unwrap().loops.pop();
     }
 
-    fn store(&mut self, place: &Place, value: Option<BasicValueEnum<'ctx>>) {
+    pub(crate) fn store(&mut self, place: &Place, value: Option<BasicValueEnum<'ctx>>) {
         let Some(value) = value else { return };
         match place {
             Place::Local(local) => {

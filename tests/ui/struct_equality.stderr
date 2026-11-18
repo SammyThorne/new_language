@@ -4,6 +4,6 @@ error[E0321]: cannot compare `Point` values with `==`
 8 |     print(a == b)
   |           ^^^^^^ both sides are `Point`
   |
-  = help: `==` on structs needs the `Eq` trait, which arrives with traits; use `is` to check whether two values are the same object
+  = help: add `@derive(Eq)` to `Point` to compare values; use `is` to check whether two values are the same object
 
 error: could not compile `tests/ui/struct_equality.wb` due to 1 error

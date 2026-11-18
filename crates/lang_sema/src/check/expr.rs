@@ -1,13 +1,14 @@
 //! Expressions.
 //!
 //! Checking is bidirectional: `expected` carries the type the context wants, when known. It is a
-//! hint, used to give `[]`, `{}`, `None` and integer literals their types; [`Checker::expect`]
-//! and [`Checker::coerce`] then enforce it, applying the only implicit conversions the language
-//! has: `T` to `T?`, and `None` to any optional type.
+//! hint, used to give `[]`, `{}`, `None`, `Ok`, `Err` and integer literals their types;
+//! [`Checker::expect`] and [`Checker::coerce`] then enforce it, applying the only implicit
+//! conversions the language has: `T` to `T?`, `None` to any optional type, `T` to `Result[T, E]`
+//! (as `Ok`), and a struct or enum to a trait it implements.
 
-use super::{BUILTIN_FUNCTIONS, Checker, FnCx, Global, Reason, error_expr};
+use super::{BUILTIN_CONSTRUCTORS, BUILTIN_FUNCTIONS, Checker, FnCx, Global, Reason, error_expr};
 use crate::hir::{self, BinaryOp as B, ExprKind as K};
-use crate::types::{Ty, TyKind};
+use crate::types::{EnumId, TraitId, Ty, TyKind};
 use lang_diag::{Diagnostic, Span, codes};
 use lang_format::{Kind, Spec};
 use lang_syntax::ast;
@@ -25,23 +26,60 @@ impl Checker<'_, '_> {
         self.coerce(checked, expected, reason)
     }
 
-    /// Accept `value` where `expected` is required, wrapping it as an option if needed, or report
-    /// a mismatch.
+    /// Accept `value` where `expected` is required, applying the implicit conversions (to an
+    /// optional, to `Ok`, to a trait object), or report a mismatch.
     pub(super) fn coerce(&mut self, value: hir::Expr, expected: Ty, reason: Reason) -> hir::Expr {
-        if self.types.fits(value.ty, expected) {
-            return value;
+        if let Some(conversion) = self.conversion(value.ty, expected) {
+            return self.convert(value, conversion, expected);
         }
         if let Some(inner) = self.types.option_inner(expected) {
             if matches!(value.kind, K::None) && value.ty == Ty::NONE {
                 return hir::Expr { ty: expected, ..value };
             }
-            if self.types.fits(value.ty, inner) {
+            if let Some(conversion) = self.conversion(value.ty, inner) {
                 let span = value.span;
-                return mk(K::Some(Box::new(value)), expected, span);
+                let inner_value = self.convert(value, conversion, inner);
+                return mk(K::Some(Box::new(inner_value)), expected, span);
             }
+        }
+        if let Some((ok, _)) = self.types.result_parts(expected)
+            && let Some(conversion) = self.conversion(value.ty, ok)
+        {
+            let span = value.span;
+            let ok_value = self.convert(value, conversion, ok);
+            return mk(K::Ok(Box::new(ok_value)), expected, span);
         }
         self.mismatch(value.span, expected, value.ty, reason);
         value
+    }
+
+    /// How a value of type `from` can be used as `to` without changing what it is: as it is, as a
+    /// trait object, or as a trait object of a required trait.
+    pub(super) fn conversion(&self, from: Ty, to: Ty) -> Option<hir::Conversion> {
+        if self.types.fits(from, to) {
+            return Some(hir::Conversion::Identity);
+        }
+        let TyKind::Dyn(target) = *self.types.kind(to) else { return None };
+        match *self.types.kind(from) {
+            TyKind::Struct(_) | TyKind::Enum(_) if self.implements(from, target) => {
+                Some(hir::Conversion::ToDyn(target))
+            }
+            TyKind::Dyn(source) => self.upcast_path(source, target).map(hir::Conversion::Upcast),
+            TyKind::SelfType(source) if self.trait_closure(source).contains(&target) => {
+                Some(hir::Conversion::ToDyn(target))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn convert(&mut self, value: hir::Expr, conversion: hir::Conversion, to: Ty) -> hir::Expr {
+        let span = value.span;
+        match conversion {
+            hir::Conversion::Identity => value,
+            hir::Conversion::Upcast(path) if path.is_empty() => hir::Expr { ty: to, ..value },
+            hir::Conversion::Upcast(path) => mk(K::Upcast { value: Box::new(value), path }, to, span),
+            hir::Conversion::ToDyn(trait_id) => mk(K::ToDyn { value: Box::new(value), trait_id }, to, span),
+        }
     }
 
     fn mismatch(&mut self, span: Span, expected: Ty, found: Ty, reason: Reason) {
@@ -98,7 +136,7 @@ impl Checker<'_, '_> {
             ast::ExprKind::None => mk(K::None, Ty::NONE, span),
             ast::ExprKind::FString(parts) => self.fstring(cx, parts, span),
             ast::ExprKind::Name(name) => self.name_expr(cx, name, span),
-            ast::ExprKind::Call { callee, args } => self.call(cx, callee, args, span),
+            ast::ExprKind::Call { callee, args } => self.call(cx, callee, args, span, expected),
             ast::ExprKind::Attr { object, name } => self.attr(cx, object, name),
             ast::ExprKind::Index { object, index } => self.index(cx, object, index, span),
             ast::ExprKind::Slice { object, start, stop } => {
@@ -110,6 +148,56 @@ impl Checker<'_, '_> {
             ast::ExprKind::Unary { op, operand } => self.unary(cx, *op, operand, span, expected),
             ast::ExprKind::Binary { op, lhs, rhs } => self.binary(cx, *op, lhs, rhs, span),
             ast::ExprKind::IfElse { cond, then, otherwise } => self.if_else(cx, cond, then, otherwise, span, expected),
+            ast::ExprKind::Try(inner) => self.try_expr(cx, inner, span),
+        }
+    }
+
+    /// `value?`
+    fn try_expr(&mut self, cx: &mut FnCx, inner: &ast::Expr, span: Span) -> hir::Expr {
+        let value = self.expr(cx, inner, None);
+        if self.types.contains_error(value.ty) || self.types.contains_error(cx.ret) {
+            return error_expr(span);
+        }
+        let shown_ret = self.display(cx.ret);
+        match self.types.kind(value.ty).clone() {
+            TyKind::Result(ok, err) => {
+                let Some((_, ret_err)) = self.types.result_parts(cx.ret) else {
+                    self.error(
+                        Diagnostic::error(codes::BAD_TRY, "`?` passes an error to the caller, but this function does not return a `Result`", span, "error has nowhere to go")
+                            .with_help(format!("declare the function as returning a `Result` (it returns `{shown_ret}`), or handle the error here with `match`")),
+                    );
+                    return error_expr(span);
+                };
+                let Some(conversion) = self.conversion(err, ret_err) else {
+                    let (from, to) = (self.display(err), self.display(ret_err));
+                    self.error(
+                        Diagnostic::error(codes::BAD_TRY, format!("`?` cannot pass on a `{from}` error from a function whose errors are `{to}`"), span, format!("the error is `{from}`"))
+                            .with_help("declare the function as returning `Result[T]`, whose errors can be any type implementing `Error`"),
+                    );
+                    return error_expr(span);
+                };
+                mk(K::Try { value: Box::new(value), conversion }, ok, span)
+            }
+            TyKind::Option(inner_ty) => {
+                if self.types.option_inner(cx.ret).is_none() {
+                    self.error(
+                        Diagnostic::error(codes::BAD_TRY, "`?` on an optional value returns `None`, but this function does not return an optional", span, "`None` has nowhere to go")
+                            .with_help(format!("declare the function as returning an optional type (it returns `{shown_ret}`), or check with `is None`")),
+                    );
+                    return error_expr(span);
+                }
+                mk(K::Try { value: Box::new(value), conversion: hir::Conversion::Identity }, inner_ty, span)
+            }
+            _ => {
+                let shown = self.display(value.ty);
+                self.error(Diagnostic::error(
+                    codes::BAD_TRY,
+                    format!("`?` needs a `Result` or an optional value, found `{shown}`"),
+                    span,
+                    format!("has type `{shown}`"),
+                ));
+                error_expr(span)
+            }
         }
     }
 
@@ -149,16 +237,28 @@ impl Checker<'_, '_> {
                 );
                 return error_expr(span);
             }
-            Some(Global::Struct(_)) => {
+            Some(Global::Struct(_) | Global::Enum(_) | Global::Trait(_)) => {
+                let help = match self.globals.get(name).map(|(g, _)| *g) {
+                    Some(Global::Enum(_)) => format!("create a value with one of its variants: `{name}.Variant`"),
+                    Some(Global::Trait(_)) => {
+                        "a trait describes behaviour; use a value of a type that implements it".to_string()
+                    }
+                    _ => format!("create a value with `{name}(...)`"),
+                };
                 self.error(
                     Diagnostic::error(codes::NOT_SUPPORTED, format!("`{name}` is a type, not a value"), span, "a type")
-                        .with_help(format!("create a value with `{name}(...)`")),
+                        .with_help(help),
                 );
                 return error_expr(span);
             }
             None => {}
         }
-        if BUILTIN_FUNCTIONS.contains(&name) {
+        match self.lookup_variant(name, span) {
+            Some(Ok((enum_id, index))) => return self.variant_value(cx, enum_id, index, None, span),
+            Some(Err(())) => return error_expr(span),
+            None => {}
+        }
+        if BUILTIN_FUNCTIONS.contains(&name) || BUILTIN_CONSTRUCTORS.contains(&name) {
             self.error(
                 Diagnostic::error(
                     codes::NOT_SUPPORTED,
@@ -186,13 +286,78 @@ impl Checker<'_, '_> {
         error_expr(span)
     }
 
+    /// A variant used by its bare name: the enum and index if the name is unique, an error (already
+    /// reported) if several enums have it, `None` if no enum does.
+    fn lookup_variant(&mut self, name: &str, span: Span) -> Option<Result<(EnumId, usize), ()>> {
+        let owners = self.variant_names.get(name)?.clone();
+        if let [single] = owners.as_slice() {
+            return Some(Ok(*single));
+        }
+        let names: Vec<String> = owners.iter().map(|(e, _)| format!("`{}.{name}`", self.enums[e.0].name)).collect();
+        self.error(
+            Diagnostic::error(
+                codes::UNKNOWN_NAME,
+                format!("`{name}` is a variant of more than one enum"),
+                span,
+                "ambiguous",
+            )
+            .with_help(format!("say which one: {}", names.join(" or "))),
+        );
+        Some(Err(()))
+    }
+
+    /// A value of an enum variant. `args` is `None` when the variant is named without a call.
+    fn variant_value(
+        &mut self,
+        cx: &mut FnCx,
+        enum_id: EnumId,
+        index: usize,
+        args: Option<&[ast::Arg]>,
+        span: Span,
+    ) -> hir::Expr {
+        let info = &self.enums[enum_id.0];
+        let (enum_name, ty) = (info.name.clone(), info.ty);
+        let variant = &info.variants[index];
+        let (variant_name, variant_span, fields) = (variant.name.clone(), variant.span, variant.fields.clone());
+        let full = format!("{enum_name}.{variant_name}");
+        match args {
+            None if fields.is_empty() => mk(K::Variant { index, fields: Vec::new() }, ty, span),
+            None => {
+                self.error(
+                    Diagnostic::error(
+                        codes::MISSING_FIELD,
+                        format!("variant `{full}` needs values for its fields"),
+                        span,
+                        "fields missing",
+                    )
+                    .with_label(variant_span, format!("`{variant_name}` is declared here")),
+                );
+                error_expr(span)
+            }
+            Some(args) if fields.is_empty() => {
+                if !args.is_empty() {
+                    self.error(Diagnostic::error(
+                        codes::WRONG_ARG_COUNT,
+                        format!("variant `{full}` has no fields"),
+                        span,
+                        format!("write `{full}` without `(...)`"),
+                    ));
+                }
+                mk(K::Variant { index, fields: Vec::new() }, ty, span)
+            }
+            Some(args) => match self.field_values(cx, &full, variant_span, &fields, args, span) {
+                Some(values) => mk(K::Variant { index, fields: values }, ty, span),
+                None => error_expr(span),
+            },
+        }
+    }
+
     fn unknown_name(&mut self, cx: &FnCx, name: &str, span: Span) {
         let help = match name {
             "true" => Some("did you mean `True`?".to_string()),
             "false" => Some("did you mean `False`?".to_string()),
             "null" | "nil" | "none" => Some("did you mean `None`?".to_string()),
             "self" => Some("`self` is only available in methods that take it as their first parameter".to_string()),
-            "pass" => Some("there is no `pass` statement; a block needs at least one real statement".to_string()),
             planned if PLANNED_FUNCTIONS.contains(&planned) => Some(format!("`{planned}` is not available yet")),
             _ => {
                 let candidates = cx
@@ -220,20 +385,43 @@ impl Checker<'_, '_> {
         }
     }
 
-    fn call(&mut self, cx: &mut FnCx, callee: &ast::Expr, args: &[ast::Arg], span: Span) -> hir::Expr {
+    fn call(
+        &mut self,
+        cx: &mut FnCx,
+        callee: &ast::Expr,
+        args: &[ast::Arg],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> hir::Expr {
         match &callee.kind {
             ast::ExprKind::Name(name) if !cx.scope.contains_key(name) => {
                 match self.globals.get(name).map(|(global, _)| *global) {
                     Some(Global::Function(id)) => {
-                        let args = self.call_args(cx, id, args, span);
-                        let ret = self.signatures[id.0].ret;
+                        let signature = &self.signatures[id.0];
+                        let (fname, def_span, params, ret) =
+                            (signature.name.clone(), signature.name_span, signature.params.clone(), signature.ret);
+                        let args = self.call_args(cx, &fname, def_span, &params, args, span);
                         return mk(K::Call { func: id, args }, ret, span);
                     }
                     Some(Global::Struct(id)) => return self.construct(cx, id, args, span),
-                    Some(Global::Const(_)) => {
+                    Some(Global::Enum(_)) => {
+                        self.error(
+                            Diagnostic::error(
+                                codes::NOT_A_FUNCTION,
+                                format!("`{name}` is an enum; create a value with one of its variants"),
+                                callee.span,
+                                "an enum",
+                            )
+                            .with_help(format!("for example `{name}.Variant(...)`")),
+                        );
+                        self.check_all(cx, args);
+                        return error_expr(span);
+                    }
+                    Some(Global::Trait(_) | Global::Const(_)) => {
+                        let kind = self.global_kind(name).unwrap_or("not a function");
                         self.error(Diagnostic::error(
                             codes::NOT_A_FUNCTION,
-                            format!("`{name}` is a constant, not a function"),
+                            format!("`{name}` is {kind}, not a function"),
                             callee.span,
                             "not callable",
                         ));
@@ -244,6 +432,17 @@ impl Checker<'_, '_> {
                 }
                 if BUILTIN_FUNCTIONS.contains(&name.as_str()) {
                     return self.builtin_function(cx, name, args, span);
+                }
+                if BUILTIN_CONSTRUCTORS.contains(&name.as_str()) {
+                    return self.constructor(cx, name, args, span, expected);
+                }
+                match self.lookup_variant(name, callee.span) {
+                    Some(Ok((enum_id, index))) => return self.variant_value(cx, enum_id, index, Some(args), span),
+                    Some(Err(())) => {
+                        self.check_all(cx, args);
+                        return error_expr(span);
+                    }
+                    None => {}
                 }
                 self.check_all(cx, args);
                 self.unknown_name(cx, name, callee.span);
@@ -269,18 +468,35 @@ impl Checker<'_, '_> {
                 if let ast::ExprKind::Name(type_name) = &object.kind
                     && !cx.scope.contains_key(type_name)
                 {
-                    if let Some(&(Global::Struct(id), _)) = self.globals.get(type_name) {
-                        return self.static_call(cx, id, name, args, span);
+                    match self.globals.get(type_name).map(|(g, _)| *g) {
+                        Some(Global::Struct(id)) => {
+                            let ty = self.structs[id.0].ty;
+                            return self.static_call(cx, ty, name, args, span);
+                        }
+                        Some(Global::Enum(id)) => {
+                            if let Some(index) = self.enums[id.0].variants.iter().position(|v| v.name == name.name) {
+                                return self.variant_value(cx, id, index, Some(args), span);
+                            }
+                            let ty = self.enums[id.0].ty;
+                            return self.static_call(cx, ty, name, args, span);
+                        }
+                        Some(Global::Trait(id)) => return self.trait_call(cx, id, name, args, span),
+                        _ => {}
+                    }
+                    if matches!(type_name.as_str(), "int" | "float") && name.name == "parse" {
+                        return self.parse_call(cx, type_name, args, span);
                     }
                     if matches!(type_name.as_str(), "int" | "float" | "str" | "bool" | "list" | "dict") {
                         self.error(
                             Diagnostic::error(
                                 codes::NOT_SUPPORTED,
-                                format!("`{type_name}.{}` is not supported yet", name.name),
+                                format!("`{type_name}.{}` does not exist", name.name),
                                 callee.span,
-                                "not supported yet",
+                                "no such function",
                             )
-                            .with_help("parsing text into numbers arrives with `Result` in milestone 3"),
+                            .with_help(
+                                "the functions on built-in types so far are `int.parse(text)` and `float.parse(text)`",
+                            ),
                         );
                         self.check_all(cx, args);
                         return error_expr(span);
@@ -302,10 +518,133 @@ impl Checker<'_, '_> {
         }
     }
 
-    /// Arguments of a call to a user function or method (not counting `self`).
-    fn call_args(&mut self, cx: &mut FnCx, id: hir::FuncId, args: &[ast::Arg], span: Span) -> Vec<hir::Expr> {
-        let signature = &self.signatures[id.0];
-        let (name, def_span, params) = (signature.name.clone(), signature.name_span, signature.params.clone());
+    /// `Some(x)`, `Ok(x)` and `Err(e)`.
+    fn constructor(
+        &mut self,
+        cx: &mut FnCx,
+        name: &str,
+        args: &[ast::Arg],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> hir::Expr {
+        let [arg] = args else {
+            self.error(Diagnostic::error(
+                codes::WRONG_ARG_COUNT,
+                format!("`{name}` takes one value"),
+                span,
+                format!("write `{name}(value)`"),
+            ));
+            self.check_all(cx, args);
+            return error_expr(span);
+        };
+        if arg.name.is_some() {
+            self.error(Diagnostic::error(
+                codes::NOT_SUPPORTED,
+                format!("`{name}` takes no keyword arguments"),
+                span,
+                "remove the name",
+            ));
+        }
+        let expected_option = expected.and_then(|t| self.types.option_inner(t).map(|inner| (t, inner)));
+        let expected_result = expected.and_then(|t| self.types.result_parts(t).map(|parts| (t, parts)));
+        match name {
+            "Some" => match expected_option {
+                Some((ty, inner)) => {
+                    let value = self.expect(cx, &arg.value, inner, None);
+                    mk(K::Some(Box::new(value)), ty, span)
+                }
+                None => {
+                    let value = self.expr(cx, &arg.value, None);
+                    if value.ty == Ty::NONE {
+                        self.error(Diagnostic::error(
+                            codes::CANNOT_INFER,
+                            "`Some(None)` has no useful type",
+                            span,
+                            "write `None`",
+                        ));
+                        return error_expr(span);
+                    }
+                    let ty = self.types.option(value.ty);
+                    mk(K::Some(Box::new(value)), ty, span)
+                }
+            },
+            "Ok" => match expected_result {
+                Some((ty, (ok, _))) => {
+                    let value = self.expect(cx, &arg.value, ok, None);
+                    mk(K::Ok(Box::new(value)), ty, span)
+                }
+                None => {
+                    let value = self.expr(cx, &arg.value, None);
+                    let error = self.builtin().error;
+                    let error_ty = self.types.dyn_(error);
+                    let ty = self.types.result(value.ty, error_ty);
+                    mk(K::Ok(Box::new(value)), ty, span)
+                }
+            },
+            _ => match expected_result {
+                Some((ty, (_, err))) => {
+                    let value = self.expr(cx, &arg.value, Some(err));
+                    let Some(conversion) = self.conversion(value.ty, err) else {
+                        let (found, want) = (self.display(value.ty), self.display(err));
+                        let mut diagnostic = Diagnostic::error(
+                            codes::TYPE_MISMATCH,
+                            format!("expected an error of type `{want}`, found `{found}`"),
+                            value.span,
+                            format!("has type `{found}`"),
+                        );
+                        if self.types.kind(err) == &TyKind::Dyn(self.builtin().error) {
+                            diagnostic = diagnostic.with_help(format!(
+                                "implement `Error` for `{found}` so it can be returned as an error"
+                            ));
+                        }
+                        self.error(diagnostic);
+                        return error_expr(span);
+                    };
+                    let value = self.convert(value, conversion, err);
+                    mk(K::Err(Box::new(value)), ty, span)
+                }
+                None => {
+                    self.expr(cx, &arg.value, None);
+                    self.error(
+                        Diagnostic::error(codes::CANNOT_INFER, "cannot tell what type of `Result` this `Err` belongs to", span, "type unknown")
+                            .with_help("use `Err(...)` where a `Result` is expected, such as in `return` from a function declared `-> Result[T]`"),
+                    );
+                    error_expr(span)
+                }
+            },
+        }
+    }
+
+    /// `int.parse(text)` and `float.parse(text)`.
+    fn parse_call(&mut self, cx: &mut FnCx, type_name: &str, args: &[ast::Arg], span: Span) -> hir::Expr {
+        let [arg] = args else {
+            self.error(Diagnostic::error(
+                codes::WRONG_ARG_COUNT,
+                format!("`{type_name}.parse` takes one string"),
+                span,
+                "expected one argument",
+            ));
+            self.check_all(cx, args);
+            return error_expr(span);
+        };
+        let text = self.expect(cx, &arg.value, Ty::STR, None);
+        let (op, ok) =
+            if type_name == "int" { (hir::Builtin::ParseInt, Ty::INT) } else { (hir::Builtin::ParseFloat, Ty::FLOAT) };
+        let error_ty = self.structs[self.parse_error.expect("prelude").0].ty;
+        let ty = self.types.result(ok, error_ty);
+        mk(K::Builtin { op, args: vec![text] }, ty, span)
+    }
+
+    /// Arguments of a call (not counting `self`).
+    fn call_args(
+        &mut self,
+        cx: &mut FnCx,
+        name: &str,
+        def_span: Span,
+        params: &[super::ParamSig],
+        args: &[ast::Arg],
+        span: Span,
+    ) -> Vec<hir::Expr> {
         if let Some(arg) = args.iter().find(|a| a.name.is_some()) {
             let span = arg.name.as_ref().unwrap().span;
             self.error(
@@ -315,7 +654,7 @@ impl Checker<'_, '_> {
                     span,
                     "not supported yet",
                 )
-                .with_help("they work when constructing structs; functions get them in milestone 4"),
+                .with_help("they work when constructing structs and enum variants; functions get them in milestone 4"),
             );
             self.check_all(cx, args);
             return Vec::new();
@@ -336,7 +675,7 @@ impl Checker<'_, '_> {
             return Vec::new();
         }
         args.iter()
-            .zip(&params)
+            .zip(params)
             .map(|(arg, param)| {
                 let reason = Some((param.hint_span, format!("parameter `{}` is declared here", param.name)));
                 self.expect(cx, &arg.value, param.ty, reason)
@@ -344,19 +683,36 @@ impl Checker<'_, '_> {
             .collect()
     }
 
-    fn static_call(
+    fn call_func(
         &mut self,
         cx: &mut FnCx,
-        id: crate::types::StructId,
-        name: &ast::Ident,
+        func: hir::FuncId,
+        receiver: Option<hir::Expr>,
         args: &[ast::Arg],
         span: Span,
     ) -> hir::Expr {
-        let struct_name = self.structs[id.0].name.clone();
-        let Some(&func) = self.methods.get(&(id, name.name.clone())) else {
+        let signature = &self.signatures[func.0];
+        let (name, def_span, params, ret) =
+            (signature.name.clone(), signature.name_span, signature.params.clone(), signature.ret);
+        let mut all: Vec<hir::Expr> = receiver.into_iter().collect();
+        all.extend(self.call_args(cx, &name, def_span, &params, args, span));
+        mk(K::Call { func, args: all }, ret, span)
+    }
+
+    /// `Type.method(...)` for a method without `self`.
+    fn static_call(&mut self, cx: &mut FnCx, owner: Ty, name: &ast::Ident, args: &[ast::Arg], span: Span) -> hir::Expr {
+        let owner_name = self.display(owner);
+        let func = match self.inherent.get(&(owner, name.name.clone())) {
+            Some(&func) => Some(func),
+            None => match self.trait_methods.get(&(owner, name.name.clone())).cloned().as_deref() {
+                Some([(trait_id, index)]) => self.impl_of(*trait_id, owner).and_then(|i| self.impls[i].methods[*index]),
+                _ => None,
+            },
+        };
+        let Some(func) = func else {
             self.error(Diagnostic::error(
                 codes::NO_SUCH_MEMBER,
-                format!("`{struct_name}` has no method `{}`", name.name),
+                format!("`{owner_name}` has no method `{}`", name.name),
                 name.span,
                 "no such method",
             ));
@@ -367,7 +723,7 @@ impl Checker<'_, '_> {
             self.error(
                 Diagnostic::error(
                     codes::NOT_A_FUNCTION,
-                    format!("`{struct_name}.{}` needs a `{struct_name}` value", name.name),
+                    format!("`{owner_name}.{}` needs a `{owner_name}` value", name.name),
                     name.span,
                     "takes `self`",
                 )
@@ -376,9 +732,134 @@ impl Checker<'_, '_> {
             self.check_all(cx, args);
             return error_expr(span);
         }
-        let args = self.call_args(cx, func, args, span);
-        let ret = self.signatures[func.0].ret;
-        mk(K::Call { func, args }, ret, span)
+        self.call_func(cx, func, None, args, span)
+    }
+
+    fn impl_of(&self, trait_id: TraitId, ty: Ty) -> Option<usize> {
+        self.impl_index.get(&(trait_id, ty)).copied()
+    }
+
+    /// `Trait.method(value, ...)`: a trait method called with its receiver as the first argument,
+    /// for when two traits give a type methods with the same name.
+    fn trait_call(
+        &mut self,
+        cx: &mut FnCx,
+        trait_id: TraitId,
+        name: &ast::Ident,
+        args: &[ast::Arg],
+        span: Span,
+    ) -> hir::Expr {
+        let trait_name = self.traits[trait_id.0].name.clone();
+        let Some((declaring, _, index)) = self.find_trait_method(trait_id, &name.name) else {
+            self.error(Diagnostic::error(
+                codes::NO_SUCH_MEMBER,
+                format!("trait `{trait_name}` has no method `{}`", name.name),
+                name.span,
+                "no such method",
+            ));
+            self.check_all(cx, args);
+            return error_expr(span);
+        };
+        let Some((first, rest)) = args.split_first() else {
+            self.error(Diagnostic::error(
+                codes::WRONG_ARG_COUNT,
+                format!("`{trait_name}.{}` needs the value to call it on", name.name),
+                span,
+                "missing the value",
+            ));
+            return error_expr(span);
+        };
+        let receiver = self.expr(cx, &first.value, None);
+        if !self.implements(receiver.ty, declaring) {
+            let shown = self.display(receiver.ty);
+            self.error(Diagnostic::error(
+                codes::NO_SUCH_MEMBER,
+                format!("`{shown}` does not implement `{trait_name}`"),
+                first.value.span,
+                format!("has type `{shown}`"),
+            ));
+            self.check_all(cx, rest);
+            return error_expr(span);
+        }
+        self.trait_method_call(cx, receiver, declaring, index, rest, span)
+    }
+
+    /// Call trait method `index` of `trait_id` on a receiver known to implement it.
+    fn trait_method_call(
+        &mut self,
+        cx: &mut FnCx,
+        receiver: hir::Expr,
+        trait_id: TraitId,
+        index: usize,
+        args: &[ast::Arg],
+        span: Span,
+    ) -> hir::Expr {
+        let ty = receiver.ty;
+        if let TyKind::Dyn(source) | TyKind::SelfType(source) = *self.types.kind(ty) {
+            let path = self.upcast_path(source, trait_id).unwrap_or_default();
+            let method = &self.traits[trait_id.0].methods[index];
+            let (name, def_span, params, ret, has_self) =
+                (method.name.clone(), method.span, method.params.clone(), method.ret, method.has_self);
+            if !has_self {
+                self.error(Diagnostic::error(
+                    codes::NOT_A_FUNCTION,
+                    format!("`{name}` does not take `self`"),
+                    span,
+                    "cannot be called on a value",
+                ));
+                return error_expr(span);
+            }
+            let params: Vec<super::ParamSig> =
+                params.into_iter().map(|p| super::ParamSig { ty: self.subst_self(p.ty, ty), ..p }).collect();
+            let ret = self.subst_self(ret, ty);
+            let args = self.call_args(cx, &name, def_span, &params, args, span);
+            return mk(K::DynCall { receiver: Box::new(receiver), trait_id, path, method: index, args }, ret, span);
+        }
+        let Some(impl_index) = self.impl_of(trait_id, ty) else { return error_expr(span) };
+        let b = self.builtin();
+        if self.impls[impl_index].derived {
+            // Derived methods have no function of their own; they are the built-in operations.
+            let method_name = self.traits[trait_id.0].methods[index].name.clone();
+            let mut values = vec![receiver];
+            let params: Vec<super::ParamSig> = self.traits[trait_id.0].methods[index]
+                .params
+                .clone()
+                .into_iter()
+                .map(|p| super::ParamSig { ty, ..p })
+                .collect();
+            values.extend(self.call_args(cx, &method_name, span, &params, args, span));
+            return if trait_id == b.eq && values.len() == 2 {
+                let rhs = values.pop().unwrap();
+                let lhs = values.pop().unwrap();
+                mk(K::Binary { op: B::Eq, lhs: Box::new(lhs), rhs: Box::new(rhs) }, Ty::BOOL, span)
+            } else if trait_id == b.display {
+                mk(K::Builtin { op: hir::Builtin::ToStr, args: values }, Ty::STR, span)
+            } else if trait_id == b.hash {
+                mk(K::Builtin { op: hir::Builtin::Hash, args: values }, Ty::INT, span)
+            } else {
+                mk(K::Builtin { op: hir::Builtin::Copy, args: values }, ty, span)
+            };
+        }
+        let Some(func) = self.impls[impl_index].methods[index] else {
+            // The implementation is missing this method, which was already reported.
+            self.check_all(cx, args);
+            return error_expr(span);
+        };
+        if self.signatures[func.0].receiver.is_none() {
+            let name = self.traits[trait_id.0].methods[index].name.clone();
+            self.error(
+                Diagnostic::error(
+                    codes::NOT_A_FUNCTION,
+                    format!("`{name}` does not take `self`"),
+                    span,
+                    "called on a value",
+                )
+                .with_help(format!("call it on the type: `{}.{name}(...)`", self.display(ty))),
+            );
+            self.check_all(cx, args);
+            return error_expr(span);
+        }
+        self.call_func(cx, func, Some(receiver), args, span)
     }
 
     pub(super) fn method_call(
@@ -389,58 +870,72 @@ impl Checker<'_, '_> {
         args: &[ast::Arg],
         span: Span,
     ) -> hir::Expr {
-        match self.types.kind(receiver.ty).clone() {
-            TyKind::Struct(id) => {
-                let struct_name = self.structs[id.0].name.clone();
-                let Some(&func) = self.methods.get(&(id, name.name.clone())) else {
-                    let is_field = self.structs[id.0].fields.iter().any(|f| f.name == name.name);
-                    let mut diagnostic = Diagnostic::error(
-                        codes::NO_SUCH_MEMBER,
-                        format!("`{struct_name}` has no method `{}`", name.name),
-                        name.span,
-                        if is_field { "this is a field" } else { "no such method" },
-                    );
-                    if is_field {
-                        diagnostic =
-                            diagnostic.with_help(format!("fields cannot be called; read it with `.{}`", name.name));
-                    } else {
-                        let candidates: Vec<String> =
-                            self.methods.keys().filter(|(owner, _)| *owner == id).map(|(_, m)| m.clone()).collect();
-                        if let Some(s) = super::closest(&name.name, candidates.iter().map(String::as_str)) {
-                            diagnostic = diagnostic.with_help(format!("did you mean `{s}`?"));
-                        }
+        let ty = receiver.ty;
+        match self.types.kind(ty).clone() {
+            TyKind::Struct(_) | TyKind::Enum(_) => {
+                let type_name = self.display(ty);
+                if let Some(&func) = self.inherent.get(&(ty, name.name.clone())) {
+                    if self.signatures[func.0].receiver.is_none() {
+                        self.error(
+                            Diagnostic::error(
+                                codes::NOT_A_FUNCTION,
+                                format!("`{}` does not take `self`", name.name),
+                                name.span,
+                                "called on a value",
+                            )
+                            .with_help(format!("call it on the type: `{type_name}.{}(...)`", name.name)),
+                        );
+                        self.check_all(cx, args);
+                        return error_expr(span);
                     }
-                    self.error(diagnostic);
-                    self.check_all(cx, args);
-                    return error_expr(span);
-                };
-                if self.signatures[func.0].receiver.is_none() {
-                    self.error(
-                        Diagnostic::error(
-                            codes::NOT_A_FUNCTION,
-                            format!("`{}` does not take `self`", name.name),
-                            name.span,
-                            "called on a value",
-                        )
-                        .with_help(format!("call it on the type: `{struct_name}.{}(...)`", name.name)),
-                    );
-                    self.check_all(cx, args);
-                    return error_expr(span);
+                    return self.call_func(cx, func, Some(receiver), args, span);
                 }
-                let mut all = vec![receiver];
-                all.extend(self.call_args(cx, func, args, span));
-                let ret = self.signatures[func.0].ret;
-                mk(K::Call { func, args: all }, ret, span)
+                match self.trait_methods.get(&(ty, name.name.clone())).cloned().as_deref() {
+                    Some([(trait_id, index)]) => self.trait_method_call(cx, receiver, *trait_id, *index, args, span),
+                    Some(several) if several.len() > 1 => {
+                        let names: Vec<String> =
+                            several.iter().map(|(t, _)| format!("`{}`", self.traits[t.0].name)).collect();
+                        let first = self.traits[several[0].0.0].name.clone();
+                        self.error(
+                            Diagnostic::error(
+                                codes::NO_SUCH_MEMBER,
+                                format!("`{}` is a method of more than one trait `{type_name}` implements", name.name),
+                                name.span,
+                                "ambiguous",
+                            )
+                            .with_help(format!(
+                                "the traits are {}; say which one with `{first}.{}(value, ...)`",
+                                names.join(" and "),
+                                name.name
+                            )),
+                        );
+                        self.check_all(cx, args);
+                        error_expr(span)
+                    }
+                    _ => {
+                        self.unknown_method(ty, name);
+                        self.check_all(cx, args);
+                        error_expr(span)
+                    }
+                }
             }
+            TyKind::Dyn(trait_id) | TyKind::SelfType(trait_id) => match self.find_trait_method(trait_id, &name.name) {
+                Some((declaring, _, index)) => self.trait_method_call(cx, receiver, declaring, index, args, span),
+                None => {
+                    self.unknown_method(ty, name);
+                    self.check_all(cx, args);
+                    error_expr(span)
+                }
+            },
             TyKind::Error => {
                 self.check_all(cx, args);
                 error_expr(span)
             }
-            TyKind::Str | TyKind::List(_) | TyKind::Dict(..) | TyKind::Option(_) => {
+            TyKind::Str | TyKind::List(_) | TyKind::Dict(..) | TyKind::Option(_) | TyKind::Result(..) => {
                 self.builtin_method(cx, receiver, name, args, span)
             }
             _ => {
-                let shown = self.display(receiver.ty);
+                let shown = self.display(ty);
                 self.error(Diagnostic::error(
                     codes::NO_SUCH_MEMBER,
                     format!("`{shown}` has no method `{}`", name.name),
@@ -453,11 +948,67 @@ impl Checker<'_, '_> {
         }
     }
 
+    fn unknown_method(&mut self, ty: Ty, name: &ast::Ident) {
+        let shown = self.display(ty);
+        let b = self.builtin();
+        let is_field =
+            self.struct_of(ty).is_some_and(|id| self.structs[id.0].fields.iter().any(|f| f.name == name.name));
+        let derivable = match name.name.as_str() {
+            "to_str" => Some("Display"),
+            "eq" => Some("Eq"),
+            "hash" => Some("Hash"),
+            "copy" => Some("Copy"),
+            _ => None,
+        };
+        let mut diagnostic = Diagnostic::error(
+            codes::NO_SUCH_MEMBER,
+            format!("`{shown}` has no method `{}`", name.name),
+            name.span,
+            if is_field { "this is a field" } else { "no such method" },
+        );
+        if is_field {
+            diagnostic = diagnostic.with_help(format!("fields cannot be called; read it with `.{}`", name.name));
+        } else if let (Some(tr), TyKind::Struct(_) | TyKind::Enum(_)) = (derivable, self.types.kind(ty)) {
+            diagnostic = diagnostic.with_help(format!("add `@derive({tr})` to `{shown}`, or implement `{tr}` for it"));
+        } else {
+            let mut candidates: Vec<String> =
+                self.inherent.keys().filter(|(t, _)| *t == ty).map(|(_, m)| m.clone()).collect();
+            candidates.extend(self.trait_methods.keys().filter(|(t, _)| *t == ty).map(|(_, m)| m.clone()));
+            if let TyKind::Dyn(t) | TyKind::SelfType(t) = *self.types.kind(ty) {
+                for tr in self.trait_closure(t) {
+                    candidates.extend(self.traits[tr.0].methods.iter().map(|m| m.name.clone()));
+                }
+            }
+            if let Some(s) = super::closest(&name.name, candidates.iter().map(String::as_str)) {
+                diagnostic = diagnostic.with_help(format!("did you mean `{s}`?"));
+            }
+        }
+        let _ = b;
+        self.error(diagnostic);
+    }
+
     /// `Point(1, 2)` or `Point(x=1, y=2)`. Fields left out take their defaults.
     fn construct(&mut self, cx: &mut FnCx, id: crate::types::StructId, args: &[ast::Arg], span: Span) -> hir::Expr {
         let info = &self.structs[id.0];
         let (struct_name, struct_span, struct_ty, fields) =
             (info.name.clone(), info.span, info.ty, info.fields.clone());
+        match self.field_values(cx, &struct_name, struct_span, &fields, args, span) {
+            Some(values) => mk(K::StructNew { id, fields: values }, struct_ty, span),
+            None => error_expr(span),
+        }
+    }
+
+    /// Values for each field of a struct or variant, from positional and keyword arguments, with
+    /// defaults for the rest. `None` after reporting a missing field.
+    fn field_values(
+        &mut self,
+        cx: &mut FnCx,
+        owner: &str,
+        owner_span: Span,
+        fields: &[super::FieldInfo],
+        args: &[ast::Arg],
+        span: Span,
+    ) -> Option<Vec<hir::Expr>> {
         let mut values: Vec<Option<hir::Expr>> = vec![None; fields.len()];
         let mut positional = 0;
         let mut seen_keyword = false;
@@ -480,13 +1031,13 @@ impl Checker<'_, '_> {
                             Diagnostic::error(
                                 codes::WRONG_ARG_COUNT,
                                 format!(
-                                    "`{struct_name}` has {}, but more values were given",
+                                    "`{owner}` has {}, but more values were given",
                                     super::plural(fields.len(), "field")
                                 ),
                                 arg.value.span,
                                 "extra value",
                             )
-                            .with_label(struct_span, format!("`{struct_name}` is defined here")),
+                            .with_label(owner_span, format!("`{owner}` is defined here")),
                         );
                         self.expr(cx, &arg.value, None);
                         continue;
@@ -498,11 +1049,11 @@ impl Checker<'_, '_> {
                     let Some(index) = fields.iter().position(|f| f.name == name.name) else {
                         let mut diagnostic = Diagnostic::error(
                             codes::NO_SUCH_MEMBER,
-                            format!("`{struct_name}` has no field `{}`", name.name),
+                            format!("`{owner}` has no field `{}`", name.name),
                             name.span,
                             "no such field",
                         )
-                        .with_label(struct_span, format!("`{struct_name}` is defined here"));
+                        .with_label(owner_span, format!("`{owner}` is defined here"));
                         if let Some(s) = super::closest(&name.name, fields.iter().map(|f| f.name.as_str())) {
                             diagnostic = diagnostic.with_help(format!("did you mean `{s}`?"));
                         }
@@ -540,20 +1091,23 @@ impl Checker<'_, '_> {
             self.error(
                 Diagnostic::error(
                     codes::MISSING_FIELD,
-                    format!("missing {word} {list} in `{struct_name}(...)`"),
+                    format!("missing {word} {list} in `{owner}(...)`"),
                     span,
                     format!("missing {list}"),
                 )
-                .with_label(struct_span, format!("`{struct_name}` is defined here")),
+                .with_label(owner_span, format!("`{owner}` is defined here")),
             );
-            return error_expr(span);
+            return None;
         }
-        let fields: Vec<hir::Expr> = values
-            .into_iter()
-            .zip(fields)
-            .map(|(value, field)| value.unwrap_or_else(|| hir::Expr { span, ..field.default.expect("checked above") }))
-            .collect();
-        mk(K::StructNew { id, fields }, struct_ty, span)
+        Some(
+            values
+                .into_iter()
+                .zip(fields)
+                .map(|(value, field)| {
+                    value.unwrap_or_else(|| hir::Expr { span, ..field.default.clone().expect("checked above") })
+                })
+                .collect(),
+        )
     }
 
     // ---- fields, indexing, slicing ------------------------------------------------------
@@ -562,36 +1116,56 @@ impl Checker<'_, '_> {
         let span = object.span.to(name.span);
         if let ast::ExprKind::Name(type_name) = &object.kind
             && !cx.scope.contains_key(type_name)
-            && let Some(&(Global::Struct(_), _)) = self.globals.get(type_name)
         {
-            self.error(
-                Diagnostic::error(
-                    codes::NOT_SUPPORTED,
-                    format!("`{type_name}.{}` needs a value, not the type", name.name),
-                    span,
-                    "used on the type",
-                )
-                .with_help(format!(
-                    "read fields from a value of type `{type_name}`; call static methods as `{type_name}.{}(...)`",
-                    name.name
-                )),
-            );
-            return error_expr(span);
+            match self.globals.get(type_name).map(|(g, _)| *g) {
+                Some(Global::Enum(id)) => {
+                    if let Some(index) = self.enums[id.0].variants.iter().position(|v| v.name == name.name) {
+                        return self.variant_value(cx, id, index, None, span);
+                    }
+                    let candidates: Vec<String> = self.enums[id.0].variants.iter().map(|v| v.name.clone()).collect();
+                    let enum_span = self.enums[id.0].span;
+                    let mut diagnostic = Diagnostic::error(
+                        codes::NO_SUCH_MEMBER,
+                        format!("`{type_name}` has no variant `{}`", name.name),
+                        name.span,
+                        "no such variant",
+                    )
+                    .with_label(enum_span, format!("`{type_name}` is defined here"));
+                    if let Some(s) = super::closest(&name.name, candidates.iter().map(String::as_str)) {
+                        diagnostic = diagnostic.with_help(format!("did you mean `{s}`?"));
+                    }
+                    self.error(diagnostic);
+                    return error_expr(span);
+                }
+                Some(Global::Struct(_)) => {
+                    self.error(
+                        Diagnostic::error(codes::NOT_SUPPORTED, format!("`{type_name}.{}` needs a value, not the type", name.name), span, "used on the type")
+                            .with_help(format!("read fields from a value of type `{type_name}`; call static methods as `{type_name}.{}(...)`", name.name)),
+                    );
+                    return error_expr(span);
+                }
+                _ => {}
+            }
         }
         let object = self.expr(cx, object, None);
         if object.ty != Ty::ERROR && self.struct_of(object.ty).is_none() {
             let shown = self.display(object.ty);
-            let is_method = self.is_builtin_method(object.ty, &name.name);
-            let mut diagnostic = Diagnostic::error(
-                codes::NO_SUCH_MEMBER,
-                format!("`{shown}` has no field `{}`", name.name),
-                name.span,
-                if is_method { "this is a method" } else { "no such field" },
-            );
+            let is_method = self.is_builtin_method(object.ty, &name.name)
+                || self.inherent.contains_key(&(object.ty, name.name.clone()))
+                || self.trait_methods.contains_key(&(object.ty, name.name.clone()));
             if is_method {
-                diagnostic = diagnostic.with_help(format!("call it: `.{}()`", name.name));
+                self.error(
+                    Diagnostic::error(
+                        codes::NO_SUCH_MEMBER,
+                        format!("`{shown}` has no field `{}`", name.name),
+                        name.span,
+                        "this is a method",
+                    )
+                    .with_help(format!("call it: `.{}()`", name.name)),
+                );
+                return error_expr(span);
             }
-            self.error(diagnostic);
+            self.field_of(&object, name);
             return error_expr(span);
         }
         match self.field_of(&object, name) {
@@ -798,7 +1372,7 @@ impl Checker<'_, '_> {
             (None, Some((key, value))) => {
                 let key = self.expr(cx, key, None);
                 let value = self.expr(cx, value, None);
-                if !self.types.is_hashable(key.ty) {
+                if !self.hashable(key.ty) {
                     self.unhashable(key.ty, key.span);
                     return error_expr(span);
                 }
@@ -861,7 +1435,7 @@ impl Checker<'_, '_> {
                     if value.ty == Ty::ERROR {
                         continue;
                     }
-                    if !self.types.is_displayable(value.ty) {
+                    if !self.displayable(value.ty) {
                         self.not_displayable(value.ty, value.span);
                         continue;
                     }
@@ -903,9 +1477,20 @@ impl Checker<'_, '_> {
 
     pub(super) fn not_displayable(&mut self, ty: Ty, span: Span) {
         let shown = self.display(ty);
+        let help = match self.types.kind(ty) {
+            TyKind::Struct(_) | TyKind::Enum(_) => {
+                format!("add `@derive(Display)` to `{shown}`, or implement `Display` for it")
+            }
+            _ => "only values whose types implement `Display` can be printed".to_string(),
+        };
         self.error(
-            Diagnostic::error(codes::NOT_SUPPORTED, format!("a `{shown}` cannot be printed yet"), span, format!("has type `{shown}`"))
-                .with_help("printing structs needs the `Display` trait, which arrives with traits in milestone 3; print its fields instead"),
+            Diagnostic::error(
+                codes::NOT_SUPPORTED,
+                format!("a `{shown}` cannot be printed"),
+                span,
+                format!("has type `{shown}`"),
+            )
+            .with_help(help),
         );
     }
 
@@ -1058,19 +1643,19 @@ impl Checker<'_, '_> {
                 return self.bad_operands(op, &l, &r, span);
             }
             let ordering = !matches!(op, A::Eq | A::NotEq);
-            let allowed = if ordering { self.types.is_orderable(l.ty) } else { self.types.is_equatable(l.ty) };
+            let allowed = if ordering { self.orderable(l.ty) } else { self.equatable(l.ty) };
             if !allowed {
                 let shown = self.display(l.ty);
-                let help = if self.struct_of(l.ty).is_some() {
-                    if ordering {
-                        "ordering structs needs the `Ord` trait, which arrives with traits"
-                    } else {
-                        "`==` on structs needs the `Eq` trait, which arrives with traits; use `is` to check whether two values are the same object"
+                let help = match self.types.kind(l.ty) {
+                    TyKind::Struct(_) | TyKind::Enum(_) if ordering => {
+                        "ordering user types needs the `Ord` trait, which arrives in milestone 4".to_string()
                     }
-                } else if ordering {
-                    "`<` and friends work on numbers, strings and booleans"
-                } else {
-                    "comparing dicts with `==` is not supported yet"
+                    TyKind::Struct(_) => format!(
+                        "add `@derive(Eq)` to `{shown}` to compare values; use `is` to check whether two values are the same object"
+                    ),
+                    TyKind::Enum(_) => format!("add `@derive(Eq)` to `{shown}`, or use `match`"),
+                    _ if ordering => "`<` and friends work on numbers, strings and booleans".to_string(),
+                    _ => "values of this type cannot be compared with `==`".to_string(),
                 };
                 self.error(
                     Diagnostic::error(
@@ -1092,6 +1677,26 @@ impl Checker<'_, '_> {
                 _ => B::Ge,
             };
             return mk(K::Binary { op: hir_op, lhs: Box::new(l), rhs: Box::new(r) }, Ty::BOOL, span);
+        }
+
+        // `+`, `-` and `*` on user types call the number traits.
+        if l.ty == r.ty
+            && matches!(self.types.kind(l.ty), TyKind::Struct(_) | TyKind::Enum(_))
+            && matches!(op, A::Add | A::Sub | A::Mul)
+        {
+            let b = self.builtin();
+            let trait_id = match op {
+                A::Add => b.add,
+                A::Sub => b.sub,
+                _ => b.mul,
+            };
+            if let Some(index) = self.impl_of(trait_id, l.ty)
+                && let Some(func) = self.impls[index].methods[0]
+            {
+                let ret = self.signatures[func.0].ret;
+                return mk(K::Call { func, args: vec![l, r] }, ret, span);
+            }
+            return self.bad_operands(op, &l, &r, span);
         }
 
         let (hir_op, ty) = match (op, self.types.kind(l.ty), self.types.kind(r.ty)) {
@@ -1124,14 +1729,24 @@ impl Checker<'_, '_> {
     fn bad_operands(&mut self, op: ast::BinaryOp, l: &hir::Expr, r: &hir::Expr, span: Span) -> hir::Expr {
         let (ls, rs) = (self.display(l.ty), self.display(r.ty));
         let symbol = op.symbol();
-        let help = match (l.ty, r.ty) {
-            (Ty::INT, Ty::FLOAT) | (Ty::FLOAT, Ty::INT) => {
-                "numbers are not converted implicitly; convert one side with `float(...)` or `int(...)`"
+        let help = match (self.types.kind(l.ty), self.types.kind(r.ty)) {
+            (TyKind::Int, TyKind::Float) | (TyKind::Float, TyKind::Int) => {
+                "numbers are not converted implicitly; convert one side with `float(...)` or `int(...)`".to_string()
             }
-            (Ty::STR, _) | (_, Ty::STR) => {
-                "strings only combine with strings; use an f-string or `str(...)` to build text"
+            (TyKind::Str, _) | (_, TyKind::Str) => {
+                "strings only combine with strings; use an f-string or `str(...)` to build text".to_string()
             }
-            _ => "both sides must have types that support this operator",
+            (TyKind::Struct(_) | TyKind::Enum(_), _)
+                if l.ty == r.ty && matches!(op, ast::BinaryOp::Add | ast::BinaryOp::Sub | ast::BinaryOp::Mul) =>
+            {
+                let tr = match op {
+                    ast::BinaryOp::Add => "AddNumber",
+                    ast::BinaryOp::Sub => "SubNumber",
+                    _ => "MulNumber",
+                };
+                format!("implement `{tr}` for `{ls}` to use `{symbol}` on it")
+            }
+            _ => "both sides must have types that support this operator".to_string(),
         };
         self.error(
             Diagnostic::error(
@@ -1205,7 +1820,7 @@ impl Checker<'_, '_> {
         let needle = match self.types.kind(haystack.ty).clone() {
             TyKind::Str => self.expect(cx, needle, Ty::STR, None),
             TyKind::List(elem) => {
-                if !self.types.is_equatable(elem) {
+                if !self.equatable(elem) {
                     let shown = self.display(elem);
                     self.error(
                         Diagnostic::error(

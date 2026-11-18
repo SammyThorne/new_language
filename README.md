@@ -4,40 +4,57 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 
 ## Status
 
-Milestones 0 to 2 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
+Milestones 0 to 3 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
 
 ```python
-struct WordCount:
-    word: str
-    count: int
+trait Shape(Display):
+    def area(self) -> float
 
-def top(counts: dict[str, int]) -> WordCount?:
-    best: WordCount? = None
-    for word, count in counts.items():
-        if best is None or count > best.unwrap().count:
-            best = WordCount(word, count)
-    return best
+    def describe(self) -> str:
+        return f"{self} has area {self.area():.1f}"
+
+@derive(Display)
+struct Circle:
+    radius: float
+
+impl Shape for Circle:
+    def area(self) -> float:
+        return 3.14159 * self.radius ** 2
+
+enum Command:
+    Draw(size: float)
+    Quit
+
+def parse(text: str) -> Result[Command]:
+    if text == "quit":
+        return Quit
+    return Draw(float.parse(text)?)
 
 def main():
-    counts: dict[str, int] = {}
-    for word in "the cat and the hat".split():
-        counts[word] = counts.get_or(word, 0) + 1
-    winner = top(counts).unwrap()
-    print(f"most common: {winner.word} ({winner.count})")
+    for text in ["2", "quit", "big"]:
+        match parse(text):
+            case Ok(Draw(size)):
+                shape: Shape = Circle(size)
+                print(shape.describe())
+            case Ok(Quit):
+                print("bye")
+            case Err(error):
+                print("error:", error.message())
 ```
 
 | Works now | Not yet |
 |---|---|
-| Functions with type hints, `if`/`elif`/`else`, `while`, `for`, `break`, `continue` | Traits, enums, `match`, `Result` and `?` (milestone 3) |
-| `int` (wrapping), `float` (printed exactly as Python prints it), `bool`, `str` | Generics, lambdas, closures (milestone 4) |
-| Structs with defaults, methods and static methods | Modules and imports (milestone 5) |
-| `list`, `dict`, tuples, optionals (`T?`) with their usual methods | Tasks, JSON, HTTP, WebSockets (milestones 6 to 9) |
-| f-strings with Python's format specs | Sets, printing structs |
+| Functions with type hints, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | Generics, lambdas, closures (milestone 4) |
+| `int` (wrapping), `float` (printed exactly as Python prints it), `bool`, `str` | Modules and imports (milestone 5) |
+| Structs, enums, methods, traits with default methods, trait objects | Tasks, JSON, HTTP, WebSockets (milestones 6 to 9) |
+| `match` with exhaustiveness checking; `Result`, `?`, `int.parse` | Sets |
+| `@derive(Eq, Hash, Display, Copy)`, `@frozen`, operator traits | |
+| `list`, `dict`, tuples, optionals (`T?`), f-strings with Python's format specs | |
 | Panics with source locations; diagnostics with source snippets | |
 
 Constructs from the design that are not implemented are rejected with an error saying they are not supported yet.
 
-Compiled programs run 20x to 35x faster than CPython on calls, loops and allocation, and about 2x on string-and-dict-heavy code; see [bench/README.md](bench/README.md).
+Compiled programs run between 1.2x and 1.8x Go's time on allocation, collections, strings and dynamic dispatch, and faster than Go on plain function calls. Against CPython they are 11x to 35x faster, except about 2x on string-and-dict-heavy code; see [bench/README.md](bench/README.md).
 
 ## Building and running
 

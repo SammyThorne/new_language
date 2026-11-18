@@ -16,8 +16,18 @@ pub struct Module {
 pub enum Item {
     Function(Function),
     Struct(StructDecl),
+    Enum(EnumDecl),
+    Trait(TraitDecl),
     Impl(ImplDecl),
     Const(ConstDecl),
+}
+
+/// `@name` or `@name(arg, ...)` before a declaration. A fixed, compiler-known set.
+#[derive(Debug)]
+pub struct Annotation {
+    pub name: Ident,
+    pub args: Vec<Ident>,
+    pub span: Span,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,10 +49,13 @@ pub struct Function {
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
     pub body: Vec<Stmt>,
+    /// False for a trait method declared without a body (a required method).
+    pub has_body: bool,
 }
 
 #[derive(Debug)]
 pub struct StructDecl {
+    pub annotations: Vec<Annotation>,
     pub visibility: Visibility,
     pub name: Ident,
     pub fields: Vec<FieldDecl>,
@@ -58,7 +71,34 @@ pub struct FieldDecl {
 }
 
 #[derive(Debug)]
+pub struct EnumDecl {
+    pub annotations: Vec<Annotation>,
+    pub visibility: Visibility,
+    pub name: Ident,
+    pub variants: Vec<VariantDecl>,
+}
+
+#[derive(Debug)]
+pub struct VariantDecl {
+    pub name: Ident,
+    /// Payload fields; empty for a variant without a payload.
+    pub fields: Vec<FieldDecl>,
+}
+
+#[derive(Debug)]
+pub struct TraitDecl {
+    pub visibility: Visibility,
+    pub name: Ident,
+    /// Traits every implementor must also implement: `trait A(B, C):`.
+    pub supertraits: Vec<Ident>,
+    /// Required methods have `has_body == false`; the others are defaults.
+    pub methods: Vec<Function>,
+}
+
+#[derive(Debug)]
 pub struct ImplDecl {
+    /// `impl Trait for Type:`; `None` for inherent methods, `impl Type:`.
+    pub trait_name: Option<Ident>,
     /// The type the methods belong to.
     pub target: Ident,
     pub methods: Vec<Function>,
@@ -138,8 +178,46 @@ pub enum StmtKind {
         iter: Expr,
         body: Vec<Stmt>,
     },
+    Match {
+        subject: Expr,
+        cases: Vec<Case>,
+    },
     Break,
     Continue,
+    /// `pass`: does nothing; fills a block that needs no statements.
+    Pass,
+}
+
+#[derive(Debug)]
+pub struct Case {
+    pub pattern: Pattern,
+    pub guard: Option<Expr>,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Debug)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub enum PatternKind {
+    /// `_`
+    Wild,
+    /// A bare name: a variant without payload if the subject's type has one by that name
+    /// (or `None`), otherwise a new binding.
+    Name(Ident),
+    /// A literal number, string or boolean, possibly negated.
+    Literal(Expr),
+    /// `Variant(p, ...)`, `Enum.Variant(p, ...)` or `Enum.Variant`. `path` holds the names.
+    Variant {
+        path: Vec<Ident>,
+        args: Option<Vec<Pattern>>,
+    },
+    Tuple(Vec<Pattern>),
+    /// `p | q`
+    Or(Vec<Pattern>),
 }
 
 #[derive(Debug)]
@@ -215,6 +293,8 @@ pub enum ExprKind {
         then: Box<Expr>,
         otherwise: Box<Expr>,
     },
+    /// `expr?`
+    Try(Box<Expr>),
 }
 
 #[derive(Debug)]

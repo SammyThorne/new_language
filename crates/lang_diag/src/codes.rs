@@ -83,8 +83,28 @@ pub const UNPACK_MISMATCH: &str = "E0319";
 pub const BAD_INDEX: &str = "E0320";
 /// An operator applied to types it does not support.
 pub const BAD_OPERANDS: &str = "E0321";
+/// A `Result` that is neither used nor explicitly discarded.
+pub const UNUSED_RESULT: &str = "E0322";
+/// Assigning to a field of a `@frozen` struct.
+pub const FROZEN_FIELD: &str = "E0323";
+/// An implementation whose trait requires another trait the type does not implement.
+pub const MISSING_REQUIRED_TRAIT: &str = "E0324";
+/// A trait used as a type although some method prevents it.
+pub const NOT_OBJECT_SAFE: &str = "E0325";
+/// A `match` that does not cover every possible value.
+pub const NON_EXHAUSTIVE: &str = "E0326";
+/// `?` in a function whose return type cannot carry the error or `None`.
+pub const BAD_TRY: &str = "E0327";
+/// An implementation that is missing a method, has an extra one, or has the wrong signature.
+pub const BAD_IMPL: &str = "E0328";
+/// A pattern that does not fit the value being matched.
+pub const BAD_PATTERN: &str = "E0329";
+/// An annotation that does not exist or cannot be used here.
+pub const BAD_ANNOTATION: &str = "E0330";
 
 /// A variable that is assigned but never read.
 pub const UNUSED_VARIABLE: &str = "W0001";
 /// Statements after a `return`.
 pub const UNREACHABLE_CODE: &str = "W0002";
+/// A `case` that can never match, because earlier cases cover everything it would.
+pub const UNREACHABLE_CASE: &str = "W0003";

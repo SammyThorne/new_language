@@ -10,16 +10,16 @@ error[E0101]: set literals are not supported yet
 4 |     items = {1, 2}
   |             ^ not supported yet
 
-error[E0101]: `match` statements are not supported yet
+error[E0101]: `with` statements are not supported yet
  --> tests/ui/not_supported_yet.wb:5:5
   |
-5 |     match items:
-  |     ^^^^^ not supported yet
+5 |     with open("data.txt") as f:
+  |     ^^^^ not supported yet
 
 error[E0101]: `lambda` expressions are not supported yet
- --> tests/ui/not_supported_yet.wb:8:14
+ --> tests/ui/not_supported_yet.wb:7:14
   |
-8 |     double = lambda x: x * 2
+7 |     double = lambda x: x * 2
   |              ^^^^^^ not supported yet
 
 error: could not compile `tests/ui/not_supported_yet.wb` due to 4 errors

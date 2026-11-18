@@ -245,17 +245,15 @@ impl Parser<'_> {
                 | TokenKind::Pub
                 | TokenKind::Priv
                 | TokenKind::Struct
+                | TokenKind::Enum
+                | TokenKind::Trait
                 | TokenKind::Impl
-                | TokenKind::Const => match self.item() {
+                | TokenKind::Const
+                | TokenKind::At => match self.item() {
                     Ok(item) => items.push(item),
                     Err(Reported) => self.skip_statement(),
                 },
-                TokenKind::At => {
-                    let span = self.span();
-                    self.not_supported("annotations are", span);
-                    self.skip_statement();
-                }
-                kind @ (TokenKind::Trait | TokenKind::Enum | TokenKind::Import | TokenKind::From) => {
+                kind @ (TokenKind::Import | TokenKind::From) => {
                     let span = self.span();
                     self.not_supported(&format!("{} declarations are", kind.describe()), span);
                     self.skip_statement();
@@ -301,12 +299,56 @@ impl Parser<'_> {
         }
     }
 
+    /// `@name` and `@name(a, b)` lines before a declaration.
+    fn annotations(&mut self) -> PResult<Vec<Annotation>> {
+        let mut annotations = Vec::new();
+        while self.at(&TokenKind::At) {
+            let start = self.bump().span;
+            let name = self.expect_name("an annotation name after `@`")?;
+            if self.at(&TokenKind::Dot) {
+                let span = start.to(self.span());
+                return Err(self.not_supported(&format!("`@{}.` annotations are", name.name), span));
+            }
+            let mut args = Vec::new();
+            if self.eat(&TokenKind::LParen) {
+                while !self.at(&TokenKind::RParen) {
+                    args.push(self.expect_name("a name")?);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen, "to close the annotation's arguments")?;
+            }
+            let span = start.to(self.prev_span());
+            if !self.at(&TokenKind::Newline) {
+                return Err(self.unexpected("expected the annotation to end its line"));
+            }
+            self.bump();
+            annotations.push(Annotation { name, args, span });
+        }
+        Ok(annotations)
+    }
+
     fn item(&mut self) -> PResult<Item> {
+        let annotations = self.annotations()?;
         let vis_span = self.span();
         let visibility = self.visibility();
+        if let Some(first) = annotations.first()
+            && !matches!(self.peek(), TokenKind::Struct | TokenKind::Enum)
+        {
+            let span = first.span;
+            return Err(self.error(
+                "annotations are only supported on `struct` and `enum` declarations so far",
+                span,
+                "not supported here",
+                None,
+            ));
+        }
         match self.peek() {
-            TokenKind::Def => Ok(Item::Function(self.function(visibility)?)),
-            TokenKind::Struct => Ok(Item::Struct(self.struct_decl(visibility)?)),
+            TokenKind::Def => Ok(Item::Function(self.function(visibility, false)?)),
+            TokenKind::Struct => Ok(Item::Struct(self.struct_decl(annotations, visibility)?)),
+            TokenKind::Enum => Ok(Item::Enum(self.enum_decl(annotations, visibility)?)),
+            TokenKind::Trait => Ok(Item::Trait(self.trait_decl(visibility)?)),
             TokenKind::Const => Ok(Item::Const(self.const_decl(visibility)?)),
             TokenKind::Impl => {
                 if visibility != Visibility::Default {
@@ -319,16 +361,13 @@ impl Parser<'_> {
                 }
                 Ok(Item::Impl(self.impl_decl()?))
             }
-            kind @ (TokenKind::Trait | TokenKind::Enum) => {
-                let what = format!("{} declarations are", kind.describe());
-                let span = self.span();
-                Err(self.not_supported(&what, span))
-            }
-            _ => Err(self.unexpected("expected `def`, `struct` or `const`")),
+            _ => Err(self.unexpected("expected `def`, `struct`, `enum`, `trait` or `const`")),
         }
     }
 
-    fn function(&mut self, visibility: Visibility) -> PResult<Function> {
+    /// A function. Inside a trait (`in_trait`), the body may be left out to declare a required
+    /// method: `def area(self) -> float`.
+    fn function(&mut self, visibility: Visibility, in_trait: bool) -> PResult<Function> {
         self.expect(TokenKind::Def, "")?;
         let name = self.expect_name("a function name")?;
         if self.at(&TokenKind::LBracket) {
@@ -364,6 +403,10 @@ impl Parser<'_> {
         }
         self.expect(TokenKind::RParen, "to close the parameter list")?;
         let ret = if self.eat(&TokenKind::Arrow) { Some(self.type_expr()?) } else { None };
+        if in_trait && self.at_line_end() {
+            self.end_of_statement()?;
+            return Ok(Function { visibility, name, self_param, params, ret, body: Vec::new(), has_body: false });
+        }
         if !self.at(&TokenKind::Colon) {
             let found = self.peek().describe();
             let span = self.error_span();
@@ -376,10 +419,10 @@ impl Parser<'_> {
         }
         self.bump();
         let body = self.block()?;
-        Ok(Function { visibility, name, self_param, params, ret, body })
+        Ok(Function { visibility, name, self_param, params, ret, body, has_body: true })
     }
 
-    fn struct_decl(&mut self, visibility: Visibility) -> PResult<StructDecl> {
+    fn struct_decl(&mut self, annotations: Vec<Annotation>, visibility: Visibility) -> PResult<StructDecl> {
         self.bump();
         let name = self.expect_name("a struct name")?;
         if self.at(&TokenKind::LBracket) {
@@ -408,8 +451,8 @@ impl Parser<'_> {
                 TokenKind::Newline => {
                     self.bump();
                 }
-                TokenKind::Str(_) => {
-                    // A docstring.
+                TokenKind::Str(_) | TokenKind::Pass => {
+                    // A docstring, or `pass` in a struct with no fields.
                     self.bump();
                     if self.end_of_statement().is_err() {
                         self.skip_statement();
@@ -431,7 +474,7 @@ impl Parser<'_> {
                 },
             }
         }
-        Ok(StructDecl { visibility, name, fields })
+        Ok(StructDecl { annotations, visibility, name, fields })
     }
 
     fn field(&mut self) -> PResult<FieldDecl> {
@@ -453,16 +496,148 @@ impl Parser<'_> {
         Ok(FieldDecl { visibility, name, ty, default })
     }
 
+    fn enum_decl(&mut self, annotations: Vec<Annotation>, visibility: Visibility) -> PResult<EnumDecl> {
+        self.bump();
+        let name = self.expect_name("an enum name")?;
+        if self.at(&TokenKind::LBracket) {
+            let span = self.span();
+            return Err(self.not_supported("generic enums are", span));
+        }
+        self.expect(TokenKind::Colon, "after the enum name")?;
+        self.block_start()?;
+        let mut variants = Vec::new();
+        loop {
+            match self.peek() {
+                TokenKind::Dedent => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => break,
+                TokenKind::Newline => {
+                    self.bump();
+                }
+                TokenKind::Str(_) | TokenKind::Pass => {
+                    self.bump();
+                    if self.end_of_statement().is_err() {
+                        self.skip_statement();
+                    }
+                }
+                TokenKind::Def => {
+                    let span = self.span();
+                    self.error(
+                        "methods are defined in an `impl` block, not inside the enum",
+                        span,
+                        "not allowed here",
+                        Some(&format!("add `impl {}:` after the enum and put the method there", name.name)),
+                    );
+                    self.skip_statement();
+                }
+                _ => match self.variant() {
+                    Ok(variant) => variants.push(variant),
+                    Err(Reported) => self.skip_statement(),
+                },
+            }
+        }
+        Ok(EnumDecl { annotations, visibility, name, variants })
+    }
+
+    /// `Name` or `Name(field: type, ...)`.
+    fn variant(&mut self) -> PResult<VariantDecl> {
+        let name = self.expect_name("a variant name")?;
+        let mut fields = Vec::new();
+        if self.eat(&TokenKind::LParen) {
+            while !self.at(&TokenKind::RParen) {
+                let field_name = self.expect_name("a field name")?;
+                if !self.at(&TokenKind::Colon) {
+                    let span = self.error_span();
+                    return Err(self.error(
+                        format!("field `{}` needs a type", field_name.name),
+                        span,
+                        "expected `:` and a type",
+                        Some(&format!("write it as `{}: str`, with the field's type", field_name.name)),
+                    ));
+                }
+                self.bump();
+                let ty = self.type_expr()?;
+                if self.at(&TokenKind::Assign) {
+                    let span = self.span();
+                    return Err(self.not_supported("default values for variant fields are", span));
+                }
+                fields.push(FieldDecl { visibility: Visibility::Default, name: field_name, ty, default: None });
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RParen, "to close the variant's fields")?;
+        }
+        self.end_of_statement()?;
+        Ok(VariantDecl { name, fields })
+    }
+
+    fn trait_decl(&mut self, visibility: Visibility) -> PResult<TraitDecl> {
+        self.bump();
+        let name = self.expect_name("a trait name")?;
+        if self.at(&TokenKind::LBracket) {
+            let span = self.span();
+            return Err(self.not_supported("generic traits are", span));
+        }
+        let mut supertraits = Vec::new();
+        if self.eat(&TokenKind::LParen) {
+            while !self.at(&TokenKind::RParen) {
+                supertraits.push(self.expect_name("a trait name")?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RParen, "to close the list of required traits")?;
+        }
+        self.expect(TokenKind::Colon, "after the trait name")?;
+        self.block_start()?;
+        let mut methods = Vec::new();
+        loop {
+            match self.peek() {
+                TokenKind::Dedent => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => break,
+                TokenKind::Newline => {
+                    self.bump();
+                }
+                TokenKind::Str(_) | TokenKind::Pass => {
+                    self.bump();
+                    if self.end_of_statement().is_err() {
+                        self.skip_statement();
+                    }
+                }
+                TokenKind::Def | TokenKind::Pub | TokenKind::Priv => {
+                    let visibility = self.visibility();
+                    match self.function(visibility, true) {
+                        Ok(method) => methods.push(method),
+                        Err(Reported) => self.skip_statement(),
+                    }
+                }
+                _ => {
+                    self.unexpected("expected a method (`def`)");
+                    self.skip_statement();
+                }
+            }
+        }
+        Ok(TraitDecl { visibility, name, supertraits, methods })
+    }
+
     fn impl_decl(&mut self) -> PResult<ImplDecl> {
-        let impl_span = self.bump().span;
+        self.bump();
         if self.at(&TokenKind::LBracket) {
             let span = self.span();
             return Err(self.not_supported("generic `impl` blocks are", span));
         }
-        let target = self.expect_name("a type name after `impl`")?;
-        if self.at(&TokenKind::For) {
-            return Err(self.not_supported("trait implementations are", impl_span.to(self.span())));
-        }
+        let first = self.expect_name("a type or trait name after `impl`")?;
+        let (trait_name, target) = if self.eat(&TokenKind::For) {
+            (Some(first), self.expect_name("a type name after `for`")?)
+        } else {
+            (None, first)
+        };
         self.expect(TokenKind::Colon, "after the type name")?;
         self.block_start()?;
         let mut methods = Vec::new();
@@ -476,7 +651,7 @@ impl Parser<'_> {
                 TokenKind::Newline => {
                     self.bump();
                 }
-                TokenKind::Str(_) => {
+                TokenKind::Str(_) | TokenKind::Pass => {
                     self.bump();
                     if self.end_of_statement().is_err() {
                         self.skip_statement();
@@ -484,7 +659,7 @@ impl Parser<'_> {
                 }
                 TokenKind::Def | TokenKind::Pub | TokenKind::Priv => {
                     let visibility = self.visibility();
-                    match self.function(visibility) {
+                    match self.function(visibility, false) {
                         Ok(method) => methods.push(method),
                         Err(Reported) => self.skip_statement(),
                     }
@@ -495,7 +670,7 @@ impl Parser<'_> {
                 }
             }
         }
-        Ok(ImplDecl { target, methods })
+        Ok(ImplDecl { trait_name, target, methods })
     }
 
     fn const_decl(&mut self, visibility: Visibility) -> PResult<ConstDecl> {
@@ -609,6 +784,10 @@ impl Parser<'_> {
                 self.bump();
                 StmtKind::Continue
             }
+            TokenKind::Pass => {
+                self.bump();
+                StmtKind::Pass
+            }
             kind @ (TokenKind::Elif | TokenKind::Else) => {
                 return Err(self.error(
                     format!("{} without a matching `if`", kind.describe()),
@@ -617,7 +796,11 @@ impl Parser<'_> {
                     Some("`elif` and `else` must line up with the `if` they belong to"),
                 ));
             }
-            kind @ (TokenKind::Match | TokenKind::With | TokenKind::Spawn) => {
+            TokenKind::Match => return self.match_stmt(),
+            TokenKind::Case => {
+                return Err(self.error("`case` outside a `match`", start, "no `match` before this", None));
+            }
+            kind @ (TokenKind::With | TokenKind::Spawn) => {
                 return Err(self.not_supported(&format!("{} statements are", kind.describe()), start));
             }
             TokenKind::Def => return Err(self.not_supported("nested functions are", start)),
@@ -673,6 +856,152 @@ impl Parser<'_> {
             None
         };
         Ok(Stmt { kind: StmtKind::If { branches, otherwise }, span: header })
+    }
+
+    fn match_stmt(&mut self) -> PResult<Stmt> {
+        let start = self.bump().span;
+        let subject = self.expr_list()?;
+        let header = start.to(self.prev_span());
+        self.expect(TokenKind::Colon, "after the value being matched")?;
+        self.block_start()?;
+        let mut cases = Vec::new();
+        loop {
+            match self.peek() {
+                TokenKind::Dedent => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => break,
+                TokenKind::Newline => {
+                    self.bump();
+                }
+                TokenKind::Case => match self.case() {
+                    Ok(case) => cases.push(case),
+                    Err(Reported) => self.skip_statement(),
+                },
+                _ => {
+                    self.unexpected("expected `case`");
+                    self.skip_statement();
+                }
+            }
+        }
+        if cases.is_empty() {
+            return Err(self.error("a `match` needs at least one `case`", header, "no cases", None));
+        }
+        Ok(Stmt { kind: StmtKind::Match { subject, cases }, span: header })
+    }
+
+    fn case(&mut self) -> PResult<Case> {
+        self.bump();
+        let pattern = self.pattern()?;
+        let guard = if self.eat(&TokenKind::If) { Some(self.expr()?) } else { None };
+        self.expect(TokenKind::Colon, "after the pattern")?;
+        let body = self.block()?;
+        Ok(Case { pattern, guard, body })
+    }
+
+    fn pattern(&mut self) -> PResult<Pattern> {
+        let first = self.closed_pattern()?;
+        if !self.at(&TokenKind::Pipe) {
+            return Ok(first);
+        }
+        let mut alternatives = vec![first];
+        while self.eat(&TokenKind::Pipe) {
+            alternatives.push(self.closed_pattern()?);
+        }
+        let span = alternatives[0].span.to(alternatives.last().unwrap().span);
+        Ok(Pattern { kind: PatternKind::Or(alternatives), span })
+    }
+
+    fn closed_pattern(&mut self) -> PResult<Pattern> {
+        let start = self.span();
+        let literal = |kind: ExprKind, span: Span| Pattern { kind: PatternKind::Literal(Expr { kind, span }), span };
+        let pattern = match self.peek().clone() {
+            TokenKind::Name(name) if name == "_" => {
+                self.bump();
+                Pattern { kind: PatternKind::Wild, span: start }
+            }
+            TokenKind::Name(_) | TokenKind::NoneKw => {
+                let first = if self.at(&TokenKind::NoneKw) {
+                    self.bump();
+                    Ident { name: "None".to_string(), span: start }
+                } else {
+                    self.expect_name("a name")?
+                };
+                let mut path = vec![first];
+                while self.eat(&TokenKind::Dot) {
+                    path.push(self.expect_name("a variant name after `.`")?);
+                }
+                let args = if self.eat(&TokenKind::LParen) {
+                    let mut args = Vec::new();
+                    while !self.at(&TokenKind::RParen) {
+                        if matches!(self.peek(), TokenKind::Name(_)) && *self.peek_nth(1) == TokenKind::Assign {
+                            let span = self.span();
+                            return Err(self.not_supported("keyword patterns (`field=pattern`) are", span));
+                        }
+                        args.push(self.pattern()?);
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(TokenKind::RParen, "to close the pattern")?;
+                    Some(args)
+                } else {
+                    None
+                };
+                let span = start.to(self.prev_span());
+                if path.len() == 1 && args.is_none() && path[0].name != "None" {
+                    Pattern { kind: PatternKind::Name(path.pop().unwrap()), span }
+                } else {
+                    Pattern { kind: PatternKind::Variant { path, args }, span }
+                }
+            }
+            TokenKind::Int(value) => {
+                self.bump();
+                literal(ExprKind::Int(value), start)
+            }
+            TokenKind::Float(value) => {
+                self.bump();
+                literal(ExprKind::Float(value), start)
+            }
+            TokenKind::Str(value) => {
+                self.bump();
+                literal(ExprKind::Str(value), start)
+            }
+            TokenKind::True | TokenKind::False => {
+                let value = self.at(&TokenKind::True);
+                self.bump();
+                literal(ExprKind::Bool(value), start)
+            }
+            TokenKind::Minus if matches!(self.peek_nth(1), TokenKind::Int(_) | TokenKind::Float(_)) => {
+                self.bump();
+                let operand = self.primary()?;
+                let span = start.to(operand.span);
+                literal(ExprKind::Unary { op: UnaryOp::Neg, operand: Box::new(operand) }, span)
+            }
+            TokenKind::LParen => {
+                self.bump();
+                let first = self.pattern()?;
+                if !self.at(&TokenKind::Comma) {
+                    self.expect(TokenKind::RParen, "to close `(`")?;
+                    return Ok(first);
+                }
+                let mut items = vec![first];
+                while self.eat(&TokenKind::Comma) {
+                    if self.at(&TokenKind::RParen) {
+                        break;
+                    }
+                    items.push(self.pattern()?);
+                }
+                let close = self.expect(TokenKind::RParen, "to close the tuple pattern")?;
+                Pattern { kind: PatternKind::Tuple(items), span: start.to(close) }
+            }
+            TokenKind::LBracket | TokenKind::LBrace => {
+                return Err(self.not_supported("list and dict patterns are", start));
+            }
+            _ => return Err(self.unexpected("expected a pattern")),
+        };
+        Ok(pattern)
     }
 
     fn annotated_assignment(&mut self) -> PResult<Stmt> {
@@ -962,7 +1291,10 @@ impl Parser<'_> {
                             Expr { span: expr.span.to(close), kind: ExprKind::Index { object: Box::new(expr), index } };
                     }
                 }
-                TokenKind::Question => return Err(self.not_supported("the `?` operator is", span)),
+                TokenKind::Question => {
+                    self.bump();
+                    expr = Expr { span: expr.span.to(span), kind: ExprKind::Try(Box::new(expr)) };
+                }
                 _ => return Ok(expr),
             }
         }
@@ -1147,7 +1479,94 @@ mod tests {
             ExprKind::IfElse { cond, then, otherwise } => {
                 format!("({} if {} else {})", show(then), show(cond), show(otherwise))
             }
+            ExprKind::Try(inner) => format!("{}?", show(inner)),
         }
+    }
+
+    fn show_pattern(pattern: &Pattern) -> String {
+        match &pattern.kind {
+            PatternKind::Wild => "_".into(),
+            PatternKind::Name(name) => name.name.clone(),
+            PatternKind::Literal(e) => show(e),
+            PatternKind::Variant { path, args } => {
+                let path: Vec<&str> = path.iter().map(|p| p.name.as_str()).collect();
+                match args {
+                    Some(args) => {
+                        format!("{}({})", path.join("."), args.iter().map(show_pattern).collect::<Vec<_>>().join(", "))
+                    }
+                    None => path.join("."),
+                }
+            }
+            PatternKind::Tuple(items) => format!("({})", items.iter().map(show_pattern).collect::<Vec<_>>().join(", ")),
+            PatternKind::Or(alts) => alts.iter().map(show_pattern).collect::<Vec<_>>().join(" | "),
+        }
+    }
+
+    #[test]
+    fn enums_traits_and_impls() {
+        let text = "\
+@derive(Eq, Display)
+enum Shape:
+    Circle(radius: float)
+    Square(side: float)
+    Empty
+
+trait Named(Display):
+    def name(self) -> str
+
+    def greet(self) -> str:
+        return \"hi \" + self.name()
+
+impl Named for Shape:
+    def name(self) -> str:
+        return \"shape\"
+";
+        let (module, diags) = parse_text(text);
+        assert!(diags.is_empty(), "{:?}", codes_of(&diags));
+        let Item::Enum(shape) = &module.items[0] else { panic!() };
+        assert_eq!(shape.annotations[0].name.name, "derive");
+        assert_eq!(shape.annotations[0].args.len(), 2);
+        assert_eq!(shape.variants.len(), 3);
+        assert_eq!(shape.variants[0].fields.len(), 1);
+        let Item::Trait(named) = &module.items[1] else { panic!() };
+        assert_eq!(named.supertraits[0].name, "Display");
+        assert!(!named.methods[0].has_body && named.methods[1].has_body);
+        let Item::Impl(imp) = &module.items[2] else { panic!() };
+        assert_eq!(imp.trait_name.as_ref().unwrap().name, "Named");
+        assert_eq!(imp.target.name, "Shape");
+    }
+
+    #[test]
+    fn match_and_patterns() {
+        let text = "\
+def main():
+    match value:
+        case Circle(r) if r > 1.0:
+            x = 1
+        case Shape.Square(_) | Empty:
+            x = 2
+        case (1, \"a\", -2, True):
+            x = 3
+        case Some(Ok(x)) | None:
+            x = 4
+        case other:
+            x = 5
+";
+        let (module, diags) = parse_text(text);
+        assert!(diags.is_empty(), "{:?}", codes_of(&diags));
+        let StmtKind::Match { cases, .. } = &function(&module, 0).body[0].kind else { panic!() };
+        let shown: Vec<String> = cases.iter().map(|c| show_pattern(&c.pattern)).collect();
+        assert_eq!(
+            shown,
+            ["Circle(r)", "Shape.Square(_) | Empty", "(1, \"a\", (- 2), True)", "Some(Ok(x)) | None", "other"]
+        );
+        assert!(cases[0].guard.is_some());
+    }
+
+    #[test]
+    fn question_mark_is_postfix() {
+        assert_eq!(expr_of("load(id)?.name"), "load(id)?.name");
+        assert_eq!(expr_of("int.parse(s)? + 1"), "(int.parse(s)? + 1)");
     }
 
     fn function(module: &Module, index: usize) -> &Function {
@@ -1220,7 +1639,7 @@ def main():
     elif x < 0:
         x = 0
     else:
-        pass_ = 1
+        x = 1
     while True:
         break
     for k, v in d.items():
@@ -1274,7 +1693,7 @@ impl User:
     #[test]
     fn errors_recover_at_the_next_statement() {
         let (module, diags) =
-            parse_text("def main():\n    match x:\n        y()\n    print(1 +)\n    z()\n\ndef other():\n    w()\n");
+            parse_text("def main():\n    with x:\n        y()\n    print(1 +)\n    z()\n\ndef other():\n    w()\n");
         assert_eq!(codes_of(&diags), [codes::NOT_SUPPORTED_SYNTAX, codes::UNEXPECTED_TOKEN]);
         assert_eq!(module.items.len(), 2);
         assert_eq!(function(&module, 0).body.len(), 1, "only `z()` survives");

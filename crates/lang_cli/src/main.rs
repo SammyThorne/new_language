@@ -146,7 +146,7 @@ fn frontend(file: &Path, emit: Option<Emit>) -> Result<Option<(hir::Program, Sou
         None
     } else {
         let module_name = file.file_stem().map_or("main".into(), |stem| stem.to_string_lossy().into_owned());
-        lang_sema::check(&module, &module_name, &mut diags)
+        lang_sema::check(&module, &mut sources, &module_name, &mut diags)
     };
     report(&display, &sources, &diags)?;
     let program = program.ok_or_else(|| internal_error("type checking failed without reporting an error".into()))?;

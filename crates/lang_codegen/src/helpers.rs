@@ -23,6 +23,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         let name = self.program.types.display(ty);
         let (label, fn_type, fast) = match helper {
             Helper::Eq => ("eq", self.cx.bool_type().fn_type(&[value.into(), value.into()], false), true),
+            Helper::Hash => ("hash", i64_type.fn_type(&[value.into()], false), true),
             Helper::EqPtr => ("eq_ptr", i64_type.fn_type(&[ptr.into(), ptr.into()], false), false),
             Helper::HashPtr => ("hash_ptr", i64_type.fn_type(&[ptr.into()], false), false),
             Helper::CmpPtr => ("cmp_ptr", i64_type.fn_type(&[ptr.into(), ptr.into()], false), false),
@@ -40,6 +41,11 @@ impl<'ctx> Codegen<'ctx, '_> {
         self.helpers.insert((helper, ty), function);
         self.in_function(function, |this| match helper {
             Helper::Eq => this.eq_body(function, ty),
+            Helper::Hash => {
+                let v = function.get_nth_param(0).unwrap();
+                let hash = this.derived_hash(ty, v);
+                this.b.build_return(Some(&hash)).must();
+            }
             Helper::EqPtr => {
                 let a = this.load_param(function, 0, ty);
                 let b = this.load_param(function, 1, ty);
@@ -108,13 +114,72 @@ impl<'ctx> Codegen<'ctx, '_> {
                 phi.add_incoming(&[(&same_presence as &dyn BasicValue, start), (&inner_eq, compare_end)]);
                 phi.as_basic_value().into_int_value()
             }
+            TyKind::Struct(id) => {
+                let mut all = self.bool(true);
+                for index in 0..self.program.structs[id.0].fields.len() {
+                    let field_ty = self.program.structs[id.0].fields[index].ty;
+                    let x = self.struct_field(ty, index, a);
+                    let y = self.struct_field(ty, index, b);
+                    let eq = self.emit_eq(field_ty, x, y);
+                    all = self.b.build_and(all, eq, "").must();
+                }
+                all
+            }
+            TyKind::Enum(id) => {
+                // Equal tags, then equal fields for that variant.
+                let result = self.alloca(self.cx.bool_type().into(), "equal");
+                self.b.build_store(result, self.bool(false)).must();
+                let tag_a = self.enum_tag(ty, a);
+                let tag_b = self.enum_tag(ty, b);
+                let same = self.b.build_int_compare(IntPredicate::EQ, tag_a, tag_b, "").must();
+                let compare = self.block("same_variant");
+                let done = self.block("done");
+                self.b.build_conditional_branch(same, compare, done).must();
+                self.b.position_at_end(compare);
+                self.for_each_variant(ty, a, done, |this, variant| {
+                    let mut all = this.bool(true);
+                    for field in 0..this.program.enums[id.0].variants[variant].fields.len() {
+                        let field_ty = this.program.enums[id.0].variants[variant].fields[field].ty;
+                        let x = this.variant_field(ty, variant, field, a);
+                        let y = this.variant_field(ty, variant, field, b);
+                        let eq = this.emit_eq(field_ty, x, y);
+                        all = this.b.build_and(all, eq, "").must();
+                    }
+                    this.b.build_store(result, all).must();
+                });
+                self.b.position_at_end(done);
+                self.b.build_load(self.cx.bool_type(), result, "").must().into_int_value()
+            }
+            TyKind::Result(ok_ty, err_ty) => {
+                let ok_a = self.result_is_ok(a);
+                let ok_b = self.result_is_ok(b);
+                let same = self.b.build_int_compare(IntPredicate::EQ, ok_a, ok_b, "").must();
+                let ok_payloads = match (self.result_ok(ty, a), self.result_ok(ty, b)) {
+                    (Some(x), Some(y)) => self.emit_eq(ok_ty, x, y),
+                    _ => self.bool(true),
+                };
+                let (ea, eb) = (self.result_err(ty, a), self.result_err(ty, b));
+                let err_payloads = self.emit_eq(err_ty, ea, eb);
+                let payloads = self.b.build_select(ok_a, ok_payloads, err_payloads, "").must().into_int_value();
+                self.b.build_and(same, payloads, "").must()
+            }
             other => unreachable!("no equality helper for {other:?}"),
         };
         self.b.build_return(Some(&result)).must();
     }
 
-    fn emit_hash(&mut self, ty: Ty, value: BasicValueEnum<'ctx>) -> IntValue<'ctx> {
+    pub(crate) fn emit_hash(&mut self, ty: Ty, value: BasicValueEnum<'ctx>) -> IntValue<'ctx> {
         match self.kind(ty).clone() {
+            TyKind::Struct(_) | TyKind::Enum(_) => {
+                let hash_trait = self.program.builtins.hash;
+                if let Some(function) = self.explicit_method(hash_trait, ty, 0) {
+                    return self.call_method(function, &[value]).unwrap().into_int_value();
+                }
+                let helper = self.helper(Helper::Hash, ty);
+                let call = self.b.build_call(helper, &[value.into()], "").must();
+                call.set_call_convention(crate::CALLCONV_FAST);
+                call.try_as_basic_value().basic().unwrap().into_int_value()
+            }
             TyKind::Int => value.into_int_value(),
             TyKind::Bool => self.b.build_int_z_extend(value.into_int_value(), self.cx.i64_type(), "").must(),
             TyKind::Str => {
@@ -133,6 +198,79 @@ impl<'ctx> Codegen<'ctx, '_> {
                 hash
             }
             other => unreachable!("cannot hash {other:?}"),
+        }
+    }
+
+    /// A derived `Hash`: the fields' hashes combined, with the tag for enums.
+    fn derived_hash(&mut self, ty: Ty, value: BasicValueEnum<'ctx>) -> IntValue<'ctx> {
+        let combine = |this: &mut Self, hash: IntValue<'ctx>, part: IntValue<'ctx>| {
+            let mixed = this.b.build_xor(hash, part, "").must();
+            this.b.build_int_mul(mixed, this.i64(1_000_003), "").must()
+        };
+        match self.kind(ty).clone() {
+            TyKind::Struct(id) => {
+                let mut hash = self.i64(0x345678);
+                for index in 0..self.program.structs[id.0].fields.len() {
+                    let field_ty = self.program.structs[id.0].fields[index].ty;
+                    let field = self.struct_field(ty, index, value);
+                    let part = self.emit_hash(field_ty, field);
+                    hash = combine(self, hash, part);
+                }
+                hash
+            }
+            TyKind::Enum(id) => {
+                let slot = self.alloca(self.cx.i64_type().into(), "hash");
+                let tag = self.enum_tag(ty, value);
+                let start = combine(self, self.i64(0x345678), tag);
+                self.b.build_store(slot, start).must();
+                let done = self.block("hashed");
+                self.for_each_variant(ty, value, done, |this, variant| {
+                    let mut hash = this.b.build_load(this.cx.i64_type(), slot, "").must().into_int_value();
+                    for field in 0..this.program.enums[id.0].variants[variant].fields.len() {
+                        let field_ty = this.program.enums[id.0].variants[variant].fields[field].ty;
+                        let v = this.variant_field(ty, variant, field, value);
+                        let part = this.emit_hash(field_ty, v);
+                        hash = combine(this, hash, part);
+                    }
+                    this.b.build_store(slot, hash).must();
+                });
+                self.b.position_at_end(done);
+                self.b.build_load(self.cx.i64_type(), slot, "").must().into_int_value()
+            }
+            other => unreachable!("no derived hash for {other:?}"),
+        }
+    }
+
+    pub(crate) fn struct_field(&mut self, ty: Ty, index: usize, value: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        let TyKind::Struct(id) = *self.kind(ty) else { unreachable!("not a struct") };
+        let field_ty = self.program.structs[id.0].fields[index].ty;
+        let ptr =
+            self.b.build_struct_gep(self.struct_types[id.0], value.into_pointer_value(), index as u32 + 1, "").must();
+        self.b.build_load(self.value_type(field_ty), ptr, "").must()
+    }
+
+    /// Run `body` once per variant, in a block reached by switching on the tag of `value`, then
+    /// continue at `done`. The builder ends positioned nowhere useful; position it at `done`.
+    pub(crate) fn for_each_variant(
+        &mut self,
+        ty: Ty,
+        value: BasicValueEnum<'ctx>,
+        done: inkwell::basic_block::BasicBlock<'ctx>,
+        mut body: impl FnMut(&mut Self, usize),
+    ) {
+        let TyKind::Enum(id) = *self.kind(ty) else { unreachable!("not an enum") };
+        let tag = self.enum_tag(ty, value);
+        let count = self.program.enums[id.0].variants.len();
+        let blocks: Vec<_> = (0..count).map(|_| self.block("variant")).collect();
+        let impossible = self.block("bad_tag");
+        let cases: Vec<_> = blocks.iter().enumerate().map(|(i, block)| (self.i64(i as i64), *block)).collect();
+        self.b.build_switch(tag, impossible, &cases).must();
+        self.b.position_at_end(impossible);
+        self.b.build_unreachable().must();
+        for (variant, block) in blocks.into_iter().enumerate() {
+            self.b.position_at_end(block);
+            body(self, variant);
+            self.b.build_unconditional_branch(done).must();
         }
     }
 
@@ -257,6 +395,59 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.build_unconditional_branch(header).must();
                 self.b.position_at_end(exit);
                 self.push_text(builder, "}");
+            }
+            TyKind::Struct(id) => {
+                // Like a Python dataclass: `Point(x=1, y=2)`.
+                let def = &self.program.structs[id.0];
+                let (name, fields): (String, Vec<(String, Ty)>) =
+                    (def.name.clone(), def.fields.iter().map(|f| (f.name.clone(), f.ty)).collect());
+                self.push_text(builder, &format!("{name}("));
+                for (index, (field_name, field_ty)) in fields.iter().enumerate() {
+                    let separator = if index == 0 { "" } else { ", " };
+                    self.push_text(builder, &format!("{separator}{field_name}="));
+                    let field = self.struct_field(ty, index, value);
+                    self.push_value(builder, *field_ty, Some(field), true);
+                }
+                self.push_text(builder, ")");
+            }
+            TyKind::Enum(id) => {
+                let done = self.block("printed");
+                self.for_each_variant(ty, value, done, |this, variant| {
+                    let def = &this.program.enums[id.0].variants[variant];
+                    let (name, fields): (String, Vec<(String, Ty)>) =
+                        (def.name.clone(), def.fields.iter().map(|f| (f.name.clone(), f.ty)).collect());
+                    this.push_text(builder, &name);
+                    if fields.is_empty() {
+                        return;
+                    }
+                    this.push_text(builder, "(");
+                    for (index, (field_name, field_ty)) in fields.iter().enumerate() {
+                        let separator = if index == 0 { "" } else { ", " };
+                        this.push_text(builder, &format!("{separator}{field_name}="));
+                        let field = this.variant_field(ty, variant, index, value);
+                        this.push_value(builder, *field_ty, Some(field), true);
+                    }
+                    this.push_text(builder, ")");
+                });
+                self.b.position_at_end(done);
+            }
+            TyKind::Result(ok_ty, err_ty) => {
+                let ok = self.result_is_ok(value);
+                let (ok_block, err_block, done) = (self.block("ok"), self.block("err"), self.block("done"));
+                self.b.build_conditional_branch(ok, ok_block, err_block).must();
+                self.b.position_at_end(ok_block);
+                self.push_text(builder, "Ok(");
+                let payload = self.result_ok(ty, value);
+                self.push_value(builder, ok_ty, payload, true);
+                self.push_text(builder, ")");
+                self.b.build_unconditional_branch(done).must();
+                self.b.position_at_end(err_block);
+                self.push_text(builder, "Err(");
+                let error = self.result_err(ty, value);
+                self.push_value(builder, err_ty, Some(error), true);
+                self.push_text(builder, ")");
+                self.b.build_unconditional_branch(done).must();
+                self.b.position_at_end(done);
             }
             other => unreachable!("no print helper for {other:?}"),
         }

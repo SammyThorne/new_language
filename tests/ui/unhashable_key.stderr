@@ -4,6 +4,6 @@ error[E0313]: `float` cannot be used as a dict key
 2 |     prices: dict[float, str] = {}
   |                  ^^^^^ not hashable
   |
-  = help: dict keys can be `int`, `str`, `bool`, or tuples of those
+  = help: dict keys can be `int`, `str`, `bool`, tuples of those, or types that implement `Hash`
 
 error: could not compile `tests/ui/unhashable_key.wb` due to 1 error

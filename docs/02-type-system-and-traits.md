@@ -226,19 +226,21 @@ Each of these has a real use and can be added later without breaking existing pr
 
 ## Built-in traits
 
+The built-in traits are defined in the prelude, `crates/lang_sema/src/prelude.lang`, a small file in the language itself that is compiled with every program. They are ordinary traits; the compiler gives them meaning, as the table says. The prelude also defines `ParseError`, the error type of `int.parse` and `float.parse`.
+
 | Trait | Enables | Derivable | Milestone |
 |---|---|---|---|
-| `Display` | `str(x)`, f-string interpolation, `print(x)` | yes (field dump) | M3 |
-| `Eq` | `==`, `!=` | yes | M3 |
+| `Display` | `str(x)`, f-string interpolation, `print(x)`; method `to_str(self) -> str` | yes, printed like a Python dataclass: `Point(x=1, y=2)` | M3 |
+| `Eq` | `==`, `!=`; method `eq(self, other: Self) -> bool` | yes | M3 |
 | `Ord` | `<`, `<=`, `>`, `>=`, `sorted`, `min`, `max` | yes (lexicographic) | M4 |
-| `Hash` | Use as `dict` key or `set` element (requires `Eq`) | yes | M3 |
-| `Copy` | `x.copy()` shallow copy | yes | M3 |
+| `Hash` | Use as `dict` key or `set` element (requires `Eq`); method `hash(self) -> int` | yes | M3 |
+| `Copy` | `x.copy()` shallow copy; method `copy(self) -> Self` | yes | M3 |
 | `AddNumber`, `SubNumber`, `MulNumber` | `+`, `-`, `*` between two values of the same type | no | M3 |
 | `Number` | Shorthand bound for `AddNumber + SubNumber + MulNumber + Ord` | no | M4 |
 | `Shareable` | May be passed to another task. Decided by the compiler, never implemented by hand | automatic | M6 |
 | `Iterable[T]` | `for x in value` | no | M4 |
 | `Iterator[T]` | One method, `next(self) -> T?` | no | M4 |
-| `Error` | Use as the error in `Result[T]` | no | M3 |
+| `Error` | Use as the error in `Result[T]`; method `message(self) -> str` | no | M3 |
 | `Scoped[T]` | `with value as name:`; `enter(self) -> T` and `exit(self)` | no | M5 |
 | `ToJson`, `FromJson` | `json.encode`, `json.decode`; both come from `@derive(Json)` | yes | M7 |
 
