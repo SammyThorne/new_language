@@ -1,0 +1,12 @@
+# expect: printed before the panic
+# expect-exit: 101
+# expect-stderr: panic: something went wrong
+
+def check(value: int) -> int:
+    if value < 0:
+        panic("something went wrong")
+    return value
+
+def main():
+    print("printed before the panic")
+    print(check(-1))

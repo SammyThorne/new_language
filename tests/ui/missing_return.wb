@@ -1,0 +1,5 @@
+def answer() -> int:
+    print("thinking")
+
+def main():
+    print(answer())

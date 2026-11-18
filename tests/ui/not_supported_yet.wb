@@ -1,0 +1,9 @@
+import json
+
+def main():
+    items = {1, 2}
+    match items:
+        case _:
+            print("no")
+    double = lambda x: x * 2
+    print("still checked")

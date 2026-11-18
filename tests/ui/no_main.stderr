@@ -1,0 +1,9 @@
+error[E0202]: the program has no `main` function
+ --> tests/ui/no_main.wb:1:1
+  |
+1 | def helper():
+  | ^
+  |
+  = help: add `def main():`; the program starts running there
+
+error: could not compile `tests/ui/no_main.wb` due to 1 error

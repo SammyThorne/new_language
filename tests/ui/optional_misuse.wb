@@ -1,0 +1,7 @@
+def lookup(ages: dict[str, int], name: str) -> int:
+    return ages.get(name)
+
+def main():
+    ages = {"Ada": 36}
+    count: int = None
+    print(lookup(ages, "Ada"), count)

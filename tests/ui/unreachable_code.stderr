@@ -1,0 +1,8 @@
+warning[W0002]: unreachable code
+ --> tests/ui/unreachable_code.wb:3:5
+  |
+3 |     print("never")
+  |     ^^^^^^^^^^^^^^ this never runs
+  |
+  = help: it comes after a statement that always leaves this block
+

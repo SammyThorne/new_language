@@ -1,0 +1,7 @@
+[package]
+name = "lang_format"
+description = "Python-compatible number formatting and format specs, shared by the compiler and the runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true

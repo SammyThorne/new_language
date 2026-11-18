@@ -1,0 +1,17 @@
+n = 20_000_000
+flags: list[bool] = []
+for _ in range(n + 1):
+    flags.append(True)
+flags[0] = False
+flags[1] = False
+i = 2
+while i * i <= n:
+    if flags[i]:
+        for j in range(i * i, n + 1, i):
+            flags[j] = False
+    i += 1
+count = 0
+for flag in flags:
+    if flag:
+        count += 1
+print(count)

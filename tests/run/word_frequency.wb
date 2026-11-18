@@ -1,0 +1,57 @@
+# Milestone 2 exit program: count words in a text with structs, lists, dicts and strings.
+# expect: 46 words, 30 distinct
+# expect:  9  the
+# expect:  4  of
+# expect:  2  a
+# expect:  2  and
+# expect:  2  goal
+# expect: longest: "readability"
+
+const TEXT = """
+The language reads like Python and runs like a compiled program.
+Readability is the first goal, and speed is the second goal.
+The rest of the plan follows from those two goals: the shape of the syntax,
+the choice of a collector, the design of traits.
+"""
+
+struct WordCount:
+    word: str
+    count: int
+
+def normalise(word: str) -> str:
+    return word.lower().strip().replace(",", "").replace(".", "").replace(":", "")
+
+def main():
+    counts: dict[str, int] = {}
+    total = 0
+    for raw in TEXT.split():
+        word = normalise(raw)
+        if word == "":
+            continue
+        counts[word] = counts.get_or(word, 0) + 1
+        total += 1
+
+    entries: list[WordCount] = []
+    for word, count in counts.items():
+        entries.append(WordCount(word, count))
+
+    print(f"{total} words, {len(counts)} distinct")
+
+    # Selection of the top five by count, ties broken alphabetically.
+    shown = 0
+    while shown < 5:
+        best = 0
+        for i in range(1, len(entries)):
+            a = entries[i]
+            b = entries[best]
+            if a.count > b.count or (a.count == b.count and a.word < b.word):
+                best = i
+        top = entries.pop(best)
+        print(f"{top.count:>2}  {top.word}")
+        shown += 1
+
+    longest = ""
+    for word in counts.keys():
+        if len(word) > len(longest):
+            longest = word
+    print(f"longest: \"{longest}\"")

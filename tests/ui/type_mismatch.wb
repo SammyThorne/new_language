@@ -1,0 +1,5 @@
+def test(a: int) -> str:
+    return a
+
+def main():
+    print(test(1))

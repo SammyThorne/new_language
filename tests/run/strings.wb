@@ -1,0 +1,24 @@
+# String literals, escapes and printing.
+# expect: quote: "double" and 'single'
+# expect: back\slash
+# expect: unicode: héllo wörld ✓ é
+# expect: two
+# expect: lines
+# expect:
+# expect: a b c
+# expect: same text, emitted once
+
+def main():
+    print("quote: \"double\" and 'single'")
+    print('back\\slash')
+    print("unicode: héllo wörld ✓ \u{e9}")
+    print("""two
+lines""")
+    print()
+    print(
+        "a",
+        "b",    # newlines and comments inside brackets are ignored
+        "c",
+    )
+    message = "same text, emitted once"
+    print(message)

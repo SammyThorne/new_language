@@ -1,0 +1,5 @@
+def area(w, h: int) -> int:
+    return h
+
+def main():
+    print(area(2, 3))

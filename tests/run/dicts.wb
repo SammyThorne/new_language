@@ -1,0 +1,43 @@
+# Dicts: literals, lookup, update, removal, insertion order, iteration, printing.
+# expect: {'a': 1, 'b': 2} 2 1
+# expect: 0 2 None 5
+# expect: {'b': 2, 'c': 3, 'a': 4}
+# expect: ['b', 'c', 'a'] [2, 3, 4] [('b', 2), ('c', 3), ('a', 4)]
+# expect: b=2 c=3 a=4
+# expect: True False 3
+# expect: 1000 499500 7
+# expect: {(1, 2): 'x', (3, 4): 'y'} y
+# expect: {} 0
+
+def main():
+    d = {"a": 1, "b": 2}
+    print(d, d["b"], d.get("a").unwrap())
+    print(d.get_or("z", 0), d.get_or("b", 0), d.get("z"), d.get("b").unwrap_or(0) + 3)
+    d["c"] = 3
+    removed = d.pop("a")
+    d["a"] = removed.unwrap() + 3
+    print(d)
+    print(d.keys(), d.values(), d.items())
+    line = ""
+    for key, value in d.items():
+        line = line + f"{key}={value} "
+    print(line.strip())
+    print("a" in d, "z" in d, len(d))
+
+    squares: dict[int, int] = {}
+    for i in range(1000):
+        squares[i] = i
+    for i in range(0, 1000, 2):
+        squares[i] += 0
+    total = 0
+    for number in squares:
+        total += squares[number]
+    for i in range(10, 1000):
+        squares.pop(i)
+    squares[3] += 4
+    print(1000, total, squares[3])
+
+    grid = {(1, 2): "x", (3, 4): "y"}
+    print(grid, grid[(3, 4)])
+    grid.clear()
+    print(grid, len(grid))

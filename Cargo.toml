@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+lang_names = { path = "crates/lang_names" }
+lang_format = { path = "crates/lang_format" }
+lang_diag = { path = "crates/lang_diag" }
+lang_syntax = { path = "crates/lang_syntax" }
+lang_sema = { path = "crates/lang_sema" }
+lang_codegen = { path = "crates/lang_codegen" }
+# LLVM 19 is the pinned backend (docs/08-decisions-and-risks.md, D2). `prefer-dynamic`
+# links the system libLLVM-19.so instead of the static archives.
+inkwell = { version = "0.11", default-features = false, features = ["llvm19-1-prefer-dynamic", "target-x86"] }
+clap = { version = "4", features = ["derive"] }

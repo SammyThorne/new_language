@@ -1,0 +1,28 @@
+# Tuples: literals, unpacking, swapping, indexing, equality, printing.
+# expect: (1, 'one') 1 one
+# expect: 2 1
+# expect: (7,) True
+# expect: 6 x
+
+def min_max(xs: list[int]) -> tuple[int, int]:
+    low = xs[0]
+    high = xs[0]
+    for x in xs:
+        if x < low:
+            low = x
+        if x > high:
+            high = x
+    return low, high
+
+def main():
+    pair = (1, "one")
+    number, name = pair
+    print(pair, number, name)
+    a = 1
+    b = 2
+    a, b = b, a
+    print(a, b)
+    single = (7,)
+    print(single, (1, "a") == (1, "a"))
+    low, high = min_max([4, 6, 1])
+    print(low + high - 1, (1, "x")[-1])

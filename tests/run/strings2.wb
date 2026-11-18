@@ -1,0 +1,25 @@
+# String methods, slicing, comparison, iteration and f-strings.
+# expect: HELLO, WORLD|hello, world|Hello, World
+# expect: ['a', 'b', 'c'] ['x', 'y', 'z'] a-b-c
+# expect: 7 -1 True False True True
+# expect: Hello World ld He
+# expect: h-é-l-l-o
+# expect: 12 True False
+# expect: [0042] 'quoted' and "plain"
+# expect: True False True
+
+def main():
+    text = "  Hello, World  "
+    t = text.strip()
+    print(f"{t.upper()}|{t.lower()}|{t}")
+    print("a,b,c".split(","), "  x  y\tz ".split(), "-".join(["a", "b", "c"]))
+    print(t.find("World"), t.find("nope"), t.starts_with("Hello"), t.ends_with("Hello"), "World" in t, t.contains(", "))
+    print(t.replace(",", ""), t[-2:], t[:2])
+    letters: list[str] = []
+    for ch in "héllo":
+        letters.append(ch)
+    print("-".join(letters))
+    print(len(t), "apple" < "banana", "a" == "b")
+    print(f"[{42:04d}]", str(["quoted"])[1:-1], "and", "\"plain\"")
+    empty = ""
+    print(empty == "", len(empty) > 0, "" in "abc")

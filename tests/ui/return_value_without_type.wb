@@ -1,0 +1,5 @@
+def double(n: int):
+    return n * 2
+
+def main():
+    double(2)

@@ -1,0 +1,8 @@
+def average(total: int, count: int) -> float:
+    return total / count
+
+def main():
+    count = 3
+    scale = 1.5
+    print(average(10, count) * count)
+    print(count * scale)

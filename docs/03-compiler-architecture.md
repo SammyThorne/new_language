@@ -10,6 +10,7 @@ A Cargo workspace. Few crates at first; split further only when compile times or
 |---|---|---|
 | `crates/lang_names` | library | The language name, CLI name, file extension and environment prefix as constants (see below) |
 | `crates/lang_diag` | library | Source map, spans, diagnostic type, rendering, error codes |
+| `crates/lang_format` | library | Python's format-spec mini-language and float formatting, shared by the compiler (to check f-string specs) and the runtime (to apply them) |
 | `crates/lang_syntax` | library | Tokens, lexer, AST, parser |
 | `crates/lang_sema` | library | Module graph, name resolution, type interner, type checker, trait tables, HIR, derivations, monomorphisation |
 | `crates/lang_codegen` | library | HIR to LLVM IR through `inkwell`, object emission |

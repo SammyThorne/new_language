@@ -40,9 +40,14 @@ As of 2026-11-18.
 | Milestone | State | Notes |
 |---|---|---|
 | M0 | Done | Workspace, runtime, LLVM object emission, linking, end-to-end test harness. Continuous integration is not set up, because the repository has no remote yet |
-| M1 | In progress | Done: the full layout lexer, parser with error recovery, diagnostics with golden tests, functions with typed parameters and returns, calls in any order, locals by assignment, `int` arithmetic (`+ - *`, wrapping), `bool` with `not`, `str` literals, `print`, `--emit` dumps, debug and release modes. Missing: `if`/`elif`/`else`, `while`, `for` over `range`, `break`/`continue`, comparison operators, `//` and `%` with their division-by-zero panic, `float`, definite assignment across branches, the first benchmark |
+| M1 | Done | Everything listed below, with `float` formatted exactly as CPython does. The first benchmark is recorded in [bench/README.md](../bench/README.md) |
+| M2 | Done | Everything listed below. Gate 1 passed. Sets and `str(struct)` are not included: sets were not in the milestone, and printing structs needs `Display` (M3) |
 
-Exit criteria checked so far: `weby run tests/run/hello.wb` prints `Hello, world!` in debug and release builds, and 17 diagnostic programs have golden tests.
+Exit programs, all in `tests/run/`: `fizzbuzz.wb`, `primes.wb` and `fib.wb` (M1), and `word_frequency.wb` (M2). The binary-trees benchmark is in `bench/`.
+
+**Gate 1 result.** Allocation-heavy code (binary trees, depth 18) runs 20.6x faster than CPython 3.13, against a target of 10x. All 20 test programs pass in the GC stress mode. The weakest benchmark is string-and-dict-heavy work at 1.9x CPython; [bench/README.md](../bench/README.md) explains why and what fixes it.
+
+Choices made during M1 and M2 that the earlier documents did not settle are recorded in [08](08-decisions-and-risks.md) as D21 to D25.
 
 ## Milestones in detail
 

@@ -1,0 +1,8 @@
+warning[W0001]: variable `unused` is assigned but never used
+ --> tests/ui/unused_variable.wb:2:5
+  |
+2 |     unused = 1
+  |     ^^^^^^ assigned here
+  |
+  = help: if this is intentional, start the name with an underscore: `_unused`
+

@@ -1,0 +1,9 @@
+error[E0300]: expected `int`, found `str`
+ --> tests/ui/variable_type_change.wb:3:13
+  |
+2 |     count = 0
+  |     ----- `count` was declared as `int` here
+3 |     count = "zero"
+  |             ^^^^^^ expected `int`, found `str`
+
+error: could not compile `tests/ui/variable_type_change.wb` due to 1 error

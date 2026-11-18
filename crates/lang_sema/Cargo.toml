@@ -1,0 +1,12 @@
+[package]
+name = "lang_sema"
+description = "Name resolution and type checking; produces typed HIR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+lang_diag.workspace = true
+lang_syntax.workspace = true
+lang_format.workspace = true

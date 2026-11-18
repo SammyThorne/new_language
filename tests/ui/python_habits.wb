@@ -1,0 +1,9 @@
+class User:
+    name: str
+
+print("top level")
+
+def main():
+    done = true
+    try:
+        print(done)

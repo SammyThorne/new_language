@@ -1,0 +1,4 @@
+def main():
+    names = []
+    names.append("Ada")
+    print(names)

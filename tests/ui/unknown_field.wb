@@ -1,0 +1,7 @@
+struct User:
+    name: str
+    email: str
+
+def main():
+    user = User("Ada", "ada@example.com")
+    print(user.mail)

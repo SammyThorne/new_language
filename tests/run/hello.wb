@@ -1,0 +1,4 @@
+# expect: Hello, world!
+
+def main():
+    print("Hello, world!")

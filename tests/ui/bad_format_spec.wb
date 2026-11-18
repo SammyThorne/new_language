@@ -1,0 +1,4 @@
+def main():
+    name = "Ada"
+    print(f"{name:.2f}")
+    print(f"{42:q}")

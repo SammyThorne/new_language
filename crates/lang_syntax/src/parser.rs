@@ -1,0 +1,1303 @@
+//! Recursive-descent parser for declarations and statements, precedence climbing for
+//! expressions (precedence table in docs/01-language-design.md, "Grammar sketch").
+//!
+//! Error recovery: a failed statement or declaration is reported once, then the parser skips to
+//! the end of the line and over any indented block that follows. Because blocks are delimited by
+//! layout tokens, one bad line rarely disturbs the rest of the file.
+
+use crate::ast::*;
+use crate::lexer::lex_fragment;
+use crate::token::{FPiece, Token, TokenKind};
+use lang_diag::{Diagnostic, Diagnostics, Span, codes};
+
+pub fn parse(tokens: &[Token], diags: &mut Diagnostics) -> Module {
+    assert!(matches!(tokens.last(), Some(Token { kind: TokenKind::Eof, .. })), "token stream must end with Eof");
+    let mut parser = Parser { tokens, pos: 0, line_start: 0, diags };
+    parser.module()
+}
+
+/// Marker for "an error was reported; recover".
+struct Reported;
+
+type PResult<T> = Result<T, Reported>;
+
+struct Parser<'a> {
+    tokens: &'a [Token],
+    pos: usize,
+    /// Byte offset where the current logical line starts.
+    line_start: u32,
+    diags: &'a mut Diagnostics,
+}
+
+const PREC_OR: u8 = 1;
+const PREC_AND: u8 = 2;
+const PREC_NOT: u8 = 3;
+const PREC_COMPARE: u8 = 4;
+const PREC_UNARY: u8 = 11;
+const PREC_POW: u8 = 12;
+
+impl Parser<'_> {
+    // ---- token access -------------------------------------------------------------------
+
+    fn peek(&self) -> &TokenKind {
+        &self.tokens[self.pos].kind
+    }
+
+    fn peek_nth(&self, n: usize) -> &TokenKind {
+        &self.tokens[(self.pos + n).min(self.tokens.len() - 1)].kind
+    }
+
+    fn span(&self) -> Span {
+        self.tokens[self.pos].span
+    }
+
+    fn prev_span(&self) -> Span {
+        self.tokens[self.pos.saturating_sub(1)].span
+    }
+
+    fn bump(&mut self) -> Token {
+        let token = self.tokens[self.pos].clone();
+        if token.kind != TokenKind::Eof {
+            self.pos += 1;
+        }
+        if matches!(token.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+            self.line_start = self.tokens[self.pos].span.lo;
+        }
+        token
+    }
+
+    fn at(&self, kind: &TokenKind) -> bool {
+        self.peek() == kind
+    }
+
+    fn eat(&mut self, kind: &TokenKind) -> bool {
+        let found = self.at(kind);
+        if found {
+            self.bump();
+        }
+        found
+    }
+
+    fn at_line_end(&self) -> bool {
+        matches!(self.peek(), TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof)
+    }
+
+    // ---- errors and recovery ------------------------------------------------------------
+
+    /// Where to point when the current token is wrong. Layout tokens have no useful position
+    /// of their own, so errors about them point just past the previous token.
+    fn error_span(&self) -> Span {
+        match self.peek() {
+            TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent | TokenKind::Eof if self.pos > 0 => {
+                self.prev_span().end()
+            }
+            _ => self.span(),
+        }
+    }
+
+    fn unexpected(&mut self, expected: &str) -> Reported {
+        let found = self.peek().describe();
+        let span = self.error_span();
+        // An earlier error on this line (often from the lexer, such as an unterminated string)
+        // is the real problem; this one is a consequence of it.
+        if self.diags.has_error_in(span.file, self.line_start, span.hi) {
+            return Reported;
+        }
+        self.diags.push(Diagnostic::error(
+            codes::UNEXPECTED_TOKEN,
+            format!("{expected}, found {found}"),
+            span,
+            format!("unexpected {found}"),
+        ));
+        Reported
+    }
+
+    fn not_supported(&mut self, what: &str, span: Span) -> Reported {
+        self.diags.push(Diagnostic::error(
+            codes::NOT_SUPPORTED_SYNTAX,
+            format!("{what} not supported yet"),
+            span,
+            "not supported yet",
+        ));
+        Reported
+    }
+
+    fn error(&mut self, message: impl Into<String>, span: Span, label: &str, help: Option<&str>) -> Reported {
+        let mut diagnostic = Diagnostic::error(codes::UNEXPECTED_TOKEN, message, span, label);
+        if let Some(help) = help {
+            diagnostic = diagnostic.with_help(help);
+        }
+        self.diags.push(diagnostic);
+        Reported
+    }
+
+    fn expect(&mut self, kind: TokenKind, context: &str) -> PResult<Span> {
+        if self.at(&kind) {
+            Ok(self.bump().span)
+        } else {
+            Err(self.unexpected(&format!("expected {} {context}", kind.describe())))
+        }
+    }
+
+    fn expect_name(&mut self, what: &str) -> PResult<Ident> {
+        if let TokenKind::Name(name) = self.peek() {
+            let name = name.clone();
+            let span = self.bump().span;
+            Ok(Ident { name, span })
+        } else {
+            Err(self.unexpected(&format!("expected {what}")))
+        }
+    }
+
+    /// Skip the rest of the current line, and the indented block after it if there is one.
+    fn skip_statement(&mut self) {
+        while !self.at_line_end() {
+            self.bump();
+        }
+        self.eat(&TokenKind::Newline);
+        if self.at(&TokenKind::Indent) {
+            self.skip_block();
+        }
+    }
+
+    /// Skip a whole indented block, starting at its `Indent`.
+    fn skip_block(&mut self) {
+        let mut depth = 0usize;
+        loop {
+            match self.bump().kind {
+                TokenKind::Indent => depth += 1,
+                TokenKind::Dedent => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return;
+                    }
+                }
+                TokenKind::Eof => return,
+                _ => {}
+            }
+        }
+    }
+
+    fn unexpected_indent(&mut self) {
+        let span = self.span();
+        self.diags.push(
+            Diagnostic::error(
+                codes::UNEXPECTED_TOKEN,
+                "unexpected indentation",
+                span,
+                "this line is indented further than the one before it",
+            )
+            .with_help("only the line after one ending in `:` starts an indented block"),
+        );
+        self.skip_block();
+    }
+
+    fn end_of_statement(&mut self) -> PResult<()> {
+        match self.peek() {
+            TokenKind::Newline => {
+                self.bump();
+                Ok(())
+            }
+            TokenKind::Dedent | TokenKind::Eof => Ok(()),
+            _ => Err(self.unexpected("expected end of line")),
+        }
+    }
+
+    /// After a block's `:`, expect a line break and an indented block start.
+    fn block_start(&mut self) -> PResult<()> {
+        if !self.at(&TokenKind::Newline) {
+            let found = self.peek().describe();
+            let span = self.error_span();
+            return Err(self.error(
+                format!("expected a new line after `:`, found {found}"),
+                span,
+                "expected a line break",
+                Some("put the body on the following lines, indented"),
+            ));
+        }
+        self.bump();
+        if !self.at(&TokenKind::Indent) {
+            let span = self.error_span();
+            return Err(self.error(
+                "expected an indented block",
+                span,
+                "the block should start on the next line",
+                Some("indent the lines that belong to this block"),
+            ));
+        }
+        self.bump();
+        Ok(())
+    }
+
+    // ---- declarations -------------------------------------------------------------------
+
+    fn module(&mut self) -> Module {
+        let start = Span { lo: 0, hi: 0, ..self.span() };
+        let mut items = Vec::new();
+        loop {
+            match self.peek().clone() {
+                TokenKind::Eof => break,
+                TokenKind::Newline | TokenKind::Dedent => {
+                    self.bump();
+                }
+                TokenKind::Indent => self.unexpected_indent(),
+                TokenKind::Def
+                | TokenKind::Pub
+                | TokenKind::Priv
+                | TokenKind::Struct
+                | TokenKind::Impl
+                | TokenKind::Const => match self.item() {
+                    Ok(item) => items.push(item),
+                    Err(Reported) => self.skip_statement(),
+                },
+                TokenKind::At => {
+                    let span = self.span();
+                    self.not_supported("annotations are", span);
+                    self.skip_statement();
+                }
+                kind @ (TokenKind::Trait | TokenKind::Enum | TokenKind::Import | TokenKind::From) => {
+                    let span = self.span();
+                    self.not_supported(&format!("{} declarations are", kind.describe()), span);
+                    self.skip_statement();
+                }
+                TokenKind::Name(name) if name == "class" => {
+                    let span = self.span();
+                    self.error(
+                        "there are no classes",
+                        span,
+                        "not a keyword",
+                        Some("define data with `struct` and behaviour with `impl` blocks and traits"),
+                    );
+                    self.skip_statement();
+                }
+                TokenKind::Str(_) if matches!(self.peek_nth(1), TokenKind::Newline | TokenKind::Eof) => {
+                    // A module docstring.
+                    self.bump();
+                    self.eat(&TokenKind::Newline);
+                }
+                _ => {
+                    let found = self.peek().describe();
+                    let span = self.error_span();
+                    self.error(
+                        format!("expected a declaration, found {found}"),
+                        span,
+                        "statements are not allowed here",
+                        Some("statements must be inside a function; the program starts in `def main():`"),
+                    );
+                    self.skip_statement();
+                }
+            }
+        }
+        Module { items, start }
+    }
+
+    fn visibility(&mut self) -> Visibility {
+        if self.eat(&TokenKind::Pub) {
+            Visibility::Pub
+        } else if self.eat(&TokenKind::Priv) {
+            Visibility::Priv
+        } else {
+            Visibility::Default
+        }
+    }
+
+    fn item(&mut self) -> PResult<Item> {
+        let vis_span = self.span();
+        let visibility = self.visibility();
+        match self.peek() {
+            TokenKind::Def => Ok(Item::Function(self.function(visibility)?)),
+            TokenKind::Struct => Ok(Item::Struct(self.struct_decl(visibility)?)),
+            TokenKind::Const => Ok(Item::Const(self.const_decl(visibility)?)),
+            TokenKind::Impl => {
+                if visibility != Visibility::Default {
+                    return Err(self.error(
+                        "`impl` blocks cannot be `pub` or `priv`",
+                        vis_span,
+                        "remove this",
+                        Some("mark the individual methods instead"),
+                    ));
+                }
+                Ok(Item::Impl(self.impl_decl()?))
+            }
+            kind @ (TokenKind::Trait | TokenKind::Enum) => {
+                let what = format!("{} declarations are", kind.describe());
+                let span = self.span();
+                Err(self.not_supported(&what, span))
+            }
+            _ => Err(self.unexpected("expected `def`, `struct` or `const`")),
+        }
+    }
+
+    fn function(&mut self, visibility: Visibility) -> PResult<Function> {
+        self.expect(TokenKind::Def, "")?;
+        let name = self.expect_name("a function name")?;
+        if self.at(&TokenKind::LBracket) {
+            let span = self.span();
+            return Err(self.not_supported("generic functions are", span));
+        }
+        self.expect(TokenKind::LParen, "after the function name")?;
+
+        let mut self_param = None;
+        let mut params = Vec::new();
+        while !self.at(&TokenKind::RParen) {
+            if self.at(&TokenKind::SelfKw) {
+                let span = self.bump().span;
+                if !params.is_empty() || self_param.is_some() {
+                    return Err(self.error("`self` must be the first parameter", span, "move this first", None));
+                }
+                if self.at(&TokenKind::Colon) {
+                    return Err(self.error("`self` takes no type hint", self.span(), "remove the type hint", None));
+                }
+                self_param = Some(span);
+            } else {
+                let name = self.expect_name("a parameter name")?;
+                let ty = if self.eat(&TokenKind::Colon) { Some(self.type_expr()?) } else { None };
+                if self.at(&TokenKind::Assign) {
+                    let span = self.span();
+                    return Err(self.not_supported("default parameter values are", span));
+                }
+                params.push(Param { name, ty });
+            }
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::RParen, "to close the parameter list")?;
+        let ret = if self.eat(&TokenKind::Arrow) { Some(self.type_expr()?) } else { None };
+        if !self.at(&TokenKind::Colon) {
+            let found = self.peek().describe();
+            let span = self.error_span();
+            return Err(self.error(
+                format!("expected `:` after the function signature, found {found}"),
+                span,
+                "expected `:`",
+                Some("a function header ends with `:`, and its body follows on the next lines, indented"),
+            ));
+        }
+        self.bump();
+        let body = self.block()?;
+        Ok(Function { visibility, name, self_param, params, ret, body })
+    }
+
+    fn struct_decl(&mut self, visibility: Visibility) -> PResult<StructDecl> {
+        self.bump();
+        let name = self.expect_name("a struct name")?;
+        if self.at(&TokenKind::LBracket) {
+            let span = self.span();
+            return Err(self.not_supported("generic structs are", span));
+        }
+        if self.at(&TokenKind::LParen) {
+            let span = self.span();
+            return Err(self.error(
+                "structs cannot inherit from other types",
+                span,
+                "not allowed",
+                Some("share behaviour through traits, or include the other struct as a field"),
+            ));
+        }
+        self.expect(TokenKind::Colon, "after the struct name")?;
+        self.block_start()?;
+        let mut fields = Vec::new();
+        loop {
+            match self.peek().clone() {
+                TokenKind::Dedent => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => break,
+                TokenKind::Newline => {
+                    self.bump();
+                }
+                TokenKind::Str(_) => {
+                    // A docstring.
+                    self.bump();
+                    if self.end_of_statement().is_err() {
+                        self.skip_statement();
+                    }
+                }
+                TokenKind::Def => {
+                    let span = self.span();
+                    self.error(
+                        "methods are defined in an `impl` block, not inside the struct",
+                        span,
+                        "not allowed here",
+                        Some(&format!("add `impl {}:` after the struct and put the method there", name.name)),
+                    );
+                    self.skip_statement();
+                }
+                _ => match self.field() {
+                    Ok(field) => fields.push(field),
+                    Err(Reported) => self.skip_statement(),
+                },
+            }
+        }
+        Ok(StructDecl { visibility, name, fields })
+    }
+
+    fn field(&mut self) -> PResult<FieldDecl> {
+        let visibility = self.visibility();
+        let name = self.expect_name("a field name")?;
+        if !self.at(&TokenKind::Colon) {
+            let span = self.error_span();
+            return Err(self.error(
+                format!("field `{}` needs a type", name.name),
+                span,
+                "expected `:` and a type",
+                Some(&format!("write it as `{}: int`, with the field's type", name.name)),
+            ));
+        }
+        self.bump();
+        let ty = self.type_expr()?;
+        let default = if self.eat(&TokenKind::Assign) { Some(self.expr()?) } else { None };
+        self.end_of_statement()?;
+        Ok(FieldDecl { visibility, name, ty, default })
+    }
+
+    fn impl_decl(&mut self) -> PResult<ImplDecl> {
+        let impl_span = self.bump().span;
+        if self.at(&TokenKind::LBracket) {
+            let span = self.span();
+            return Err(self.not_supported("generic `impl` blocks are", span));
+        }
+        let target = self.expect_name("a type name after `impl`")?;
+        if self.at(&TokenKind::For) {
+            return Err(self.not_supported("trait implementations are", impl_span.to(self.span())));
+        }
+        self.expect(TokenKind::Colon, "after the type name")?;
+        self.block_start()?;
+        let mut methods = Vec::new();
+        loop {
+            match self.peek() {
+                TokenKind::Dedent => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => break,
+                TokenKind::Newline => {
+                    self.bump();
+                }
+                TokenKind::Str(_) => {
+                    self.bump();
+                    if self.end_of_statement().is_err() {
+                        self.skip_statement();
+                    }
+                }
+                TokenKind::Def | TokenKind::Pub | TokenKind::Priv => {
+                    let visibility = self.visibility();
+                    match self.function(visibility) {
+                        Ok(method) => methods.push(method),
+                        Err(Reported) => self.skip_statement(),
+                    }
+                }
+                _ => {
+                    self.unexpected("expected a method (`def`)");
+                    self.skip_statement();
+                }
+            }
+        }
+        Ok(ImplDecl { target, methods })
+    }
+
+    fn const_decl(&mut self, visibility: Visibility) -> PResult<ConstDecl> {
+        self.bump();
+        let name = self.expect_name("a constant name")?;
+        let ty = if self.eat(&TokenKind::Colon) { Some(self.type_expr()?) } else { None };
+        self.expect(TokenKind::Assign, "and a value for the constant")?;
+        let value = self.expr()?;
+        self.end_of_statement()?;
+        Ok(ConstDecl { visibility, name, ty, value })
+    }
+
+    fn type_expr(&mut self) -> PResult<TypeExpr> {
+        let start = self.span();
+        let mut ty = match self.peek().clone() {
+            TokenKind::NoneKw => {
+                self.bump();
+                TypeExpr { kind: TypeExprKind::None, span: start }
+            }
+            TokenKind::Name(name) => {
+                self.bump();
+                let mut args = Vec::new();
+                if self.eat(&TokenKind::LBracket) {
+                    loop {
+                        args.push(self.type_expr()?);
+                        if !self.eat(&TokenKind::Comma) || self.at(&TokenKind::RBracket) {
+                            break;
+                        }
+                    }
+                    self.expect(TokenKind::RBracket, "to close the type arguments")?;
+                }
+                TypeExpr { kind: TypeExprKind::Named { name, args }, span: start.to(self.prev_span()) }
+            }
+            _ => return Err(self.unexpected("expected a type")),
+        };
+        loop {
+            if self.at(&TokenKind::Question) {
+                self.bump();
+            } else if self.at(&TokenKind::Pipe) && *self.peek_nth(1) == TokenKind::NoneKw {
+                self.bump();
+                self.bump();
+            } else {
+                break;
+            }
+            let span = ty.span.to(self.prev_span());
+            ty = TypeExpr { kind: TypeExprKind::Optional(Box::new(ty)), span };
+        }
+        Ok(ty)
+    }
+
+    // ---- statements ---------------------------------------------------------------------
+
+    /// `NEWLINE INDENT stmt+ DEDENT`, after the `:` has been consumed.
+    fn block(&mut self) -> PResult<Vec<Stmt>> {
+        self.block_start()?;
+        let mut stmts = Vec::new();
+        loop {
+            match self.peek() {
+                TokenKind::Dedent => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => break,
+                TokenKind::Newline => {
+                    self.bump();
+                }
+                TokenKind::Indent => self.unexpected_indent(),
+                _ => match self.statement() {
+                    Ok(stmt) => stmts.push(stmt),
+                    Err(Reported) => self.skip_statement(),
+                },
+            }
+        }
+        Ok(stmts)
+    }
+
+    fn statement(&mut self) -> PResult<Stmt> {
+        let start = self.span();
+        let kind = match self.peek().clone() {
+            TokenKind::Return => {
+                self.bump();
+                let value = if self.at_line_end() { None } else { Some(self.expr_list()?) };
+                let span = start.to(self.prev_span());
+                self.end_of_statement()?;
+                return Ok(Stmt { kind: StmtKind::Return(value), span });
+            }
+            TokenKind::If => return self.if_stmt(),
+            TokenKind::While => {
+                self.bump();
+                let cond = self.expr()?;
+                let header = start.to(self.prev_span());
+                self.expect(TokenKind::Colon, "after the loop condition")?;
+                let body = self.block()?;
+                return Ok(Stmt { kind: StmtKind::While { cond, body }, span: header });
+            }
+            TokenKind::For => {
+                self.bump();
+                let target = self.for_target()?;
+                self.expect(TokenKind::In, "after the loop variable")?;
+                let iter = self.expr()?;
+                let header = start.to(self.prev_span());
+                self.expect(TokenKind::Colon, "after the loop's iterable")?;
+                let body = self.block()?;
+                return Ok(Stmt { kind: StmtKind::For { target, iter, body }, span: header });
+            }
+            TokenKind::Break => {
+                self.bump();
+                StmtKind::Break
+            }
+            TokenKind::Continue => {
+                self.bump();
+                StmtKind::Continue
+            }
+            kind @ (TokenKind::Elif | TokenKind::Else) => {
+                return Err(self.error(
+                    format!("{} without a matching `if`", kind.describe()),
+                    start,
+                    "no `if` before this",
+                    Some("`elif` and `else` must line up with the `if` they belong to"),
+                ));
+            }
+            kind @ (TokenKind::Match | TokenKind::With | TokenKind::Spawn) => {
+                return Err(self.not_supported(&format!("{} statements are", kind.describe()), start));
+            }
+            TokenKind::Def => return Err(self.not_supported("nested functions are", start)),
+            kind @ (TokenKind::Struct
+            | TokenKind::Trait
+            | TokenKind::Impl
+            | TokenKind::Enum
+            | TokenKind::Const
+            | TokenKind::Import
+            | TokenKind::From
+            | TokenKind::Pub
+            | TokenKind::Priv
+            | TokenKind::At) => {
+                return Err(self.error(
+                    format!("{} is not allowed inside a function", kind.describe()),
+                    start,
+                    "only allowed at the top level of a file",
+                    None,
+                ));
+            }
+            TokenKind::Name(name) if name == "try" && *self.peek_nth(1) == TokenKind::Colon => {
+                return Err(self.error(
+                    "there is no `try` statement",
+                    start,
+                    "not a keyword",
+                    Some("functions that can fail return a `Result`, and `?` passes an error on to the caller"),
+                ));
+            }
+            TokenKind::Name(_) if *self.peek_nth(1) == TokenKind::Colon => return self.annotated_assignment(),
+            _ => return self.simple_statement(),
+        };
+        let span = start;
+        self.end_of_statement()?;
+        Ok(Stmt { kind, span })
+    }
+
+    fn if_stmt(&mut self) -> PResult<Stmt> {
+        let start = self.bump().span;
+        let cond = self.expr()?;
+        let header = start.to(self.prev_span());
+        self.expect(TokenKind::Colon, "after the condition")?;
+        let mut branches = vec![(cond, self.block()?)];
+        while self.at(&TokenKind::Elif) {
+            self.bump();
+            let cond = self.expr()?;
+            self.expect(TokenKind::Colon, "after the condition")?;
+            branches.push((cond, self.block()?));
+        }
+        let otherwise = if self.eat(&TokenKind::Else) {
+            self.expect(TokenKind::Colon, "after `else`")?;
+            Some(self.block()?)
+        } else {
+            None
+        };
+        Ok(Stmt { kind: StmtKind::If { branches, otherwise }, span: header })
+    }
+
+    fn annotated_assignment(&mut self) -> PResult<Stmt> {
+        let name = self.expect_name("a variable name")?;
+        self.bump(); // `:`
+        let ty = self.type_expr()?;
+        if !self.at(&TokenKind::Assign) {
+            if self.at_line_end() {
+                return Err(self.error(
+                    format!("`{}` is declared without a value", name.name),
+                    name.span,
+                    "needs a value",
+                    Some(&format!("give it a starting value: `{}: ... = value`", name.name)),
+                ));
+            }
+            return Err(self.unexpected("expected `=`"));
+        }
+        self.bump();
+        let value = self.expr_list()?;
+        let span = name.span.to(value.span);
+        self.end_of_statement()?;
+        let target = Target { span: name.span, kind: TargetKind::Name(name) };
+        Ok(Stmt { kind: StmtKind::Assign { target, ty: Some(ty), value }, span })
+    }
+
+    fn simple_statement(&mut self) -> PResult<Stmt> {
+        let lhs = self.expr_list()?;
+        let aug = match self.peek() {
+            TokenKind::PlusEq => Some(BinaryOp::Add),
+            TokenKind::MinusEq => Some(BinaryOp::Sub),
+            TokenKind::StarEq => Some(BinaryOp::Mul),
+            TokenKind::SlashEq => Some(BinaryOp::Div),
+            TokenKind::SlashSlashEq => Some(BinaryOp::FloorDiv),
+            TokenKind::PercentEq => Some(BinaryOp::Mod),
+            _ => None,
+        };
+        if let Some(op) = aug {
+            self.bump();
+            let target = self.target_from(lhs)?;
+            if matches!(target.kind, TargetKind::Tuple(_)) {
+                return Err(self.error(
+                    "augmented assignment needs a single target",
+                    target.span,
+                    "more than one target",
+                    None,
+                ));
+            }
+            let value = self.expr()?;
+            let span = target.span.to(value.span);
+            self.end_of_statement()?;
+            return Ok(Stmt { kind: StmtKind::AugAssign { target, op, value }, span });
+        }
+        if self.at(&TokenKind::Assign) {
+            self.bump();
+            let target = self.target_from(lhs)?;
+            let value = self.expr_list()?;
+            if self.at(&TokenKind::Assign) {
+                let span = self.span();
+                return Err(self.not_supported("chained assignment (`a = b = c`) is", span));
+            }
+            let span = target.span.to(value.span);
+            self.end_of_statement()?;
+            return Ok(Stmt { kind: StmtKind::Assign { target, ty: None, value }, span });
+        }
+        let span = lhs.span;
+        self.end_of_statement()?;
+        Ok(Stmt { kind: StmtKind::Expr(lhs), span })
+    }
+
+    fn target_from(&mut self, expr: Expr) -> PResult<Target> {
+        let span = expr.span;
+        let kind = match expr.kind {
+            ExprKind::Name(name) => TargetKind::Name(Ident { name, span }),
+            ExprKind::Attr { object, name } => TargetKind::Attr { object: *object, field: name },
+            ExprKind::Index { object, index } => TargetKind::Index { object: *object, index: *index },
+            ExprKind::Tuple(items) => {
+                let mut targets = Vec::new();
+                for item in items {
+                    targets.push(self.target_from(item)?);
+                }
+                TargetKind::Tuple(targets)
+            }
+            ExprKind::Slice { .. } => return Err(self.not_supported("assigning to a slice is", span)),
+            _ => {
+                return Err(self.error(
+                    "cannot assign to this",
+                    span,
+                    "not a variable, field or element",
+                    Some("the left side of `=` must be a name, `object.field` or `container[index]`"),
+                ));
+            }
+        };
+        Ok(Target { kind, span })
+    }
+
+    /// `for <targets> in`: names (or fields) separated by commas. Parsed without `in` as an
+    /// operator, since `in` ends the targets.
+    fn for_target(&mut self) -> PResult<Target> {
+        let first = self.postfix()?;
+        if !self.at(&TokenKind::Comma) {
+            return self.target_from(first);
+        }
+        let mut items = vec![first];
+        while self.eat(&TokenKind::Comma) {
+            if self.at(&TokenKind::In) {
+                break;
+            }
+            items.push(self.postfix()?);
+        }
+        let span = items[0].span.to(items.last().unwrap().span);
+        self.target_from(Expr { kind: ExprKind::Tuple(items), span })
+    }
+
+    // ---- expressions --------------------------------------------------------------------
+
+    /// One expression, or several separated by commas, which form a tuple: `return a, b`.
+    fn expr_list(&mut self) -> PResult<Expr> {
+        let first = self.expr()?;
+        if !self.at(&TokenKind::Comma) {
+            return Ok(first);
+        }
+        let mut items = vec![first];
+        while self.eat(&TokenKind::Comma) {
+            if self.at_line_end() || matches!(self.peek(), TokenKind::Assign) {
+                break;
+            }
+            items.push(self.expr()?);
+        }
+        let span = items[0].span.to(items.last().unwrap().span);
+        Ok(Expr { kind: ExprKind::Tuple(items), span })
+    }
+
+    fn expr(&mut self) -> PResult<Expr> {
+        if self.at(&TokenKind::Lambda) {
+            let span = self.span();
+            return Err(self.not_supported("`lambda` expressions are", span));
+        }
+        let value = self.binary(PREC_OR)?;
+        if !self.at(&TokenKind::If) {
+            return Ok(value);
+        }
+        self.bump();
+        let cond = self.binary(PREC_OR)?;
+        self.expect(TokenKind::Else, "in a conditional expression (`a if condition else b`)")?;
+        let otherwise = self.expr()?;
+        let span = value.span.to(otherwise.span);
+        Ok(Expr {
+            kind: ExprKind::IfElse { cond: Box::new(cond), then: Box::new(value), otherwise: Box::new(otherwise) },
+            span,
+        })
+    }
+
+    fn binary_op(&self) -> Option<(BinaryOp, u8, usize)> {
+        use BinaryOp::*;
+        Some(match self.peek() {
+            TokenKind::Or => (Or, PREC_OR, 1),
+            TokenKind::And => (And, PREC_AND, 1),
+            TokenKind::EqEq => (Eq, PREC_COMPARE, 1),
+            TokenKind::NotEq => (NotEq, PREC_COMPARE, 1),
+            TokenKind::Lt => (Lt, PREC_COMPARE, 1),
+            TokenKind::Le => (Le, PREC_COMPARE, 1),
+            TokenKind::Gt => (Gt, PREC_COMPARE, 1),
+            TokenKind::Ge => (Ge, PREC_COMPARE, 1),
+            TokenKind::In => (In, PREC_COMPARE, 1),
+            TokenKind::Not if *self.peek_nth(1) == TokenKind::In => (NotIn, PREC_COMPARE, 2),
+            TokenKind::Is if *self.peek_nth(1) == TokenKind::Not => (IsNot, PREC_COMPARE, 2),
+            TokenKind::Is => (Is, PREC_COMPARE, 1),
+            TokenKind::Pipe => (BitOr, 5, 1),
+            TokenKind::Caret => (BitXor, 6, 1),
+            TokenKind::Amp => (BitAnd, 7, 1),
+            TokenKind::Shl => (Shl, 8, 1),
+            TokenKind::Shr => (Shr, 8, 1),
+            TokenKind::Plus => (Add, 9, 1),
+            TokenKind::Minus => (Sub, 9, 1),
+            TokenKind::Star => (Mul, 10, 1),
+            TokenKind::Slash => (Div, 10, 1),
+            TokenKind::SlashSlash => (FloorDiv, 10, 1),
+            TokenKind::Percent => (Mod, 10, 1),
+            TokenKind::StarStar => (Pow, PREC_POW, 1),
+            _ => return None,
+        })
+    }
+
+    fn binary(&mut self, min_prec: u8) -> PResult<Expr> {
+        let start = self.span();
+        let unary = match self.peek() {
+            TokenKind::Not => Some((UnaryOp::Not, PREC_NOT)),
+            TokenKind::Minus => Some((UnaryOp::Neg, PREC_UNARY)),
+            TokenKind::Plus => Some((UnaryOp::Plus, PREC_UNARY)),
+            TokenKind::Tilde => Some((UnaryOp::Invert, PREC_UNARY)),
+            _ => None,
+        };
+        let mut lhs = if let Some((op, prec)) = unary {
+            self.bump();
+            let operand = self.binary(prec)?;
+            Expr { span: start.to(operand.span), kind: ExprKind::Unary { op, operand: Box::new(operand) } }
+        } else {
+            self.postfix()?
+        };
+
+        let mut lhs_is_comparison = false;
+        while let Some((op, prec, token_count)) = self.binary_op() {
+            if prec < min_prec {
+                break;
+            }
+            let op_span = self.span();
+            for _ in 0..token_count {
+                self.bump();
+            }
+            if op.is_comparison() && lhs_is_comparison {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::COMPARISON_CHAIN,
+                        "comparison chains are not supported",
+                        lhs.span.to(op_span),
+                        "second comparison",
+                    )
+                    .with_help("write `a < b and b < c` instead of `a < b < c`"),
+                );
+                return Err(Reported);
+            }
+            let next_min = if op == BinaryOp::Pow { prec } else { prec + 1 };
+            let rhs = self.binary(next_min)?;
+            lhs = Expr {
+                span: lhs.span.to(rhs.span),
+                kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+            };
+            lhs_is_comparison = op.is_comparison();
+        }
+        Ok(lhs)
+    }
+
+    fn postfix(&mut self) -> PResult<Expr> {
+        let mut expr = self.primary()?;
+        loop {
+            let span = self.span();
+            match self.peek() {
+                TokenKind::LParen => {
+                    self.bump();
+                    let mut args = Vec::new();
+                    while !self.at(&TokenKind::RParen) {
+                        let name =
+                            if matches!(self.peek(), TokenKind::Name(_)) && *self.peek_nth(1) == TokenKind::Assign {
+                                let name = self.expect_name("an argument name")?;
+                                self.bump();
+                                Some(name)
+                            } else {
+                                None
+                            };
+                        let value = self.expr()?;
+                        args.push(Arg { name, value });
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    let close = self.expect(TokenKind::RParen, "to close the argument list")?;
+                    expr = Expr { span: expr.span.to(close), kind: ExprKind::Call { callee: Box::new(expr), args } };
+                }
+                TokenKind::Dot => {
+                    self.bump();
+                    let name = self.expect_name("a field or method name after `.`")?;
+                    expr =
+                        Expr { span: expr.span.to(name.span), kind: ExprKind::Attr { object: Box::new(expr), name } };
+                }
+                TokenKind::LBracket => {
+                    self.bump();
+                    let start = if self.at(&TokenKind::Colon) { None } else { Some(Box::new(self.expr()?)) };
+                    if self.eat(&TokenKind::Colon) {
+                        let stop = if matches!(self.peek(), TokenKind::RBracket | TokenKind::Colon) {
+                            None
+                        } else {
+                            Some(Box::new(self.expr()?))
+                        };
+                        if self.at(&TokenKind::Colon) {
+                            let span = self.span();
+                            return Err(self.not_supported("slice steps (`[a:b:step]`) are", span));
+                        }
+                        let close = self.expect(TokenKind::RBracket, "to close the slice")?;
+                        expr = Expr {
+                            span: expr.span.to(close),
+                            kind: ExprKind::Slice { object: Box::new(expr), start, stop },
+                        };
+                    } else {
+                        let close = self.expect(TokenKind::RBracket, "to close the index")?;
+                        let index = start.expect("an index without `:` has an expression");
+                        expr =
+                            Expr { span: expr.span.to(close), kind: ExprKind::Index { object: Box::new(expr), index } };
+                    }
+                }
+                TokenKind::Question => return Err(self.not_supported("the `?` operator is", span)),
+                _ => return Ok(expr),
+            }
+        }
+    }
+
+    /// Comma-separated expressions up to `close`, allowing a trailing comma.
+    fn sequence(&mut self, close: TokenKind, first: Expr, what: &str) -> PResult<(Vec<Expr>, Span)> {
+        let mut items = vec![first];
+        while self.eat(&TokenKind::Comma) {
+            if self.at(&close) {
+                break;
+            }
+            items.push(self.expr()?);
+        }
+        let end = self.expect(close, &format!("to close the {what}"))?;
+        Ok((items, end))
+    }
+
+    fn primary(&mut self) -> PResult<Expr> {
+        let span = self.span();
+        let kind = match self.peek().clone() {
+            TokenKind::Int(value) => ExprKind::Int(value),
+            TokenKind::Float(value) => ExprKind::Float(value),
+            TokenKind::Str(value) => ExprKind::Str(value),
+            TokenKind::FString(pieces) => {
+                self.bump();
+                return Ok(Expr { kind: ExprKind::FString(self.fstring(pieces, span)?), span });
+            }
+            TokenKind::True => ExprKind::Bool(true),
+            TokenKind::False => ExprKind::Bool(false),
+            TokenKind::NoneKw => ExprKind::None,
+            TokenKind::Name(name) => ExprKind::Name(name),
+            TokenKind::SelfKw => ExprKind::Name("self".to_string()),
+            TokenKind::LParen => {
+                self.bump();
+                if self.at(&TokenKind::RParen) {
+                    return Err(self.not_supported("empty tuples are", span.to(self.span())));
+                }
+                let first = self.expr()?;
+                if !self.at(&TokenKind::Comma) {
+                    let close = self.expect(TokenKind::RParen, "to close `(`")?;
+                    return Ok(Expr { span: span.to(close), kind: first.kind });
+                }
+                let (items, close) = self.sequence(TokenKind::RParen, first, "tuple")?;
+                return Ok(Expr { kind: ExprKind::Tuple(items), span: span.to(close) });
+            }
+            TokenKind::LBracket => {
+                self.bump();
+                if self.at(&TokenKind::RBracket) {
+                    let close = self.bump().span;
+                    return Ok(Expr { kind: ExprKind::List(Vec::new()), span: span.to(close) });
+                }
+                let first = self.expr()?;
+                if self.at(&TokenKind::For) {
+                    let span = self.span();
+                    return Err(self.not_supported("list comprehensions are", span));
+                }
+                let (items, close) = self.sequence(TokenKind::RBracket, first, "list")?;
+                return Ok(Expr { kind: ExprKind::List(items), span: span.to(close) });
+            }
+            TokenKind::LBrace => {
+                self.bump();
+                if self.at(&TokenKind::RBrace) {
+                    let close = self.bump().span;
+                    return Ok(Expr { kind: ExprKind::Dict(Vec::new()), span: span.to(close) });
+                }
+                let key = self.expr()?;
+                if !self.at(&TokenKind::Colon) {
+                    return Err(self.not_supported("set literals are", span));
+                }
+                self.bump();
+                let value = self.expr()?;
+                let mut pairs = vec![(key, value)];
+                while self.eat(&TokenKind::Comma) {
+                    if self.at(&TokenKind::RBrace) {
+                        break;
+                    }
+                    let key = self.expr()?;
+                    self.expect(TokenKind::Colon, "between a key and its value")?;
+                    let value = self.expr()?;
+                    pairs.push((key, value));
+                }
+                let close = self.expect(TokenKind::RBrace, "to close the dict")?;
+                return Ok(Expr { kind: ExprKind::Dict(pairs), span: span.to(close) });
+            }
+            TokenKind::Spawn => return Err(self.not_supported("`spawn` is", span)),
+            _ => return Err(self.unexpected("expected an expression")),
+        };
+        self.bump();
+        Ok(Expr { kind, span })
+    }
+
+    /// Parse the `{expression}` pieces of an f-string with a sub-parser over their own tokens.
+    fn fstring(&mut self, pieces: Vec<FPiece>, span: Span) -> PResult<Vec<FStringPart>> {
+        let mut parts = Vec::new();
+        let mut failed = false;
+        for piece in pieces {
+            match piece {
+                FPiece::Literal(text) => parts.push(FStringPart::Literal(text)),
+                FPiece::Code { text, offset, spec } => {
+                    let tokens = lex_fragment(span.file, &text, offset, self.diags);
+                    let mut sub = Parser { tokens: &tokens, pos: 0, line_start: offset as u32, diags: self.diags };
+                    let expr = match sub.expr() {
+                        Ok(expr) if sub.at(&TokenKind::Eof) => expr,
+                        Ok(_) => {
+                            sub.unexpected("expected `}` after the expression");
+                            failed = true;
+                            continue;
+                        }
+                        Err(Reported) => {
+                            failed = true;
+                            continue;
+                        }
+                    };
+                    let spec = spec.map(|(text, at)| {
+                        let len = text.len();
+                        (text, Span::new(span.file, at, at + len))
+                    });
+                    parts.push(FStringPart::Expr { expr, spec });
+                }
+            }
+        }
+        if failed { Err(Reported) } else { Ok(parts) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use lang_diag::FileId;
+
+    fn parse_text(text: &str) -> (Module, Diagnostics) {
+        let mut diags = Diagnostics::default();
+        let tokens = lex(FileId(0), text, &mut diags);
+        let module = parse(&tokens, &mut diags);
+        (module, diags)
+    }
+
+    fn codes_of(diags: &Diagnostics) -> Vec<&'static str> {
+        diags.sorted().iter().map(|d| d.code).collect()
+    }
+
+    /// Render an expression with full parenthesisation, to check precedence.
+    fn show(expr: &Expr) -> String {
+        match &expr.kind {
+            ExprKind::Int(v) => v.to_string(),
+            ExprKind::Float(v) => format!("{v:?}"),
+            ExprKind::Str(s) => format!("{s:?}"),
+            ExprKind::FString(parts) => format!("f[{}]", parts.len()),
+            ExprKind::Bool(b) => if *b { "True" } else { "False" }.to_string(),
+            ExprKind::None => "None".to_string(),
+            ExprKind::Name(n) => n.clone(),
+            ExprKind::Call { callee, args } => {
+                let args: Vec<String> = args
+                    .iter()
+                    .map(|a| match &a.name {
+                        Some(name) => format!("{}={}", name.name, show(&a.value)),
+                        None => show(&a.value),
+                    })
+                    .collect();
+                format!("{}({})", show(callee), args.join(", "))
+            }
+            ExprKind::Attr { object, name } => format!("{}.{}", show(object), name.name),
+            ExprKind::Index { object, index } => format!("{}[{}]", show(object), show(index)),
+            ExprKind::Slice { object, start, stop } => format!(
+                "{}[{}:{}]",
+                show(object),
+                start.as_ref().map_or(String::new(), |e| show(e)),
+                stop.as_ref().map_or(String::new(), |e| show(e))
+            ),
+            ExprKind::List(items) => format!("[{}]", items.iter().map(show).collect::<Vec<_>>().join(", ")),
+            ExprKind::Tuple(items) => format!("tuple({})", items.iter().map(show).collect::<Vec<_>>().join(", ")),
+            ExprKind::Dict(pairs) => {
+                format!(
+                    "{{{}}}",
+                    pairs.iter().map(|(k, v)| format!("{}: {}", show(k), show(v))).collect::<Vec<_>>().join(", ")
+                )
+            }
+            ExprKind::Unary { op, operand } => format!("({} {})", op.symbol(), show(operand)),
+            ExprKind::Binary { op, lhs, rhs } => format!("({} {} {})", show(lhs), op.symbol(), show(rhs)),
+            ExprKind::IfElse { cond, then, otherwise } => {
+                format!("({} if {} else {})", show(then), show(cond), show(otherwise))
+            }
+        }
+    }
+
+    fn function(module: &Module, index: usize) -> &Function {
+        match &module.items[index] {
+            Item::Function(f) => f,
+            other => panic!("expected a function, got {other:?}"),
+        }
+    }
+
+    fn expr_of(text: &str) -> String {
+        let (module, diags) = parse_text(&format!("def main():\n    {text}\n"));
+        assert!(diags.is_empty(), "unexpected diagnostics: {:?}", codes_of(&diags));
+        match &function(&module, 0).body[0].kind {
+            StmtKind::Expr(e) => show(e),
+            other => panic!("expected an expression statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hello_world() {
+        let (module, diags) = parse_text("def main():\n    print(\"Hello, world!\")\n");
+        assert!(diags.is_empty());
+        let f = function(&module, 0);
+        assert_eq!(f.name.name, "main");
+        assert!(f.params.is_empty() && f.ret.is_none());
+        assert_eq!(f.body.len(), 1);
+    }
+
+    #[test]
+    fn precedence() {
+        assert_eq!(expr_of("1 + 2 * 3"), "(1 + (2 * 3))");
+        assert_eq!(expr_of("1 - 2 - 3"), "((1 - 2) - 3)");
+        assert_eq!(expr_of("2 ** 3 ** 2"), "(2 ** (3 ** 2))");
+        assert_eq!(expr_of("-x ** 2"), "(- (x ** 2))");
+        assert_eq!(expr_of("not a == b and c"), "((not (a == b)) and c)");
+        assert_eq!(expr_of("a or b and c"), "(a or (b and c))");
+        assert_eq!(expr_of("a not in b"), "(a not in b)");
+        assert_eq!(expr_of("x is not None"), "(x is not None)");
+        assert_eq!(expr_of("(1 + 2) * 3"), "((1 + 2) * 3)");
+        assert_eq!(expr_of("f(1, g(2),)"), "f(1, g(2))");
+        assert_eq!(expr_of("a if c else b if d else e"), "(a if c else (b if d else e))");
+        assert_eq!(expr_of("user.name.upper()"), "user.name.upper()");
+        assert_eq!(expr_of("xs[1:][0]"), "xs[1:][0]");
+        assert_eq!(expr_of("s[:-1]"), "s[:(- 1)]");
+        assert_eq!(expr_of("User(id=1, name=\"a\")"), "User(id=1, name=\"a\")");
+        assert_eq!(expr_of("[1, 2,]"), "[1, 2]");
+        assert_eq!(expr_of("{\"a\": 1, \"b\": 2}"), "{\"a\": 1, \"b\": 2}");
+        assert_eq!(expr_of("(1,)"), "tuple(1)");
+        assert_eq!(expr_of("f\"{a + 1:>4}!\""), "f[2]");
+    }
+
+    #[test]
+    fn comparison_chain_is_rejected() {
+        let (_, diags) = parse_text("def main():\n    a < b < c\n");
+        assert_eq!(codes_of(&diags), [codes::COMPARISON_CHAIN]);
+        let (_, diags) = parse_text("def main():\n    (a < b) < c\n");
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn statements() {
+        let text = "\
+def main():
+    x: int = 1
+    a, b = b, a
+    p.x += 1
+    xs[0] = 2
+    if x > 1:
+        return
+    elif x < 0:
+        x = 0
+    else:
+        pass_ = 1
+    while True:
+        break
+    for k, v in d.items():
+        continue
+";
+        let (module, diags) = parse_text(text);
+        assert!(diags.is_empty(), "{:?}", codes_of(&diags));
+        let body = &function(&module, 0).body;
+        assert!(matches!(body[0].kind, StmtKind::Assign { ty: Some(_), .. }));
+        assert!(
+            matches!(&body[1].kind, StmtKind::Assign { target: Target { kind: TargetKind::Tuple(t), .. }, .. } if t.len() == 2)
+        );
+        assert!(matches!(body[2].kind, StmtKind::AugAssign { op: BinaryOp::Add, .. }));
+        assert!(matches!(body[3].kind, StmtKind::Assign { target: Target { kind: TargetKind::Index { .. }, .. }, .. }));
+        assert!(matches!(&body[4].kind, StmtKind::If { branches, otherwise: Some(_) } if branches.len() == 2));
+        assert!(matches!(body[5].kind, StmtKind::While { .. }));
+        assert!(matches!(&body[6].kind, StmtKind::For { target: Target { kind: TargetKind::Tuple(_), .. }, .. }));
+    }
+
+    #[test]
+    fn structs_impls_and_consts() {
+        let text = "\
+const LIMIT = 10
+
+pub struct User:
+    \"\"\"A user.\"\"\"
+    id: int
+    priv name: str
+    tags: list[str] = []
+
+impl User:
+    def new(name: str) -> User:
+        return User(id=1, name=name)
+
+    pub def rename(self, name: str):
+        self.name = name
+";
+        let (module, diags) = parse_text(text);
+        assert!(diags.is_empty(), "{:?}", codes_of(&diags));
+        assert!(matches!(module.items[0], Item::Const(_)));
+        let Item::Struct(user) = &module.items[1] else { panic!() };
+        assert_eq!(user.fields.len(), 3);
+        assert_eq!(user.fields[1].visibility, Visibility::Priv);
+        assert!(user.fields[2].default.is_some());
+        let Item::Impl(imp) = &module.items[2] else { panic!() };
+        assert_eq!(imp.methods.len(), 2);
+        assert!(imp.methods[0].self_param.is_none());
+        assert!(imp.methods[1].self_param.is_some());
+    }
+
+    #[test]
+    fn errors_recover_at_the_next_statement() {
+        let (module, diags) =
+            parse_text("def main():\n    match x:\n        y()\n    print(1 +)\n    z()\n\ndef other():\n    w()\n");
+        assert_eq!(codes_of(&diags), [codes::NOT_SUPPORTED_SYNTAX, codes::UNEXPECTED_TOKEN]);
+        assert_eq!(module.items.len(), 2);
+        assert_eq!(function(&module, 0).body.len(), 1, "only `z()` survives");
+    }
+
+    #[test]
+    fn f_string_expression_errors_point_into_the_string() {
+        let (_, diags) = parse_text("def main():\n    print(f\"a{1 +}b\")\n");
+        let sorted = diags.sorted();
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(sorted[0].primary.span.lo, "def main():\n    print(f\"a{1 +".len() as u32);
+    }
+
+    #[test]
+    fn top_level_statement_is_rejected() {
+        let (_, diags) = parse_text("print(\"hi\")\n");
+        assert_eq!(codes_of(&diags), [codes::UNEXPECTED_TOKEN]);
+    }
+
+    #[test]
+    fn unexpected_indent_is_rejected() {
+        let (module, diags) = parse_text("def main():\n    a()\n        b()\n    c()\n");
+        assert_eq!(codes_of(&diags), [codes::UNEXPECTED_TOKEN]);
+        assert_eq!(function(&module, 0).body.len(), 2);
+    }
+}

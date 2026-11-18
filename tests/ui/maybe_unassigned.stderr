@@ -1,0 +1,11 @@
+error[E0204]: `result` might not be assigned here
+ --> tests/ui/maybe_unassigned.wb:5:11
+  |
+4 |             result = "done"
+  |             ------ assigned here, but not on every path to the use
+5 |     print(result)
+  |           ^^^^^^ may be unassigned here
+  |
+  = help: make sure every path assigns it first, for example by giving it a value before the `if` or loop
+
+error: could not compile `tests/ui/maybe_unassigned.wb` due to 1 error

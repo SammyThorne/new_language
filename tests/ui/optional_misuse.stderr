@@ -1,0 +1,20 @@
+error[E0300]: expected `int`, found `int?`
+ --> tests/ui/optional_misuse.wb:2:12
+  |
+1 | def lookup(ages: dict[str, int], name: str) -> int:
+  |                                                --- expected because of this return type
+2 |     return ages.get(name)
+  |            ^^^^^^^^^^^^^^ expected `int`, found `int?`
+  |
+  = help: this value may be `None`; use `.unwrap()` or `.unwrap_or(default)`
+
+error[E0300]: expected `int`, found `None`
+ --> tests/ui/optional_misuse.wb:6:18
+  |
+6 |     count: int = None
+  |            --- expected because of this type hint
+  |                  ^^^^ expected `int`, found `None`
+  |
+  = help: only optional types can hold `None`; declare it as `int?`
+
+error: could not compile `tests/ui/optional_misuse.wb` due to 2 errors

@@ -1,0 +1,9 @@
+# expect: before
+# expect-exit: 101
+# expect-stderr: panic: index 5 is out of range for a list of length 3
+# expect-stderr: --> tests/run/panic_index.wb:9:11
+
+def main():
+    xs = [1, 2, 3]
+    print("before")
+    print(xs[5])

@@ -1,0 +1,9 @@
+error[E0317]: a condition must be a `bool`, found `int`
+ --> tests/ui/truthiness.wb:3:8
+  |
+3 |     if len(items):
+  |        ^^^^^^^^^^ has type `int`
+  |
+  = help: values are not true or false by themselves; compare explicitly, for example `len(items) > 0`
+
+error: could not compile `tests/ui/truthiness.wb` due to 1 error

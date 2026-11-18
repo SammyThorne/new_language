@@ -1,0 +1,34 @@
+class Node:
+    __slots__ = ("left", "right")
+
+    def __init__(self, left, right):
+        self.left = left
+        self.right = right
+
+
+def make(depth: int) -> Node:
+    if depth == 0:
+        return Node(None, None)
+    return Node(make(depth - 1), make(depth - 1))
+
+
+def check(node: Node) -> int:
+    if node.left is None:
+        return 1
+    return 1 + check(node.left) + check(node.right)
+
+
+min_depth = 4
+max_depth = 18
+stretch = max_depth + 1
+print(f"stretch tree of depth {stretch}\t check: {check(make(stretch))}")
+long_lived = make(max_depth)
+depth = min_depth
+while depth <= max_depth:
+    iterations = 1 << (max_depth - depth + min_depth)
+    total = 0
+    for _ in range(iterations):
+        total += check(make(depth))
+    print(f"{iterations}\t trees of depth {depth}\t check: {total}")
+    depth += 2
+print(f"long lived tree of depth {max_depth}\t check: {check(long_lived)}")

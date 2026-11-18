@@ -1,0 +1,5 @@
+def main():
+    for attempt in range(3):
+        if attempt == 2:
+            result = "done"
+    print(result)

@@ -55,7 +55,8 @@ Configuration:
 - **Pointer-free allocation** for string bytes, `bytes`, and element buffers of lists whose element type contains no references. The collector neither scans these nor mistakes their contents for pointers. For a web server, where most of the heap volume is request and response bytes, this is the most important tuning decision.
 - No finalisers. The language has none, and they slow collection.
 - Initial heap size and growth factor exposed through environment variables (`WEBY_GC_INITIAL_HEAP`, `WEBY_GC_FREE_SPACE_DIVISOR`) for tuning without recompiling.
-- Linking: the system `libgc` during development; vendored and statically linked for releases so that binaries are self-contained and the build flags are ours.
+- Linking: the system's `libgc.so.1` (Debian package `libgc1`), linked by its full file name so that no development package is needed; the runtime declares the few functions it uses itself. Vendoring and static linking for releases is still the plan, so that binaries are self-contained and the build flags are ours (D21 in [08](08-decisions-and-risks.md)).
+- Stress mode: `WEBY_GC_STRESS=1` collects before every allocation. The end-to-end tests run every program this way.
 
 ### The Rust heap rule
 

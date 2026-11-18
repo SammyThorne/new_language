@@ -219,6 +219,48 @@ Each decision records what was chosen, why, what was rejected, and what evidence
 
 **Rejected.** Go's stance of leaving it to the programmer: simplest, and what the previous version of this plan assumed. Full ownership tracking: sound, and no longer a Python-like language. Actors only, with no shared memory at all: sound, but a poor fit for shared caches and connection pools.
 
+### D21. The prototype links the system's Boehm GC
+
+**Status.** Decided while implementing milestone 2, 2026-11-18.
+
+**What it means.** Programs link `libgc.so.1`, which Debian ships in `libgc1`, by its full file name (`-l:libgc.so.1`). The runtime declares the handful of collector functions it calls, so building needs no headers or `-dev` package. A compiled program therefore needs `libgc1` installed where it runs.
+
+**Why.** The development machine had the library but not the headers, and there was no way to install packages. This removes a download and a C build from the build.
+
+**Revisit.** Before the first release: vendor bdwgc and link it statically, as D3 already plans, so binaries are self-contained.
+
+### D22. Strings are indexed by byte offset
+
+**Status.** Decided while implementing milestone 2, 2026-11-18, following docs/01.
+
+**What it means.** `len(s)` is the length in bytes, slicing uses byte offsets, and `s.find(x)` returns a byte offset. Slicing in the middle of a character panics. `for c in s` yields characters. Indexing a single position (`s[i]`) is a compile error that suggests slicing or iterating.
+
+**Why.** Strings are UTF-8, so byte offsets are constant-time and character offsets are not. This matches Go and Rust, and differs from Python, whose `len` counts code points. For ASCII text, which most protocol data is, the two agree.
+
+### D23. Float division by zero follows IEEE 754; integer division by zero panics
+
+**Status.** Decided while implementing milestone 1, 2026-11-18.
+
+**What it means.** `1.0 / 0.0` is `inf` and `0.0 / 0.0` is `nan`, as in Go and Rust. Integer `//`, `%` and `/` by zero panic. Python raises an error in both cases.
+
+**Why.** Floats already have values for these results, and checking every float division costs a branch in numeric code. Integers have no such value.
+
+### D24. A panic prints its location and exits with status 101
+
+**Status.** Decided while implementing milestone 1, 2026-11-18.
+
+**What it means.** A panic flushes standard output, prints `panic: <message>` and ` --> file:line:col` to standard error, and exits with status 101, the same status Rust uses. Panics come from bugs: an index out of range, `unwrap()` on `None`, a missing dict key, division by zero, a negative shift count, `int()` of a non-finite float, or an explicit `panic("...")`.
+
+### D25. Dict keys use a seeded fast hash, not SipHash
+
+**Status.** Decided while implementing milestone 2, 2026-11-18.
+
+**What it means.** String keys are hashed with a wyhash-style function and a random per-process seed, the approach Go's maps take. The seed keeps hash values unpredictable from outside, so request data cannot be crafted to collide. The function is not cryptographic.
+
+**Why.** It is several times faster than SipHash on the short keys that dominate in practice. Python uses SipHash but caches each string's hash; the compiled language cannot cache, because strings are plain pointer-and-length values.
+
+**Revisit if.** A collision attack against seeded non-cryptographic hashing becomes practical, as it would for Go too.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

@@ -4,31 +4,44 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 
 ## Status
 
-The compiler runs end to end: source is lexed, parsed, type-checked, compiled to native code through LLVM 19 and linked with a small Rust runtime. It implements a first slice of the language, enough for hello world and simple typed functions:
+Milestones 0 to 2 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
 
 ```python
-def add(a: int, b: int) -> int:
-    return a + b
+struct WordCount:
+    word: str
+    count: int
+
+def top(counts: dict[str, int]) -> WordCount?:
+    best: WordCount? = None
+    for word, count in counts.items():
+        if best is None or count > best.unwrap().count:
+            best = WordCount(word, count)
+    return best
 
 def main():
-    print("Hello, world!")
-    total = add(40, 2)
-    print("total:", total, True)
+    counts: dict[str, int] = {}
+    for word in "the cat and the hat".split():
+        counts[word] = counts.get_or(word, 0) + 1
+    winner = top(counts).unwrap()
+    print(f"most common: {winner.word} ({winner.count})")
 ```
 
 | Works now | Not yet |
 |---|---|
-| `def` with typed parameters and return types; calls in any order | `if`, loops, `match` |
-| Locals declared by first assignment, with optional type hints | Structs, traits, enums, generics |
-| `int` (wrapping `+ - *`), `bool` (`not`), `str` literals, `None` | Floats, collections, string operations |
-| `print` with any number of arguments | Modules, `pub`/`priv` enforcement |
-| Diagnostics with source snippets and stable codes | Everything in the standard library |
+| Functions with type hints, `if`/`elif`/`else`, `while`, `for`, `break`, `continue` | Traits, enums, `match`, `Result` and `?` (milestone 3) |
+| `int` (wrapping), `float` (printed exactly as Python prints it), `bool`, `str` | Generics, lambdas, closures (milestone 4) |
+| Structs with defaults, methods and static methods | Modules and imports (milestone 5) |
+| `list`, `dict`, tuples, optionals (`T?`) with their usual methods | Tasks, JSON, HTTP, WebSockets (milestones 6 to 9) |
+| f-strings with Python's format specs | Sets, printing structs |
+| Panics with source locations; diagnostics with source snippets | |
 
-Constructs from the design that are not implemented are rejected with an error saying they are not supported yet. Progress against the roadmap is in [docs/06-roadmap.md](docs/06-roadmap.md#progress).
+Constructs from the design that are not implemented are rejected with an error saying they are not supported yet.
+
+Compiled programs run 20x to 35x faster than CPython on calls, loops and allocation, and about 2x on string-and-dict-heavy code; see [bench/README.md](bench/README.md).
 
 ## Building and running
 
-Requires Rust 1.85 or newer, LLVM 19 development files, and a C compiler for linking. On Debian or Ubuntu: `apt install llvm-19-dev gcc`. The path to LLVM is set in `.cargo/config.toml`; adjust it if LLVM 19 lives elsewhere.
+Requires Rust 1.85 or newer, LLVM 19 development files, a C compiler for linking, and the Boehm garbage collector library. On Debian or Ubuntu: `apt install llvm-19-dev gcc libgc1`. The path to LLVM is set in `.cargo/config.toml`; adjust it if LLVM 19 lives elsewhere.
 
 ```bash
 cargo build --workspace

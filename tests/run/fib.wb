@@ -1,0 +1,12 @@
+# Milestone 1 exit program: recursion.
+# expect: 75025
+# expect: 0 1 1 2 3 5 8 13
+
+def fib(n: int) -> int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def main():
+    print(fib(25))
+    print(fib(0), fib(1), fib(2), fib(3), fib(4), fib(5), fib(6), fib(7))

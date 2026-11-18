@@ -1,0 +1,3 @@
+def main():
+    prices: dict[float, str] = {}
+    print(len(prices))

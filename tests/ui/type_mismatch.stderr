@@ -1,0 +1,11 @@
+error[E0300]: expected `str`, found `int`
+ --> tests/ui/type_mismatch.wb:2:12
+  |
+1 | def test(a: int) -> str:
+  |                     --- expected because of this return type
+2 |     return a
+  |            ^ expected `str`, found `int`
+  |
+  = help: convert it with `str(...)`, or use an f-string
+
+error: could not compile `tests/ui/type_mismatch.wb` due to 1 error

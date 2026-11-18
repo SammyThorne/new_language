@@ -1,0 +1,29 @@
+# Optional values: None, wrapping, checks, unwrap, and printing.
+# expect: None 5 True False
+# expect: 5 0 10
+# expect: None hi
+# expect: found Grace
+# expect: True True False
+
+struct Person:
+    name: str
+    manager: Person? = None
+
+def find(people: list[Person], name: str) -> Person?:
+    for p in people:
+        if p.name == name:
+            return p
+    return None
+
+def main():
+    nothing: int? = None
+    five: int? = 5
+    print(nothing, five, nothing is None, five is None)
+    print(five.unwrap(), nothing.unwrap_or(0), five.unwrap_or(0) * 2)
+    maybe_text: str? = None
+    print(maybe_text, "hi" if maybe_text is None else maybe_text.unwrap())
+    people = [Person("Ada"), Person("Grace")]
+    match_ = find(people, "Grace")
+    if match_ is not None:
+        print("found", match_.unwrap().name)
+    print(find(people, "Linus") is None, five == 5, nothing == 5)

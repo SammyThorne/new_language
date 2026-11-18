@@ -1,0 +1,9 @@
+error[E0321]: cannot use `+` on `int` and `str`
+ --> tests/ui/int_plus_str.wb:2:13
+  |
+2 |     total = 1 + "one"
+  |             ^^^^^^^^^ `int` + `str`
+  |
+  = help: strings only combine with strings; use an f-string or `str(...)` to build text
+
+error: could not compile `tests/ui/int_plus_str.wb` due to 1 error

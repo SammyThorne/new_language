@@ -1,0 +1,10 @@
+error[E0303]: function `answer` can finish without returning a value
+ --> tests/ui/missing_return.wb:1:5
+  |
+1 | def answer() -> int:
+  |     ^^^^^^ can reach its end without `return`
+  |                 --- declared to return `int`
+  |
+  = help: add a `return` statement at the end of the function
+
+error: could not compile `tests/ui/missing_return.wb` due to 1 error

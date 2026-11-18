@@ -1,0 +1,15 @@
+struct Counter:
+    count: int
+
+impl Counter:
+    def zero() -> Counter:
+        return Counter(0)
+
+    def bump(self):
+        self.count += 1
+
+def main():
+    c = Counter.zero()
+    c.bumpp()
+    Counter.bump()
+    print("hello".startswith("h"))

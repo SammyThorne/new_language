@@ -1,0 +1,6 @@
+# expect-exit: 101
+# expect-stderr: panic: key 'missing' is not in the dict
+
+def main():
+    d = {"present": 1}
+    print(d["missing"])

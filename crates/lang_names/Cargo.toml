@@ -1,0 +1,7 @@
+[package]
+name = "lang_names"
+description = "Every user-visible name of the language, in one place so it can be renamed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true

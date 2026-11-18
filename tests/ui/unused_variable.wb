@@ -1,0 +1,4 @@
+def main():
+    unused = 1
+    _ignored = 2
+    print("ok")

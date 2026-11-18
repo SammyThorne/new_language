@@ -1,0 +1,9 @@
+error[E0001]: tab character in indentation
+ --> tests/ui/tab_indentation.wb:2:1
+  |
+2 |  print("tab")
+  | ^ tab here
+  |
+  = help: indent with spaces only
+
+error: could not compile `tests/ui/tab_indentation.wb` due to 1 error

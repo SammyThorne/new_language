@@ -1,0 +1,24 @@
+[package]
+name = "lang_cli"
+description = "The compiler's command-line driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# The executable's name is the one place outside `lang_names` that spells the language's
+# name; see "Renaming the language" in docs/03-compiler-architecture.md.
+[[bin]]
+name = "weby"
+path = "src/main.rs"
+
+[dependencies]
+lang_names.workspace = true
+lang_diag.workspace = true
+lang_syntax.workspace = true
+lang_sema.workspace = true
+lang_codegen.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+lang_names.workspace = true

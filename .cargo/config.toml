@@ -1,0 +1,4 @@
+# Where llvm-sys finds LLVM 19 (Debian's llvm-19-dev package). An LLVM_SYS_191_PREFIX
+# already set in the environment takes precedence over this value.
+[env]
+LLVM_SYS_191_PREFIX = "/usr/lib/llvm-19"

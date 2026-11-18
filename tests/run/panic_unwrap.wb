@@ -1,0 +1,6 @@
+# expect-exit: 101
+# expect-stderr: panic: unwrap() called on None
+
+def main():
+    missing: str? = None
+    print(missing.unwrap())

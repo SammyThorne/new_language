@@ -1,0 +1,25 @@
+error[E0101]: `import` declarations are not supported yet
+ --> tests/ui/not_supported_yet.wb:1:1
+  |
+1 | import json
+  | ^^^^^^ not supported yet
+
+error[E0101]: set literals are not supported yet
+ --> tests/ui/not_supported_yet.wb:4:13
+  |
+4 |     items = {1, 2}
+  |             ^ not supported yet
+
+error[E0101]: `match` statements are not supported yet
+ --> tests/ui/not_supported_yet.wb:5:5
+  |
+5 |     match items:
+  |     ^^^^^ not supported yet
+
+error[E0101]: `lambda` expressions are not supported yet
+ --> tests/ui/not_supported_yet.wb:8:14
+  |
+8 |     double = lambda x: x * 2
+  |              ^^^^^^ not supported yet
+
+error: could not compile `tests/ui/not_supported_yet.wb` due to 4 errors

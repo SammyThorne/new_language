@@ -1,0 +1,25 @@
+error[E0316]: `Counter` has no method `bumpp`
+  --> tests/ui/method_errors.wb:13:7
+   |
+13 |     c.bumpp()
+   |       ^^^^^ no such method
+   |
+   = help: did you mean `bump`?
+
+error[E0203]: `Counter.bump` needs a `Counter` value
+  --> tests/ui/method_errors.wb:14:13
+   |
+14 |     Counter.bump()
+   |             ^^^^ takes `self`
+   |
+   = help: call it on a value: `value.bump(...)`
+
+error[E0316]: `str` has no method `startswith`
+  --> tests/ui/method_errors.wb:15:19
+   |
+15 |     print("hello".startswith("h"))
+   |                   ^^^^^^^^^^ no such method
+   |
+   = help: the method is called `starts_with`
+
+error: could not compile `tests/ui/method_errors.wb` due to 3 errors

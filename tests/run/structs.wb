@@ -1,0 +1,73 @@
+# Structs, defaults, methods, static methods, sharing by reference, identity.
+# expect: Point(3, 4) 5
+# expect: 0 1
+# expect: Ada ['admin'] []
+# expect: renamed: Ada Lovelace
+# expect: True False True
+# expect: 3 -> 2 -> 1
+# expect: 6
+
+struct Point:
+    x: int
+    y: int
+
+impl Point:
+    def origin() -> Point:
+        return Point(0, 0)
+
+    def length_squared(self) -> int:
+        return self.x * self.x + self.y * self.y
+
+    def describe(self) -> str:
+        return f"Point({self.x}, {self.y})"
+
+struct User:
+    name: str
+    tags: list[str] = []
+    visits: int = 0
+
+impl User:
+    def rename(self, name: str):
+        self.name = name
+
+struct Node:
+    value: int
+    next: Node? = None
+
+def total(node: Node?) -> int:
+    sum = 0
+    current = node
+    while current is not None:
+        n = current.unwrap()
+        sum += n.value
+        current = n.next
+    return sum
+
+def main():
+    p = Point(3, 4)
+    print(p.describe(), p.length_squared() - 20)
+    o = Point.origin()
+    o.y += 1
+    print(o.x, o.y)
+
+    admin = User(name="Ada")
+    guest = User("Grace")
+    admin.tags.append("admin")
+    print(admin.name, admin.tags, guest.tags)
+
+    alias = admin
+    alias.rename("Ada Lovelace")
+    print("renamed:", admin.name)
+    print(alias is admin, guest is admin, admin is not guest)
+
+    list = Node(1)
+    list = Node(2, list)
+    list = Node(3, list)
+    text = str(list.value)
+    cursor = list.next
+    while cursor is not None:
+        node = cursor.unwrap()
+        text = text + " -> " + str(node.value)
+        cursor = node.next
+    print(text)
+    print(total(list))
