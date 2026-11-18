@@ -1,0 +1,5 @@
+# expect-exit: 101
+# expect-stderr: panic: unwrap() called on an error: "abc" is not a valid int
+
+def main():
+    print(int.parse("abc").unwrap())

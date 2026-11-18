@@ -1,0 +1,140 @@
+# Milestone 3 exit program: an expression evaluator built from enums, match and Result.
+# expect: 1 + 2 * 3 = 7.0
+# expect: (1 + 2) * 3 = 9.0
+# expect: x * (y - 0.5) = 8.0
+# expect: parsed: ((x * 2.0) + 1.0)
+# expect: 10 / (x - 4): error: division by zero
+# expect: z + 1: error: unknown variable 'z'
+# expect: (1 + 2: error: expected ')'
+# expect: 2 *: error: unexpected end of input
+
+enum Expr:
+    Num(value: float)
+    Var(name: str)
+    Add(left: Expr, right: Expr)
+    Sub(left: Expr, right: Expr)
+    Mul(left: Expr, right: Expr)
+    Div(left: Expr, right: Expr)
+
+struct EvalError:
+    reason: str
+
+impl Error for EvalError:
+    def message(self) -> str:
+        return self.reason
+
+def tokenize(text: str) -> list[str]:
+    tokens: list[str] = []
+    current = ""
+    for c in text:
+        if c == " " or c in "+-*/()":
+            if current != "":
+                tokens.append(current)
+                current = ""
+            if c != " ":
+                tokens.append(c)
+        else:
+            current = current + c
+    if current != "":
+        tokens.append(current)
+    return tokens
+
+struct Parser:
+    tokens: list[str]
+    pos: int = 0
+
+impl Parser:
+    def peek(self) -> str:
+        if self.pos < len(self.tokens):
+            return self.tokens[self.pos]
+        return ""
+
+    def next(self) -> str:
+        token = self.peek()
+        self.pos += 1
+        return token
+
+    def expr(self) -> Result[Expr]:
+        left = self.term()?
+        while self.peek() == "+" or self.peek() == "-":
+            op = self.next()
+            right = self.term()?
+            left = Add(left, right) if op == "+" else Sub(left, right)
+        return left
+
+    def term(self) -> Result[Expr]:
+        left = self.atom()?
+        while self.peek() == "*" or self.peek() == "/":
+            op = self.next()
+            right = self.atom()?
+            left = Mul(left, right) if op == "*" else Div(left, right)
+        return left
+
+    def atom(self) -> Result[Expr]:
+        token = self.next()
+        if token == "":
+            return Err(EvalError("unexpected end of input"))
+        if token == "(":
+            inner = self.expr()?
+            if self.next() != ")":
+                return Err(EvalError("expected ')'"))
+            return inner
+        match float.parse(token):
+            case Ok(value):
+                return Num(value)
+            case Err(_):
+                return Var(token)
+
+def evaluate(e: Expr, env: dict[str, float]) -> Result[float]:
+    match e:
+        case Num(value):
+            return value
+        case Var(name):
+            match env.get(name):
+                case Some(value):
+                    return value
+                case None:
+                    return Err(EvalError(f"unknown variable '{name}'"))
+        case Add(left, right):
+            return evaluate(left, env)? + evaluate(right, env)?
+        case Sub(left, right):
+            return evaluate(left, env)? - evaluate(right, env)?
+        case Mul(left, right):
+            return evaluate(left, env)? * evaluate(right, env)?
+        case Div(left, right):
+            divisor = evaluate(right, env)?
+            if divisor == 0.0:
+                return Err(EvalError("division by zero"))
+            return evaluate(left, env)? / divisor
+
+def show(e: Expr) -> str:
+    match e:
+        case Num(value):
+            return str(value)
+        case Var(name):
+            return name
+        case Add(left, right):
+            return f"({show(left)} + {show(right)})"
+        case Sub(left, right):
+            return f"({show(left)} - {show(right)})"
+        case Mul(left, right):
+            return f"({show(left)} * {show(right)})"
+        case Div(left, right):
+            return f"({show(left)} / {show(right)})"
+
+def run(text: str, env: dict[str, float]) -> Result[float]:
+    parser = Parser(tokenize(text))
+    tree = parser.expr()?
+    return evaluate(tree, env)
+
+def main():
+    env = {"x": 4.0, "y": 2.5}
+    for text in ["1 + 2 * 3", "(1 + 2) * 3", "x * (y - 0.5)"]:
+        print(f"{text} = {run(text, env).unwrap()}")
+    print("parsed:", show(Parser(tokenize("x * 2 + 1")).expr().unwrap()))
+    for text in ["10 / (x - 4)", "z + 1", "(1 + 2", "2 *"]:
+        match run(text, env):
+            case Ok(value):
+                print(f"{text} = {value}")
+            case Err(error):
+                print(f"{text}: error: {error.message()}")

@@ -1,0 +1,9 @@
+error[E0325]: the trait `Copy` cannot be used as a type
+ --> tests/ui/trait_not_object_safe.wb:1:21
+  |
+1 | def describe(value: Copy) -> str:
+  |                     ^^^^ method `copy` mentions `Self`
+  |
+  = help: only traits whose methods all take `self` and never mention `Self` can be used as types
+
+error: could not compile `tests/ui/trait_not_object_safe.wb` due to 1 error

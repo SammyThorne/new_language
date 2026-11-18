@@ -1,0 +1,82 @@
+# Derived and hand-written trait implementations, operator traits, required-trait upcasts.
+# expect: Point(x=1, y=2) True False
+# expect: {Point(x=1, y=2): 'home'} home
+# expect: Point(x=1, y=2) False
+# expect: Money(cents=1250)
+# expect: 12.50 total
+# expect: hello from Greeter: Ada
+# expect: Ada
+# expect: 3 Named
+# expect: frozen: (1, 2)
+
+@derive(Eq, Hash, Display, Copy)
+struct Point:
+    x: int
+    y: int
+
+@derive(Display)
+struct Money:
+    cents: int
+
+impl AddNumber for Money:
+    def add(self, other: Money) -> Money:
+        return Money(self.cents + other.cents)
+
+impl MulNumber for Money:
+    def mul(self, other: Money) -> Money:
+        return Money(self.cents * other.cents)
+
+impl Money:
+    def dollars(self) -> str:
+        return f"{self.cents // 100}.{self.cents % 100:02d}"
+
+trait Named:
+    def name(self) -> str
+
+trait Greeter(Named):
+    def greet(self) -> str:
+        return f"hello from Greeter: {self.name()}"
+
+trait Counted:
+    def count() -> int
+
+struct Person:
+    first: str
+
+impl Named for Person:
+    def name(self) -> str:
+        return self.first
+
+impl Greeter for Person:
+    pass
+
+impl Counted for Person:
+    def count() -> int:
+        return 3
+
+def show_name(n: Named) -> str:
+    return n.name()
+
+@frozen
+struct Pair:
+    a: int
+    b: int
+
+def main():
+    p = Point(1, 2)
+    print(p, p == Point(1, 2), p == Point(2, 1))
+    places = {p: "home"}
+    print(places, places[Point(1, 2)])
+    q = p.copy()
+    q.x = 5
+    print(p, p is q)
+    total = Money(1000) + Money(250)
+    print(total)
+    print(total.dollars(), "total")
+    person = Person("Ada")
+    greeter: Greeter = person
+    print(greeter.greet())
+    print(show_name(greeter))
+    print(Person.count(), "Named")
+    pair = Pair(1, 2)
+    print("frozen:", (pair.a, pair.b))

@@ -1,0 +1,9 @@
+error[E0327]: `?` passes an error to the caller, but this function does not return a `Result`
+ --> tests/ui/question_mark_outside_result.wb:2:12
+  |
+2 |     port = int.parse("8080")?
+  |            ^^^^^^^^^^^^^^^^^^ error has nowhere to go
+  |
+  = help: declare the function as returning a `Result` (it returns `None`), or handle the error here with `match`
+
+error: could not compile `tests/ui/question_mark_outside_result.wb` due to 1 error

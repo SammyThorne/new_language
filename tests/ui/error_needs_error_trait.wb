@@ -1,0 +1,10 @@
+struct Problem:
+    code: int
+
+def check(n: int) -> Result[int]:
+    if n < 0:
+        return Err(Problem(n))
+    return n
+
+def main():
+    print(check(1).unwrap())

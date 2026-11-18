@@ -1,0 +1,9 @@
+error[E0322]: this `Result` is not used
+ --> tests/ui/unused_result.wb:5:5
+  |
+5 |     load("config.toml")
+  |     ^^^^^^^^^^^^^^^^^^^ may hold an error that is being ignored
+  |
+  = help: pass the error on with `?`, handle it with `match`, or discard it with `_ = ...`
+
+error: could not compile `tests/ui/unused_result.wb` due to 1 error

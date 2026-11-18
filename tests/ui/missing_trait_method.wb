@@ -1,0 +1,13 @@
+trait Shape:
+    def area(self) -> float
+    def name(self) -> str
+
+struct Square:
+    side: float
+
+impl Shape for Square:
+    def area(self) -> float:
+        return self.side * self.side
+
+def main():
+    print(Square(2.0).area())

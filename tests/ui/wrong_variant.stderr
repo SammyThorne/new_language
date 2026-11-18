@@ -1,0 +1,16 @@
+error[E0329]: `Small` is a variant of `Size`, but the value being matched is `Color`
+  --> tests/ui/wrong_variant.wb:13:14
+   |
+13 |         case Small:
+   |              ^^^^^ wrong enum
+
+error[E0316]: `Color` has no variant `Purple`
+  --> tests/ui/wrong_variant.wb:19:34
+   |
+ 1 | enum Color:
+   |      ----- `Color` is defined here
+   ...
+19 |     print(name(Color.Red), Color.Purple)
+   |                                  ^^^^^^ no such variant
+
+error: could not compile `tests/ui/wrong_variant.wb` due to 2 errors

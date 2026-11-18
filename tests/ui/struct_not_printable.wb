@@ -1,0 +1,5 @@
+struct User:
+    name: str
+
+def main():
+    print(User("Ada"))

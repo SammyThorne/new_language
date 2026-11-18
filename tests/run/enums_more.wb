@@ -1,0 +1,77 @@
+# Enums, match patterns, Result and optional propagation, parsing.
+# expect: Red Green(level=3) True False
+# expect: warm cold warm
+# expect: zero small big negative
+# expect: origin on an axis elsewhere
+# expect: Ok(42) Err(ParseError(text='4x2', expected='int'))
+# expect: "4x2" is not a valid int
+# expect: 2.5 error
+# expect: 7 None
+# expect: saved 3
+# expect: Ok(None)
+
+@derive(Eq, Display)
+enum Color:
+    Red
+    Green(level: int)
+    Blue
+
+def temperature(c: Color) -> str:
+    match c:
+        case Red | Green(_):
+            return "warm"
+        case Blue:
+            return "cold"
+
+def size(n: int) -> str:
+    match n:
+        case 0:
+            return "zero"
+        case k if k < 0:
+            return "negative"
+        case 1 | 2 | 3:
+            return "small"
+        case _:
+            return "big"
+
+def where(point: tuple[int, int]) -> str:
+    match point:
+        case (0, 0):
+            return "origin"
+        case (0, _) | (_, 0):
+            return "on an axis"
+        case _:
+            return "elsewhere"
+
+def first_even(xs: list[int]) -> int?:
+    for x in xs:
+        if x % 2 == 0:
+            return x
+    return None
+
+def double_first_even(xs: list[int]) -> int?:
+    found = first_even(xs)?
+    return found * 2 - 1
+
+def save(count: int) -> Result[None]:
+    if count < 0:
+        return Err(ParseError("count", "positive"))
+    print("saved", count)
+
+def main():
+    print(Color.Red, Color.Green(3), Green(3) == Color.Green(level=3), Red == Blue)
+    print(temperature(Red), temperature(Blue), temperature(Green(1)))
+    print(size(0), size(2), size(10), size(-4))
+    print(where((0, 0)), where((0, 5)), where((2, 3)))
+    good = int.parse("42")
+    bad = int.parse("4x2")
+    print(good, bad)
+    match bad:
+        case Ok(n):
+            print(n)
+        case Err(e):
+            print(e.message())
+    print(float.parse(" 2.5 ").unwrap(), "error" if float.parse("x").is_err() else "fine")
+    print(double_first_even([1, 4, 6]).unwrap(), double_first_even([1, 3]))
+    _ = save(3)
+    print(save(0) if False else Ok(None))

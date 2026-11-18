@@ -1,0 +1,75 @@
+# Milestone 3 exit program: traits, default methods, required traits, dynamic dispatch.
+# expect: circle with area 3.1
+# expect: square with area 4.0
+# expect: rectangle 2.0x3.0 with area 6.0
+# expect: total area: 13.14
+# expect: largest: rectangle
+# expect: Circle(radius=1.0) Square(side=2.0) 2.0x3.0
+
+trait Shape(Display):
+    def area(self) -> float
+    def name(self) -> str
+
+    def describe(self) -> str:
+        return f"{self.name()} with area {self.area():.1f}"
+
+@derive(Display)
+struct Circle:
+    radius: float
+
+@derive(Display)
+struct Square:
+    side: float
+
+struct Rectangle:
+    width: float
+    height: float
+
+impl Shape for Circle:
+    def area(self) -> float:
+        return 3.14159 * self.radius ** 2
+
+    def name(self) -> str:
+        return "circle"
+
+impl Shape for Square:
+    def area(self) -> float:
+        return self.side * self.side
+
+    def name(self) -> str:
+        return "square"
+
+impl Display for Rectangle:
+    def to_str(self) -> str:
+        return f"{self.width}x{self.height}"
+
+impl Shape for Rectangle:
+    def area(self) -> float:
+        return self.width * self.height
+
+    def name(self) -> str:
+        return "rectangle"
+
+    def describe(self) -> str:
+        return f"rectangle {self} with area {self.area():.1f}"
+
+def total_area(shapes: list[Shape]) -> float:
+    total = 0.0
+    for shape in shapes:
+        total += shape.area()
+    return total
+
+def largest(shapes: list[Shape]) -> Shape?:
+    best: Shape? = None
+    for shape in shapes:
+        if best is None or shape.area() > best.unwrap().area():
+            best = shape
+    return best
+
+def main():
+    shapes: list[Shape] = [Circle(1.0), Square(2.0), Rectangle(2.0, 3.0)]
+    for shape in shapes:
+        print(shape.describe())
+    print(f"total area: {total_area(shapes):.2f}")
+    print("largest:", largest(shapes).unwrap().name())
+    print(shapes[0], shapes[1], shapes[2])

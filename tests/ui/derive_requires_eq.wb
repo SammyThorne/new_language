@@ -1,0 +1,6 @@
+@derive(Hash)
+struct Key:
+    id: int
+
+def main():
+    print(Key(1).id)

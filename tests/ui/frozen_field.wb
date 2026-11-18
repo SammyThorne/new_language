@@ -1,0 +1,7 @@
+@frozen
+struct Config:
+    port: int
+
+def main():
+    config = Config(8080)
+    config.port += 1

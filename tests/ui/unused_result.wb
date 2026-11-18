@@ -1,0 +1,6 @@
+def load(path: str) -> Result[str]:
+    return "contents of " + path
+
+def main():
+    load("config.toml")
+    _ = load("ignored.toml")

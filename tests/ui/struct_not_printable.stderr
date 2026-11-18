@@ -1,0 +1,9 @@
+error[E0102]: a `User` cannot be printed
+ --> tests/ui/struct_not_printable.wb:5:11
+  |
+5 |     print(User("Ada"))
+  |           ^^^^^^^^^^^ has type `User`
+  |
+  = help: add `@derive(Display)` to `User`, or implement `Display` for it
+
+error: could not compile `tests/ui/struct_not_printable.wb` due to 1 error

@@ -1,0 +1,19 @@
+enum Color:
+    Red
+    Green
+
+enum Size:
+    Small
+    Large
+
+def name(c: Color) -> str:
+    match c:
+        case Red:
+            return "red"
+        case Small:
+            return "small"
+        case _:
+            return "other"
+
+def main():
+    print(name(Color.Red), Color.Purple)

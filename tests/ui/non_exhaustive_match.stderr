@@ -1,0 +1,9 @@
+error[E0326]: this `match` does not cover every case
+ --> tests/ui/non_exhaustive_match.wb:7:5
+  |
+7 |     match s:
+  |     ^^^^^^^ not covered: Deleted
+  |
+  = help: add the missing cases, or `case _:` to cover everything else
+
+error: could not compile `tests/ui/non_exhaustive_match.wb` due to 1 error

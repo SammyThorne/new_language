@@ -1,0 +1,14 @@
+enum Status:
+    Active
+    Suspended(reason: str)
+    Deleted
+
+def label(s: Status) -> str:
+    match s:
+        case Active:
+            return "active"
+        case Suspended(_):
+            return "suspended"
+
+def main():
+    print(label(Status.Active))

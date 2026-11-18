@@ -1,0 +1,8 @@
+warning[W0003]: this case can never match
+ --> tests/ui/unreachable_case.wb:5:14
+  |
+5 |         case 0:
+  |              ^ covered by the cases above
+  |
+  = help: remove it, or move it before the case that covers it
+

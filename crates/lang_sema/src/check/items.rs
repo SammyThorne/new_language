@@ -1,0 +1,872 @@
+//! Declaration passes: structs, enums, traits, constants, functions, `impl` blocks and
+//! annotations (`@derive`, `@frozen`).
+
+use super::{
+    BUILTIN_CONSTRUCTORS, BUILTIN_FUNCTIONS, BUILTIN_TYPES, Body, Checker, ConstInfo, EnumInfo, FieldInfo, FnCx,
+    Global, ImplInfo, KNOWN_TYPES, ParamSig, Signature, StructInfo, TraitInfo, TraitMethod, VariantInfo, closest,
+};
+use crate::hir::{self, FuncId};
+use crate::types::{TraitId, Ty, TyKind};
+use lang_diag::{Diagnostic, Span, codes};
+use lang_syntax::ast;
+use std::collections::HashMap;
+
+/// The traits `@derive` can implement.
+const DERIVABLE: &[&str] = &["Eq", "Hash", "Display", "Copy"];
+
+impl<'m> Checker<'_, 'm> {
+    /// Register a new top-level name. Returns false (after reporting) if it is taken.
+    fn claim_global(&mut self, name: &ast::Ident) -> bool {
+        let builtin = BUILTIN_FUNCTIONS.contains(&name.name.as_str())
+            || BUILTIN_CONSTRUCTORS.contains(&name.name.as_str())
+            || BUILTIN_TYPES.contains(&name.name.as_str())
+            || KNOWN_TYPES.contains(&name.name.as_str());
+        let from_prelude = self.globals.get(&name.name).is_some_and(|(_, span)| span.file == self.prelude_file);
+        if builtin || from_prelude {
+            self.error(Diagnostic::error(
+                codes::DUPLICATE_DEFINITION,
+                format!("`{}` is a built-in name and cannot be redefined", name.name),
+                name.span,
+                "redefines a built-in",
+            ));
+            return false;
+        }
+        if let Some(&(_, first)) = self.globals.get(&name.name) {
+            self.error(
+                Diagnostic::error(
+                    codes::DUPLICATE_DEFINITION,
+                    format!("`{}` is defined more than once", name.name),
+                    name.span,
+                    "defined again here",
+                )
+                .with_label(first, "first defined here"),
+            );
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn declare(&mut self, module: &'m ast::Module) {
+        for item in &module.items {
+            match item {
+                ast::Item::Struct(decl) => {
+                    if !self.claim_global(&decl.name) {
+                        continue;
+                    }
+                    let (id, ty) = self.types.add_struct(&decl.name.name);
+                    let name = decl.name.name.clone();
+                    self.structs.push(StructInfo {
+                        name: name.clone(),
+                        span: decl.name.span,
+                        ty,
+                        fields: Vec::new(),
+                        frozen: false,
+                    });
+                    self.globals.insert(name, (Global::Struct(id), decl.name.span));
+                    self.struct_items.push((id, decl));
+                }
+                ast::Item::Enum(decl) => {
+                    if !self.claim_global(&decl.name) {
+                        continue;
+                    }
+                    let (id, ty) = self.types.add_enum(&decl.name.name);
+                    let name = decl.name.name.clone();
+                    self.enums.push(EnumInfo { name: name.clone(), span: decl.name.span, ty, variants: Vec::new() });
+                    self.globals.insert(name, (Global::Enum(id), decl.name.span));
+                    self.enum_items.push((id, decl));
+                }
+                ast::Item::Trait(decl) => {
+                    if !self.claim_global(&decl.name) {
+                        continue;
+                    }
+                    let id = self.types.add_trait(&decl.name.name);
+                    let name = decl.name.name.clone();
+                    self.traits.push(TraitInfo {
+                        name: name.clone(),
+                        span: decl.name.span,
+                        supertraits: Vec::new(),
+                        methods: Vec::new(),
+                    });
+                    self.globals.insert(name, (Global::Trait(id), decl.name.span));
+                    self.trait_items.push((id, decl));
+                }
+                ast::Item::Const(decl) => {
+                    if !self.claim_global(&decl.name) {
+                        continue;
+                    }
+                    let index = self.consts.len();
+                    self.consts.push(ConstInfo { value: None });
+                    self.globals.insert(decl.name.name.clone(), (Global::Const(index), decl.name.span));
+                    self.const_items.push((index, decl));
+                }
+                ast::Item::Function(_) | ast::Item::Impl(_) => {}
+            }
+        }
+    }
+
+    /// Find the prelude's traits and types that the compiler gives meaning to.
+    pub(super) fn find_builtins(&mut self) {
+        let trait_named = |this: &Self, name: &str| match this.globals.get(name) {
+            Some((Global::Trait(id), _)) => *id,
+            other => panic!("the prelude must define the trait {name}, found {other:?}"),
+        };
+        let builtins = hir::BuiltinTraits {
+            display: trait_named(self, "Display"),
+            eq: trait_named(self, "Eq"),
+            hash: trait_named(self, "Hash"),
+            copy: trait_named(self, "Copy"),
+            error: trait_named(self, "Error"),
+            add: trait_named(self, "AddNumber"),
+            sub: trait_named(self, "SubNumber"),
+            mul: trait_named(self, "MulNumber"),
+        };
+        self.types.error_trait = Some(builtins.error);
+        self.builtins = Some(builtins);
+        self.parse_error = match self.globals.get("ParseError") {
+            Some((Global::Struct(id), _)) => Some(*id),
+            other => panic!("the prelude must define ParseError, found {other:?}"),
+        };
+    }
+
+    /// Resolve the types in trait signatures, struct fields and enum variants.
+    pub(super) fn resolve_declarations(&mut self) {
+        // Traits first: a field typed as a trait needs the trait's methods to know whether it
+        // can be used as a type.
+        for (id, decl) in self.trait_items.clone() {
+            let mut supertraits = Vec::new();
+            for name in &decl.supertraits {
+                match self.globals.get(&name.name) {
+                    Some(&(Global::Trait(s), _)) => supertraits.push(s),
+                    _ => self.error(Diagnostic::error(
+                        codes::UNKNOWN_TYPE,
+                        format!("unknown trait `{}`", name.name),
+                        name.span,
+                        "not a trait",
+                    )),
+                }
+            }
+            self.traits[id.0].supertraits = supertraits;
+        }
+        for (id, decl) in self.trait_items.clone() {
+            if self.trait_requires_itself(id) {
+                self.error(Diagnostic::error(
+                    codes::MISSING_REQUIRED_TRAIT,
+                    format!("trait `{}` requires itself", decl.name.name),
+                    decl.name.span,
+                    "through its list of required traits",
+                ));
+                self.traits[id.0].supertraits.clear();
+            }
+        }
+        for (id, decl) in self.trait_items.clone() {
+            let self_ty = self.types.self_type(id);
+            self.self_ty = Some(self_ty);
+            let mut methods: Vec<TraitMethod> = Vec::new();
+            for (index, method) in decl.methods.iter().enumerate() {
+                if let Some(first) = methods.iter().find(|m| m.name == method.name.name) {
+                    let first_span = first.span;
+                    self.error(
+                        Diagnostic::error(
+                            codes::DUPLICATE_DEFINITION,
+                            format!("trait `{}` declares `{}` twice", decl.name.name, method.name.name),
+                            method.name.span,
+                            "declared again here",
+                        )
+                        .with_label(first_span, "first declared here"),
+                    );
+                    continue;
+                }
+                let signature = self.signature(method, &method.name.name, None);
+                methods.push(TraitMethod {
+                    name: method.name.name.clone(),
+                    span: method.name.span,
+                    params: signature.params,
+                    ret: signature.ret,
+                    ret_span: signature.ret_span,
+                    has_self: method.self_param.is_some(),
+                });
+                if method.has_body {
+                    self.trait_defaults.insert((id, methods.len() - 1), &decl.methods[index]);
+                }
+            }
+            self.traits[id.0].methods = methods;
+            self.self_ty = None;
+        }
+
+        for (id, decl) in self.struct_items.clone() {
+            let fields = self.fields(&decl.fields);
+            self.structs[id.0].fields = fields;
+        }
+        for (id, decl) in self.enum_items.clone() {
+            let mut variants: Vec<VariantInfo> = Vec::new();
+            for variant in &decl.variants {
+                if let Some(first) = variants.iter().find(|v| v.name == variant.name.name) {
+                    let first_span = first.span;
+                    self.error(
+                        Diagnostic::error(
+                            codes::DUPLICATE_DEFINITION,
+                            format!("variant `{}` is declared twice", variant.name.name),
+                            variant.name.span,
+                            "declared again here",
+                        )
+                        .with_label(first_span, "first declared here"),
+                    );
+                    continue;
+                }
+                let fields = self.fields(&variant.fields);
+                self.variant_names.entry(variant.name.name.clone()).or_default().push((id, variants.len()));
+                variants.push(VariantInfo { name: variant.name.name.clone(), span: variant.name.span, fields });
+            }
+            if variants.is_empty() {
+                self.error(Diagnostic::error(
+                    codes::BAD_PATTERN,
+                    format!("enum `{}` has no variants", decl.name.name),
+                    decl.name.span,
+                    "needs at least one variant",
+                ));
+            }
+            self.enums[id.0].variants = variants;
+        }
+    }
+
+    fn trait_requires_itself(&self, id: TraitId) -> bool {
+        let mut stack: Vec<TraitId> = self.traits[id.0].supertraits.clone();
+        let mut seen = Vec::new();
+        while let Some(t) = stack.pop() {
+            if t == id {
+                return true;
+            }
+            if !seen.contains(&t) {
+                seen.push(t);
+                stack.extend(self.traits[t.0].supertraits.iter().copied());
+            }
+        }
+        false
+    }
+
+    fn fields(&mut self, decls: &[ast::FieldDecl]) -> Vec<FieldInfo> {
+        let mut fields: Vec<FieldInfo> = Vec::new();
+        for field in decls {
+            if let Some(first) = fields.iter().find(|f| f.name == field.name.name) {
+                let first_span = first.span;
+                self.error(
+                    Diagnostic::error(
+                        codes::DUPLICATE_DEFINITION,
+                        format!("field `{}` is declared twice", field.name.name),
+                        field.name.span,
+                        "declared again here",
+                    )
+                    .with_label(first_span, "first declared here"),
+                );
+                continue;
+            }
+            let ty = self.resolve_type(&field.ty);
+            if ty == Ty::NONE {
+                self.error(Diagnostic::error(
+                    codes::NONE_VARIABLE,
+                    format!("field `{}` cannot have type `None`", field.name.name),
+                    field.ty.span,
+                    "a `None` field carries no information",
+                ));
+            }
+            fields.push(FieldInfo { name: field.name.name.clone(), span: field.ty.span, ty, default: None });
+        }
+        fields
+    }
+
+    // ---- annotations --------------------------------------------------------------------
+
+    pub(super) fn register_derives(&mut self) {
+        let items: Vec<(Ty, &'m [ast::Annotation], bool)> = self
+            .struct_items
+            .iter()
+            .map(|(id, d)| (self.structs[id.0].ty, d.annotations.as_slice(), true))
+            .chain(self.enum_items.iter().map(|(id, d)| (self.enums[id.0].ty, d.annotations.as_slice(), false)))
+            .collect();
+        for (ty, annotations, is_struct) in items {
+            for annotation in annotations {
+                match annotation.name.name.as_str() {
+                    "derive" => {
+                        if annotation.args.is_empty() {
+                            self.error(Diagnostic::error(
+                                codes::BAD_ANNOTATION,
+                                "`@derive` needs a list of traits",
+                                annotation.span,
+                                "for example `@derive(Eq, Display)`",
+                            ));
+                        }
+                        for arg in &annotation.args {
+                            self.derive(ty, arg);
+                        }
+                    }
+                    "frozen" if is_struct => {
+                        if let Some(id) = self.struct_of(ty) {
+                            self.structs[id.0].frozen = true;
+                        }
+                    }
+                    "frozen" => self.error(Diagnostic::error(
+                        codes::BAD_ANNOTATION,
+                        "`@frozen` only applies to structs",
+                        annotation.span,
+                        "enums are already immutable",
+                    )),
+                    other => {
+                        let mut diagnostic = Diagnostic::error(
+                            codes::BAD_ANNOTATION,
+                            format!("unknown annotation `@{other}`"),
+                            annotation.name.span,
+                            "not a known annotation",
+                        )
+                        .with_help("the annotations available so far are `@derive(...)` and `@frozen`");
+                        if matches!(other, "json" | "test" | "extern") {
+                            diagnostic = Diagnostic::error(
+                                codes::NOT_SUPPORTED,
+                                format!("`@{other}` is not supported yet"),
+                                annotation.name.span,
+                                "not supported yet",
+                            );
+                        }
+                        self.error(diagnostic);
+                    }
+                }
+            }
+        }
+    }
+
+    fn derive(&mut self, ty: Ty, arg: &ast::Ident) {
+        let b = self.builtin();
+        let trait_id = match arg.name.as_str() {
+            "Eq" => b.eq,
+            "Hash" => b.hash,
+            "Display" => b.display,
+            "Copy" => b.copy,
+            "Ord" | "Json" => {
+                let milestone = if arg.name == "Ord" { 4 } else { 7 };
+                self.error(Diagnostic::error(
+                    codes::NOT_SUPPORTED,
+                    format!("deriving `{}` is not supported yet", arg.name),
+                    arg.span,
+                    format!("arrives in milestone {milestone}"),
+                ));
+                return;
+            }
+            other => {
+                let mut diagnostic = Diagnostic::error(
+                    codes::BAD_ANNOTATION,
+                    format!("`{other}` cannot be derived"),
+                    arg.span,
+                    "not derivable",
+                )
+                .with_help(format!("the derivable traits are {}", DERIVABLE.join(", ")));
+                if let Some(s) = closest(other, DERIVABLE.iter().copied()) {
+                    diagnostic = diagnostic.with_help(format!("did you mean `{s}`?"));
+                }
+                self.error(diagnostic);
+                return;
+            }
+        };
+        let methods = vec![None; self.traits[trait_id.0].methods.len()];
+        self.add_impl(ImplInfo { trait_id, ty, span: arg.span, methods, derived: true });
+    }
+
+    fn add_impl(&mut self, info: ImplInfo) -> bool {
+        if let Some(&existing) = self.impl_index.get(&(info.trait_id, info.ty)) {
+            let first = self.impls[existing].span;
+            let (ty, tr) = (self.display(info.ty), self.traits[info.trait_id.0].name.clone());
+            self.error(
+                Diagnostic::error(
+                    codes::DUPLICATE_DEFINITION,
+                    format!("`{ty}` already implements `{tr}`"),
+                    info.span,
+                    "implemented again here",
+                )
+                .with_label(first, "first implemented here"),
+            );
+            return false;
+        }
+        for (index, method) in self.traits[info.trait_id.0].methods.iter().enumerate() {
+            self.trait_methods.entry((info.ty, method.name.clone())).or_default().push((info.trait_id, index));
+        }
+        self.impl_index.insert((info.trait_id, info.ty), self.impls.len());
+        self.impls.push(info);
+        true
+    }
+
+    // ---- functions and impls ------------------------------------------------------------
+
+    pub(super) fn collect_functions(&mut self, module: &'m ast::Module) {
+        for item in &module.items {
+            match item {
+                ast::Item::Function(function) => {
+                    if let Some(span) = function.self_param {
+                        self.error(
+                            Diagnostic::error(
+                                codes::UNEXPECTED_TOKEN,
+                                "`self` is only allowed in methods",
+                                span,
+                                "not inside an `impl` block",
+                            )
+                            .with_help("define methods inside `impl TypeName:`"),
+                        );
+                    }
+                    if !self.claim_global(&function.name) {
+                        continue;
+                    }
+                    let id = FuncId(self.signatures.len());
+                    let signature = self.signature(function, &function.name.name, None);
+                    self.signatures.push(signature);
+                    self.bodies.push(Body { ast: function, self_ty: None, quiet: false });
+                    self.globals.insert(function.name.name.clone(), (Global::Function(id), function.name.span));
+                }
+                ast::Item::Impl(imp) => self.collect_impl(imp),
+                _ => {}
+            }
+        }
+    }
+
+    fn impl_target(&mut self, target: &ast::Ident) -> Option<Ty> {
+        match self.globals.get(&target.name) {
+            Some(&(Global::Struct(id), _)) => Some(self.structs[id.0].ty),
+            Some(&(Global::Enum(id), _)) => Some(self.enums[id.0].ty),
+            _ => {
+                let message = if KNOWN_TYPES.contains(&target.name.as_str()) {
+                    format!("cannot add methods or traits to the built-in type `{}`", target.name)
+                } else if let Some(kind) = self.global_kind(&target.name) {
+                    format!("`{}` is {kind}, not a struct or enum", target.name)
+                } else {
+                    format!("`impl {}` needs a struct or enum named `{}` in this file", target.name, target.name)
+                };
+                self.error(Diagnostic::error(codes::UNKNOWN_TYPE, message, target.span, "not a struct or enum"));
+                None
+            }
+        }
+    }
+
+    fn collect_impl(&mut self, imp: &'m ast::ImplDecl) {
+        let Some(target) = self.impl_target(&imp.target) else { return };
+        match &imp.trait_name {
+            None => self.collect_inherent(imp, target),
+            Some(trait_name) => match self.globals.get(&trait_name.name) {
+                Some(&(Global::Trait(trait_id), _)) => self.collect_trait_impl(imp, trait_id, target),
+                _ => {
+                    let message = match self.global_kind(&trait_name.name) {
+                        Some(kind) => format!("`{}` is {kind}, not a trait", trait_name.name),
+                        None => format!("unknown trait `{}`", trait_name.name),
+                    };
+                    self.error(Diagnostic::error(codes::UNKNOWN_TYPE, message, trait_name.span, "not a trait"));
+                }
+            },
+        }
+    }
+
+    fn collect_inherent(&mut self, imp: &'m ast::ImplDecl, target: Ty) {
+        let type_name = imp.target.name.clone();
+        for method in &imp.methods {
+            let name = &method.name.name;
+            if let Some(&existing) = self.inherent.get(&(target, name.clone())) {
+                let first = self.signatures[existing.0].name_span;
+                self.error(
+                    Diagnostic::error(
+                        codes::DUPLICATE_DEFINITION,
+                        format!("`{type_name}` already has a method named `{name}`"),
+                        method.name.span,
+                        "defined again here",
+                    )
+                    .with_label(first, "first defined here"),
+                );
+                continue;
+            }
+            if let Some(id) = self.struct_of(target)
+                && let Some(field) = self.structs[id.0].fields.iter().find(|f| &f.name == name)
+            {
+                let field_span = field.span;
+                self.error(
+                    Diagnostic::error(
+                        codes::DUPLICATE_DEFINITION,
+                        format!("`{type_name}` already has a field named `{name}`"),
+                        method.name.span,
+                        "method with the same name as a field",
+                    )
+                    .with_label(field_span, "field declared here"),
+                );
+                continue;
+            }
+            self.self_ty = Some(target);
+            let receiver = method.self_param.map(|span| (target, span));
+            let signature = self.signature(method, &format!("{type_name}.{name}"), receiver);
+            self.self_ty = None;
+            let id = FuncId(self.signatures.len());
+            self.signatures.push(signature);
+            self.bodies.push(Body { ast: method, self_ty: Some(target), quiet: false });
+            self.inherent.insert((target, name.clone()), id);
+        }
+    }
+
+    fn collect_trait_impl(&mut self, imp: &'m ast::ImplDecl, trait_id: TraitId, target: Ty) {
+        let type_name = imp.target.name.clone();
+        let trait_name = self.traits[trait_id.0].name.clone();
+        let span = imp.trait_name.as_ref().map_or(imp.target.span, |t| t.span.to(imp.target.span));
+        let provided: HashMap<&str, &'m ast::Function> =
+            imp.methods.iter().map(|m| (m.name.name.as_str(), m)).collect();
+        for method in &imp.methods {
+            if !self.traits[trait_id.0].methods.iter().any(|m| m.name == method.name.name) {
+                let candidates: Vec<String> = self.traits[trait_id.0].methods.iter().map(|m| m.name.clone()).collect();
+                let mut diagnostic = Diagnostic::error(
+                    codes::BAD_IMPL,
+                    format!("`{}` is not a method of the trait `{trait_name}`", method.name.name),
+                    method.name.span,
+                    "not in the trait",
+                )
+                .with_help(format!(
+                    "methods that are not part of `{trait_name}` go in a separate `impl {type_name}:` block"
+                ));
+                if let Some(s) = closest(&method.name.name, candidates.iter().map(String::as_str)) {
+                    diagnostic = diagnostic.with_help(format!("did you mean `{s}`?"));
+                }
+                self.error(diagnostic);
+            }
+        }
+
+        let mut methods = Vec::new();
+        let mut missing = Vec::new();
+        let count = self.traits[trait_id.0].methods.len();
+        for index in 0..count {
+            let method_name = self.traits[trait_id.0].methods[index].name.clone();
+            let func = FuncId(self.signatures.len());
+            if let Some(&ast_method) = provided.get(method_name.as_str()) {
+                self.self_ty = Some(target);
+                let receiver = ast_method.self_param.map(|s| (target, s));
+                let signature = self.signature(ast_method, &format!("{type_name}.{method_name}"), receiver);
+                self.self_ty = None;
+                self.check_impl_signature(trait_id, index, target, &signature, ast_method);
+                self.signatures.push(signature);
+                self.bodies.push(Body { ast: ast_method, self_ty: Some(target), quiet: false });
+                methods.push(Some(func));
+            } else if let Some(&default) = self.trait_defaults.get(&(trait_id, index)) {
+                // A copy of the trait's default method, with `Self` as this type.
+                let method = &self.traits[trait_id.0].methods[index];
+                let (params, ret, ret_span, has_self) =
+                    (method.params.clone(), method.ret, method.ret_span, method.has_self);
+                let params = params.into_iter().map(|p| ParamSig { ty: self.subst_self(p.ty, target), ..p }).collect();
+                let ret = self.subst_self(ret, target);
+                self.signatures.push(Signature {
+                    name: format!("{type_name}.{method_name}"),
+                    name_span: default.name.span,
+                    params,
+                    ret,
+                    ret_span,
+                    receiver: has_self.then_some((target, imp.target.span)),
+                });
+                self.bodies.push(Body { ast: default, self_ty: Some(target), quiet: true });
+                methods.push(Some(func));
+            } else {
+                missing.push(method_name);
+                methods.push(None);
+            }
+        }
+        if !missing.is_empty() {
+            let list = missing.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", ");
+            let word = if missing.len() == 1 { "method" } else { "methods" };
+            let trait_span = self.traits[trait_id.0].span;
+            self.error(
+                Diagnostic::error(
+                    codes::BAD_IMPL,
+                    format!("`impl {trait_name} for {type_name}` is missing the {word} {list}"),
+                    span,
+                    format!("missing {list}"),
+                )
+                .with_label(trait_span, format!("`{trait_name}` is declared here")),
+            );
+            // Registered anyway, so calls to the methods it does have are not reported too.
+        }
+        self.add_impl(ImplInfo { trait_id, ty: target, span, methods, derived: false });
+    }
+
+    /// An implementing method must have the trait's signature, with `Self` as the type.
+    fn check_impl_signature(
+        &mut self,
+        trait_id: TraitId,
+        index: usize,
+        target: Ty,
+        signature: &Signature,
+        method: &ast::Function,
+    ) {
+        let expected = &self.traits[trait_id.0].methods[index];
+        let (has_self, expected_span, params, ret) =
+            (expected.has_self, expected.span, expected.params.clone(), expected.ret);
+        let trait_name = self.traits[trait_id.0].name.clone();
+        let problem = if has_self != signature.receiver.is_some() {
+            Some(if has_self {
+                "the trait's method takes `self`".to_string()
+            } else {
+                "the trait's method does not take `self`".to_string()
+            })
+        } else if params.len() != signature.params.len() {
+            Some(format!("the trait's method takes {}", super::plural(params.len(), "parameter")))
+        } else {
+            let mut found = None;
+            for (want, got) in params.iter().zip(&signature.params) {
+                let want_ty = self.subst_self(want.ty, target);
+                if !self.types.fits(got.ty, want_ty) {
+                    found = Some(format!("parameter `{}` should be `{}`", got.name, self.display(want_ty)));
+                    break;
+                }
+            }
+            let want_ret = self.subst_self(ret, target);
+            if found.is_none() && !self.types.fits(signature.ret, want_ret) {
+                found = Some(format!("the return type should be `{}`", self.display(want_ret)));
+            }
+            found
+        };
+        if let Some(problem) = problem {
+            self.error(
+                Diagnostic::error(
+                    codes::BAD_IMPL,
+                    format!("`{}` does not match its declaration in `{trait_name}`", method.name.name),
+                    method.name.span,
+                    problem,
+                )
+                .with_label(expected_span, "declared here"),
+            );
+        }
+    }
+
+    pub(super) fn signature(
+        &mut self,
+        function: &ast::Function,
+        name: &str,
+        receiver: Option<(Ty, Span)>,
+    ) -> Signature {
+        let mut params: Vec<ParamSig> = Vec::new();
+        for param in &function.params {
+            if let Some(previous) = params.iter().find(|p| p.name == param.name.name) {
+                let previous_span = previous.hint_span;
+                self.error(
+                    Diagnostic::error(
+                        codes::DUPLICATE_DEFINITION,
+                        format!("parameter `{}` is listed twice", param.name.name),
+                        param.name.span,
+                        "listed again here",
+                    )
+                    .with_label(previous_span, "first listed here"),
+                );
+            }
+            let (ty, hint_span) = match &param.ty {
+                Some(hint) => {
+                    let ty = self.resolve_type(hint);
+                    if ty == Ty::NONE {
+                        self.error(Diagnostic::error(
+                            codes::NONE_PARAMETER,
+                            format!("parameter `{}` cannot have type `None`", param.name.name),
+                            hint.span,
+                            "a `None` parameter carries no information",
+                        ));
+                    }
+                    (ty, hint.span)
+                }
+                None => {
+                    self.error(
+                        Diagnostic::error(
+                            codes::MISSING_TYPE_HINT,
+                            format!("parameter `{}` has no type hint", param.name.name),
+                            param.name.span,
+                            "needs a type hint",
+                        )
+                        .with_help(format!("write the type after the name, for example `{}: int`", param.name.name)),
+                    );
+                    (Ty::ERROR, param.name.span)
+                }
+            };
+            params.push(ParamSig { name: param.name.name.clone(), ty, hint_span });
+        }
+        let ret = function.ret.as_ref().map_or(Ty::NONE, |hint| self.resolve_type(hint));
+        Signature {
+            name: name.to_string(),
+            name_span: function.name.span,
+            params,
+            ret,
+            ret_span: function.ret.as_ref().map(|h| h.span),
+            receiver,
+        }
+    }
+
+    // ---- requirements -------------------------------------------------------------------
+
+    /// An implementation of a trait needs implementations of the traits it requires.
+    pub(super) fn check_impl_requirements(&mut self) {
+        for index in 0..self.impls.len() {
+            let (trait_id, ty, span, derived) =
+                (self.impls[index].trait_id, self.impls[index].ty, self.impls[index].span, self.impls[index].derived);
+            for required in self.traits[trait_id.0].supertraits.clone() {
+                if self.implements(ty, required) {
+                    continue;
+                }
+                let (ty_name, tr, req) =
+                    (self.display(ty), self.traits[trait_id.0].name.clone(), self.traits[required.0].name.clone());
+                let help = if derived {
+                    format!("add `{req}` to the `@derive(...)` list")
+                } else {
+                    format!("implement `{req}` for `{ty_name}` as well")
+                };
+                self.error(
+                    Diagnostic::error(
+                        codes::MISSING_REQUIRED_TRAIT,
+                        format!("`{ty_name}` implements `{tr}` but not `{req}`, which `{tr}` requires"),
+                        span,
+                        format!("`{tr}` requires `{req}`"),
+                    )
+                    .with_help(help),
+                );
+            }
+        }
+    }
+
+    /// A derived implementation needs every field to support the same operation.
+    pub(super) fn check_derives(&mut self) {
+        let b = self.builtin();
+        for index in 0..self.impls.len() {
+            if !self.impls[index].derived {
+                continue;
+            }
+            let (trait_id, ty, span) = (self.impls[index].trait_id, self.impls[index].ty, self.impls[index].span);
+            let fields: Vec<FieldInfo> = match self.types.kind(ty) {
+                TyKind::Struct(id) => self.structs[id.0].fields.clone(),
+                TyKind::Enum(id) => self.enums[id.0].variants.iter().flat_map(|v| v.fields.clone()).collect(),
+                _ => Vec::new(),
+            };
+            for field in fields {
+                let (ok, needs) = if trait_id == b.eq {
+                    (self.equatable(field.ty), "be compared with `==`")
+                } else if trait_id == b.hash {
+                    (self.hashable(field.ty), "be hashed")
+                } else if trait_id == b.display {
+                    (self.displayable(field.ty), "be printed")
+                } else {
+                    (true, "")
+                };
+                if !ok {
+                    let (tr, shown) = (self.traits[trait_id.0].name.clone(), self.display(field.ty));
+                    self.error(
+                        Diagnostic::error(
+                            codes::BAD_ANNOTATION,
+                            format!(
+                                "cannot derive `{tr}`: field `{}` has type `{shown}`, which cannot {needs}",
+                                field.name
+                            ),
+                            span,
+                            "cannot be derived",
+                        )
+                        .with_label(field.span, format!("`{}` is declared here", field.name)),
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    // ---- constants, defaults, main ------------------------------------------------------
+
+    pub(super) fn check_consts(&mut self) {
+        for (index, decl) in self.const_items.clone() {
+            let mut cx = FnCx::detached();
+            let literal = match &decl.value.kind {
+                ast::ExprKind::Int(_) | ast::ExprKind::Float(_) | ast::ExprKind::Str(_) | ast::ExprKind::Bool(_) => {
+                    true
+                }
+                ast::ExprKind::Unary { op: ast::UnaryOp::Neg, operand } => {
+                    matches!(operand.kind, ast::ExprKind::Int(_) | ast::ExprKind::Float(_))
+                }
+                _ => false,
+            };
+            if !literal {
+                self.error(
+                    Diagnostic::error(
+                        codes::CONST_NOT_LITERAL,
+                        format!("the value of constant `{}` must be a literal", decl.name.name),
+                        decl.value.span,
+                        "not a literal",
+                    )
+                    .with_help("use a number, string or `True`/`False`; computed constants are not supported yet"),
+                );
+                continue;
+            }
+            let value = match &decl.ty {
+                Some(hint) => {
+                    let ty = self.resolve_value_type(hint);
+                    let reason = Some((hint.span, "expected because of this type hint".to_string()));
+                    self.expect(&mut cx, &decl.value, ty, reason)
+                }
+                None => self.expr(&mut cx, &decl.value, None),
+            };
+            self.consts[index].value = Some(value);
+        }
+    }
+
+    pub(super) fn check_field_defaults(&mut self) {
+        for (id, decl) in self.struct_items.clone() {
+            for field in &decl.fields {
+                let Some(default) = &field.default else { continue };
+                let Some(index) = self.structs[id.0].fields.iter().position(|f| f.name == field.name.name) else {
+                    continue;
+                };
+                let info = &self.structs[id.0].fields[index];
+                let (ty, span) = (info.ty, info.span);
+                let mut cx = FnCx::detached();
+                let reason = Some((span, "expected because of the field's type".to_string()));
+                let value = self.expect(&mut cx, default, ty, reason);
+                self.structs[id.0].fields[index].default = Some(value);
+            }
+        }
+    }
+
+    pub(super) fn check_main(&mut self, module: &ast::Module) -> Option<FuncId> {
+        let Some(&(Global::Function(id), _)) = self.globals.get("main") else {
+            self.error(
+                Diagnostic::error(codes::NO_MAIN, "the program has no `main` function", module.start, "")
+                    .with_help("add `def main():`; the program starts running there"),
+            );
+            return None;
+        };
+        let signature = &self.signatures[id.0];
+        let (name_span, has_params, ret, ret_span) =
+            (signature.name_span, !signature.params.is_empty(), signature.ret, signature.ret_span);
+        if has_params {
+            self.error(Diagnostic::error(
+                codes::BAD_MAIN_SIGNATURE,
+                "`main` cannot take parameters",
+                name_span,
+                "defined with parameters",
+            ));
+        }
+        if let (Some(span), false) = (ret_span, matches!(ret, Ty::NONE | Ty::ERROR)) {
+            self.error(Diagnostic::error(
+                codes::BAD_MAIN_SIGNATURE,
+                "`main` cannot return a value",
+                span,
+                "remove this return type",
+            ));
+        }
+        Some(id)
+    }
+
+    /// Check each trait default method once, with `self` standing for any implementing type.
+    /// Each implementation gets its own copy, checked quietly, when the bodies are checked.
+    pub(super) fn check_trait_defaults(&mut self) {
+        let mut defaults: Vec<((TraitId, usize), &'m ast::Function)> =
+            self.trait_defaults.iter().map(|(k, v)| (*k, *v)).collect();
+        defaults.sort_by_key(|((t, i), _)| (t.0, *i));
+        for ((trait_id, index), ast_method) in defaults {
+            let self_ty = self.types.self_type(trait_id);
+            let method = &self.traits[trait_id.0].methods[index];
+            let signature = Signature {
+                name: format!("{}.{}", self.traits[trait_id.0].name, method.name),
+                name_span: method.span,
+                params: method.params.clone(),
+                ret: method.ret,
+                ret_span: method.ret_span,
+                receiver: method.has_self.then_some((self_ty, method.span)),
+            };
+            self.check_body(&signature, ast_method, Some(self_ty));
+        }
+    }
+}

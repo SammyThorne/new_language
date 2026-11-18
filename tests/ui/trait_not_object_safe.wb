@@ -1,0 +1,5 @@
+def describe(value: Copy) -> str:
+    return "copyable"
+
+def main():
+    print("start")

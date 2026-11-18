@@ -1,0 +1,42 @@
+"""
+The prelude: traits and types available in every program, without an import.
+
+It is compiled with each program, before the program's own code. The compiler gives the traits
+below their meaning: `print` and f-strings use `Display`, `==` uses `Eq`, dict keys need `Hash`,
+`?` converts errors to `Error`, and the operators `+`, `-` and `*` on structs use the number
+traits.
+"""
+
+trait Display:
+    def to_str(self) -> str
+
+trait Eq:
+    def eq(self, other: Self) -> bool
+
+trait Hash(Eq):
+    def hash(self) -> int
+
+trait Copy:
+    def copy(self) -> Self
+
+trait Error:
+    def message(self) -> str
+
+trait AddNumber:
+    def add(self, other: Self) -> Self
+
+trait SubNumber:
+    def sub(self, other: Self) -> Self
+
+trait MulNumber:
+    def mul(self, other: Self) -> Self
+
+@derive(Eq, Display)
+struct ParseError:
+    """The error from `int.parse(text)` and `float.parse(text)`."""
+    text: str
+    expected: str
+
+impl Error for ParseError:
+    def message(self) -> str:
+        return f"\"{self.text}\" is not a valid {self.expected}"
