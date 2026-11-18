@@ -45,7 +45,9 @@ As of 2026-11-18.
 
 Exit programs, all in `tests/run/`: `fizzbuzz.wb`, `primes.wb` and `fib.wb` (M1), and `word_frequency.wb` (M2). The binary-trees benchmark is in `bench/`.
 
-**Gate 1 result.** Allocation-heavy code (binary trees, depth 18) runs 20.6x faster than CPython 3.13, against a target of 10x. All 20 test programs pass in the GC stress mode. The weakest benchmark is string-and-dict-heavy work at 1.9x CPython; [bench/README.md](../bench/README.md) explains why and what fixes it.
+**Gate 1 result.** Allocation-heavy code (binary trees, depth 18) runs 20x faster than CPython 3.13, against a target of 10x. All 20 test programs pass in the GC stress mode.
+
+**Against Go 1.27.4**, every benchmark is already inside the end-of-prototype targets in [07](07-testing-and-performance.md#targets). Weby takes 1.28x Go's time on allocation, 1.46x and 1.51x on collections and strings, and is faster than Go on recursive calls. [bench/README.md](../bench/README.md) has the numbers and the reasons for each gap.
 
 Choices made during M1 and M2 that the earlier documents did not settle are recorded in [08](08-decisions-and-risks.md) as D21 to D25.
 

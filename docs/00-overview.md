@@ -131,7 +131,7 @@ Checked on the development machine on 2026-11-18:
 | LLVM 19 (`llvm-config-19`) and Clang 19.1.7 | installed |
 | GCC 14.2 (`cc`, used as the linker driver) | installed |
 | Boehm GC headers (`libgc-dev`) | not installed; needed from milestone 2, or vendored |
-| Go | not installed; needed only as a benchmark baseline |
+| Go 1.27.4 | installed in `~/.local/go` (not on `PATH`); used only as a benchmark baseline |
 | Python 3.13 | installed; benchmark baseline |
 
 ## Confirmed decisions

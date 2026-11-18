@@ -83,7 +83,7 @@ Each benchmark exists in Weby, Go and Python, doing the same work the idiomatic 
 | WebSocket | Echo round-trip latency; broadcast to N clients; N idle connections (memory) | Framing, scheduler, per-connection cost |
 | Tasks | Spawn and join 100,000 tasks; ping-pong on a channel | Scheduler |
 
-Baselines: CPython 3.13 (with a mainstream ASGI framework and server for the HTTP rows) and the current stable Go release with `net/http` and `encoding/json`. Go is not installed on the development machine yet and is needed from M1 for baselines.
+Baselines: CPython 3.13 (with a mainstream ASGI framework and server for the HTTP rows) and the current stable Go release with `net/http` and `encoding/json`. Results so far, against both baselines, are in [bench/README.md](../bench/README.md).
 
 ### Method
 
