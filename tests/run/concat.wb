@@ -1,0 +1,33 @@
+# Chains of string `+`, joined with one allocation (docs/09, phase 4): the parts are evaluated
+# left to right, empty parts are skipped, and a chain with one non-empty part shares it.
+# expect: abcd
+# expect: a-b
+# expect: 1 2 3 order
+# expect: héllo wörld ✓
+# expect: [x]
+# expect: ||
+# expect: 12
+# expect: one two three four five
+
+def note(seen: list[str], text: str) -> str:
+    seen.append(text)
+    return text
+
+def main():
+    a = "a"
+    b = "b"
+    print(a + b + "c" + "d")
+    empty = ""
+    print(a + empty + "-" + empty + b)
+    seen: list[str] = []
+    joined = note(seen, "1") + " " + note(seen, "2") + " " + note(seen, "3")
+    print(joined + " " + ("order" if seen == ["1", "2", "3"] else "wrong"))
+    print("héllo" + " " + "wörld" + " " + "✓")
+    print(empty + "[" + empty + "x" + "]" + empty)
+    print(empty + "|" + "|" + empty)
+    print(empty + empty + "12")
+    words = ["one", "two", "three", "four", "five"]
+    line = words[0]
+    for word in words[1:]:
+        line = line + " " + word
+    print(line)

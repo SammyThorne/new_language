@@ -101,7 +101,13 @@ pub fn hash_bytes(bytes: &[u8], seed: u64) -> u64 {
 /// The string must be a valid (pointer, length) pair.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_str_hash(ptr: *const u8, len: i64) -> i64 {
-    hash_bytes(unsafe { s(ptr, len) }.as_bytes(), seed()) as i64
+    hash_str(unsafe { s(ptr, len) }.as_bytes()) as i64
+}
+
+/// The hash of a string's bytes, as `lrt_str_hash` computes it.
+#[inline]
+pub(crate) fn hash_str(bytes: &[u8]) -> u64 {
+    hash_bytes(bytes, seed())
 }
 
 /// Hash of the `str` stored at `key`. Used directly as a dict's hash function for `str` keys,
@@ -123,6 +129,30 @@ pub unsafe extern "C-unwind" fn lrt_str_hash_ptr(key: *const u8) -> i64 {
 pub unsafe extern "C-unwind" fn lrt_str_eq_ptr(a: *const u8, b: *const u8) -> i64 {
     let (a, b) = unsafe { (*(a as *const Str), *(b as *const Str)) };
     unsafe { lrt_str_eq(a.ptr, a.len, b.ptr, b.len) }
+}
+
+/// The concatenation of `count` strings at `parts`, allocated once (`a + b + c + ...`).
+///
+/// # Safety
+/// `parts` points to `count` valid strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_str_concat_n(parts: *const Str, count: i64) -> Str {
+    let parts = unsafe { std::slice::from_raw_parts(parts, count.max(0) as usize) };
+    let mut nonempty = parts.iter().filter(|p| p.len > 0);
+    let (Some(first), second) = (nonempty.next(), nonempty.next()) else { return Str::empty() };
+    if second.is_none() {
+        // One part with text: share it, as `lrt_str_concat` does.
+        return *first;
+    }
+    let total: usize = parts.iter().map(|p| p.len as usize).sum();
+    let ptr = gc::alloc_atomic(total);
+    let mut at = 0;
+    for part in parts {
+        // SAFETY: `ptr` has room for every part; the sources are valid by contract.
+        unsafe { std::ptr::copy_nonoverlapping(part.ptr, ptr.add(at), part.len as usize) };
+        at += part.len as usize;
+    }
+    Str { ptr, len: total as i64 }
 }
 
 /// Byte offset of the first occurrence of `needle`, or -1.
@@ -191,8 +221,17 @@ macro_rules! str_to_str {
 /// Change case. Strings are immutable, so text that is already in the right case is returned
 /// as it is, and ASCII text is converted with a single allocation.
 fn change_case(text: &str, upper: bool) -> Str {
-    let unchanged =
-        if upper { !text.chars().any(|c| c.is_lowercase()) } else { !text.chars().any(|c| c.is_uppercase()) };
+    let unchanged = if text.is_ascii() {
+        if upper {
+            !text.bytes().any(|b| b.is_ascii_lowercase())
+        } else {
+            !text.bytes().any(|b| b.is_ascii_uppercase())
+        }
+    } else if upper {
+        !text.chars().any(|c| c.is_lowercase())
+    } else {
+        !text.chars().any(|c| c.is_uppercase())
+    };
     if unchanged {
         return share(text);
     }
@@ -216,8 +255,24 @@ str_to_str!(lrt_str_lstrip, |t| share(t.trim_start()));
 str_to_str!(lrt_str_rstrip, |t| share(t.trim_end()));
 
 fn list_of_strs<'a>(desc: *const TypeDesc, parts: impl Iterator<Item = &'a str>) -> *mut List {
-    let list = list::new(desc, 0);
+    // Count first, on the stack for short texts, so the list is allocated once at its size.
+    let mut few: [&str; 32] = [""; 32];
+    let mut count = 0;
+    let mut more: Vec<&str> = Vec::new();
     for part in parts {
+        if count < few.len() {
+            few[count] = part;
+        } else {
+            if more.is_empty() {
+                more.extend_from_slice(&few);
+            }
+            more.push(part);
+        }
+        count += 1;
+    }
+    let parts: &[&str] = if more.is_empty() { &few[..count] } else { &more };
+    let list = list::new(desc, parts.len());
+    for &part in parts {
         // SAFETY: `list` is a list of `str`, so each slot holds a `Str`.
         unsafe { *(list::push_slot(list) as *mut Str) = share(part) };
     }

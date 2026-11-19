@@ -220,7 +220,13 @@ All four items are done, plus one the plan did not have; see D84 in [08](08-deci
 
 Exit: `spawn` within 2x of Go. HTTP p99 at 256 connections no worse than now, with higher throughput.
 
-### Phase 4 — Code generation for dispatch and collections (two to three weeks)
+### Phase 4 — Code generation for dispatch and collections (two to three weeks) — done 2026-11-19
+
+Items 1 and 4 are done, and item 3 in part; item 2 is not done. See D85 in [08](08-decisions-and-risks.md).
+- **Item 1.** Devirtualised trait calls took `dispatch` from 0.052 s to 0.009 s, 3.4x faster than Go.
+- **Item 3, in part.** Dicts with `str` keys hash and compare directly in the runtime. Together with cheaper `split` and lower-casing, `word_count` went to 1.20x faster than Go.
+- **Exit criteria met.** Both benchmarks are ahead of Go, so the C helpers compiled to bitcode (item 2) and code-generated probe loops (item 3 in full) wait for a profile that calls for them.
+- **Where this leaves things.** After phases 1 to 4, every benchmark in `bench/` and every HTTP endpoint is at or ahead of Go on this machine. `binary_trees` uses about twice Go's memory, which is phase 5's question.
 
 1. **Devirtualisation.** When a trait has at most four implementors in the whole program (the compiler sees the whole program), a call on a trait object compares the vtable pointer against each implementor's vtable and calls the method directly, keeping the indirect call as the fallback. LLVM can then inline the method, and the accumulator stays in a register. Where the concrete type is known at the call site, the call is direct with no compare. *Expected:* `dispatch` at or below Go's time.
 2. **Runtime fast paths in LLVM 19 bitcode.** Hot helpers that are awkward to emit by hand would be written in C:

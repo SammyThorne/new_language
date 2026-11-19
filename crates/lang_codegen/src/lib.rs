@@ -251,6 +251,7 @@ const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_builder_finish", "s", "p"),
     ("lrt_builder_print", "v", "p"),
     ("lrt_str_concat", "s", "pipi"),
+    ("lrt_str_concat_n", "s", "pi"),
     ("lrt_str_repeat", "s", "pii"),
     ("lrt_str_eq", "i", "pipi"),
     ("lrt_str_cmp", "i", "pipi"),
@@ -378,6 +379,9 @@ struct Codegen<'ctx, 'a> {
     vtables: HashMap<(Ty, lang_sema::types::TraitId), PointerValue<'ctx>>,
     /// Functions for derived `Display` and `Hash` methods, for vtables.
     derived_methods: HashMap<(lang_sema::types::TraitId, Ty), FunctionValue<'ctx>>,
+    /// For each trait method called through a trait object, the function those calls go
+    /// through, given a body once every vtable is known (see `traits.rs`).
+    dispatchers: HashMap<(lang_sema::types::TraitId, usize), FunctionValue<'ctx>>,
     str_type: StructType<'ctx>,
     /// `{ ptr desc, i64 len, i64 cap, ptr data }`; matches `lang_rt::list::List`.
     list_type: StructType<'ctx>,
@@ -430,6 +434,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             vtables: HashMap::new(),
             stack_sites: escape::stack_sites(program),
             derived_methods: HashMap::new(),
+            dispatchers: HashMap::new(),
             str_type: cx.struct_type(&[ptr.into(), i64_type.into()], false),
             list_type: cx.struct_type(&[ptr.into(), i64_type.into(), i64_type.into(), ptr.into()], false),
             dict_type: cx.struct_type(&[ptr.into(), i64_type.into()], false),
@@ -1046,6 +1051,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
                 self.define(FuncId(index));
             }
         }
+        self.define_dispatchers();
         self.debug
     }
 

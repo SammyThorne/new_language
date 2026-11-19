@@ -611,9 +611,40 @@ impl<'ctx> Codegen<'ctx, '_> {
             let some = self.opt_is_some(operand_ty, value);
             return if op == BinaryOp::IsNot { some.into() } else { self.b.build_not(some, "").must().into() };
         }
+        if op == BinaryOp::StrConcat
+            && let ExprKind::Binary { op: BinaryOp::StrConcat, .. } = lhs.kind
+        {
+            return self.concat_chain(lhs, rhs);
+        }
         let l = self.value(lhs);
         let r = self.value(rhs);
         self.binary_values(op, l, r, operand_ty, rhs.ty, span)
+    }
+
+    /// `a + b + c + ...` on strings, three or more parts: evaluated left to right as written,
+    /// then joined by one runtime call that allocates the result once at its full length,
+    /// instead of one new string per `+` (docs/09, phase 4).
+    fn concat_chain(&mut self, lhs: &Expr, rhs: &Expr) -> BasicValueEnum<'ctx> {
+        let mut parts = vec![rhs];
+        let mut left = lhs;
+        while let ExprKind::Binary { op: BinaryOp::StrConcat, lhs, rhs } = &left.kind {
+            parts.push(rhs);
+            left = lhs;
+        }
+        parts.push(left);
+        parts.reverse();
+        let values: Vec<BasicValueEnum> = parts.iter().map(|part| self.value(part)).collect();
+        let array_type = self.str_type.array_type(values.len() as u32);
+        let array = self.alloca(array_type.into(), "parts");
+        for (index, value) in values.iter().enumerate() {
+            let zero = self.i64(0);
+            let at = self.i64(index as i64);
+            // SAFETY (LLVM): within the array of `values.len()` strings.
+            let slot = unsafe { self.b.build_in_bounds_gep(array_type, array, &[zero, at], "").must() };
+            self.b.build_store(slot, *value).must();
+        }
+        let count = self.i64(values.len() as i64);
+        self.call_rt("lrt_str_concat_n", &[array.into(), count.into()]).unwrap()
     }
 
     /// A binary operation on values already computed.

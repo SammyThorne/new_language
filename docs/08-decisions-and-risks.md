@@ -619,6 +619,30 @@ Phase 3 of [09](09-performance-plan.md). The evidence comes from a small samplin
 
 **Results** (A/B runs of the same programs, 256 connections; the full tables are in [bench/README.md](../bench/README.md)): `spawn` 0.130 s to 0.044 s; `/items` 232,000 to 271,000 requests a second, now ahead of Go; `/users/42` 570,000 to 855,000; `/plaintext` and `/json` about 13% faster.
 
+### D85. Code generation for dispatch and collections (performance plan, phase 4)
+
+Phase 4 of [09](09-performance-plan.md).
+
+- **Devirtualisation** (`lang_codegen/src/traits.rs`).
+  - **Dispatchers.** Every call through a trait object goes through a private, always-inlined function for its trait method, `dispatch.Trait.method(vtable, data, args...)`. The function is declared when the first such call is generated, and its body is written after the whole program has been generated, when every type converted to that trait is known (vtables are made only by conversions, which are all in the program).
+  - **The body.** With at most four types, it compares the vtable with each one's and calls that type's method directly; otherwise, or if nothing matches, it makes the indirect call through the vtable as before. A vtable made after a body was written is still handled by that last case.
+  - **Effect.** After inlining, LLVM sees ordinary direct calls: in `dispatch` the three `area` methods are inlined, and the accumulator stays in a register. 0.052 s to 0.008 s, against Go's 0.030 s.
+- **`str` keys in dicts** (`lang_rt/src/dict.rs`). A dict whose descriptor's hash function is the runtime's own string hash now hashes and compares keys directly: no indirect call per probe, and equal pointers short-cut the byte comparison.
+- **Split and lower-case** (`lang_rt/src/strings.rs`).
+  - `split` collects its parts first (on the stack for up to 32) and allocates the list once at its size.
+  - Lower- and upper-casing check ASCII text byte by byte before falling back to Unicode.
+  - Together with the dict change, `word_count` went from 0.73 s to 0.64 s.
+- **Concatenation chains** (`lang_codegen/src/expr.rs`). `a + b + c + ...` on strings, three or more parts, evaluates the parts left to right and joins them with one call, `lrt_str_concat_n`, which allocates once at the full length. Empty parts are skipped, and a chain with one non-empty part shares it, as two-part `+` does. `tests/run/concat.wb`.
+- **Not done.**
+  - **Hand-written C helpers compiled to LLVM bitcode and inlined into programs (item 2).** This would add a build step that needs `clang-19`.
+  - **Code-generated dict probe loops (item 3).** The exit criteria were met without either, so they wait until a profile shows the runtime's dict or UTF-8 code on a hot path again.
+- **Tests.** `tests/run/dispatch.wb` covers one, three and five implementing types (the last stays indirect), upcasts through a supertrait, a method without a result, and methods with arguments.
+
+**Results** ([bench/README.md](../bench/README.md)):
+- `dispatch` takes 0.009 s against Go's 0.031 s; it was 1.73x Go's time.
+- `word_count` takes 0.648 s against Go's 0.778 s, from 1.07x to 1.20x faster than Go.
+- Every benchmark and every HTTP endpoint is now at or ahead of Go.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

@@ -1,6 +1,8 @@
 //! Enums, `Result`, trait objects and calls to trait implementations.
 
 use crate::{CALLCONV_FAST, Codegen, Helper, Must};
+use inkwell::IntPredicate;
+use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::module::Linkage;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
@@ -267,7 +269,7 @@ impl<'ctx> Codegen<'ctx, '_> {
     }
 
     /// Call method `method` of `trait_id` through a trait object whose trait reaches `trait_id`
-    /// by `path`.
+    /// by `path`. The call goes through the trait method's dispatcher (`dispatcher`).
     pub(crate) fn dyn_call(
         &mut self,
         receiver: BasicValueEnum<'ctx>,
@@ -278,21 +280,114 @@ impl<'ctx> Codegen<'ctx, '_> {
     ) -> Option<BasicValueEnum<'ctx>> {
         let target = self.upcast(receiver, path).into_struct_value();
         let data = self.b.build_extract_value(target, 0, "").must();
-        let vtable = self.b.build_extract_value(target, 1, "").must().into_pointer_value();
-        let def = &self.program.traits[trait_id.0];
-        let signature = &def.methods[method];
-        let function = self.vtable_slot(vtable, 1 + def.supertraits.len() + method);
-        let mut params: Vec<BasicMetadataTypeEnum> = vec![self.ptr_type().into()];
-        params.extend(signature.params.iter().map(|t| BasicMetadataTypeEnum::from(self.value_type(*t))));
-        let fn_type = match self.llty(signature.ret) {
-            Some(ret) => ret.fn_type(&params, false),
-            None => self.cx.void_type().fn_type(&params, false),
-        };
-        let mut values: Vec<BasicMetadataValueEnum> = vec![data.into()];
+        let vtable = self.b.build_extract_value(target, 1, "").must();
+        let dispatcher = self.dispatcher(trait_id, method);
+        let mut values: Vec<BasicMetadataValueEnum> = vec![vtable.into(), data.into()];
         values.extend(args.into_iter().map(BasicMetadataValueEnum::from));
-        let call = self.b.build_indirect_call(fn_type, function, &values, "").must();
+        let call = self.b.build_call(dispatcher, &values, "").must();
         call.set_call_convention(CALLCONV_FAST);
         call.try_as_basic_value().basic()
+    }
+
+    /// The type of method `method` of `trait_id` as called through a vtable: the object's data
+    /// pointer, then the arguments.
+    fn method_type(&self, trait_id: TraitId, method: usize, leading: usize) -> inkwell::types::FunctionType<'ctx> {
+        let signature = &self.program.traits[trait_id.0].methods[method];
+        let mut params: Vec<BasicMetadataTypeEnum> = vec![self.ptr_type().into(); leading];
+        params.extend(signature.params.iter().map(|t| BasicMetadataTypeEnum::from(self.value_type(*t))));
+        match self.llty(signature.ret) {
+            Some(ret) => ret.fn_type(&params, false),
+            None => self.cx.void_type().fn_type(&params, false),
+        }
+    }
+
+    /// `dispatch.Trait.method(vtable, data, args...)`, always inlined. Declared here; its body
+    /// is written by `define_dispatchers` once the whole program has been generated, when every
+    /// vtable of the trait is known.
+    fn dispatcher(&mut self, trait_id: TraitId, method: usize) -> FunctionValue<'ctx> {
+        if let Some(&f) = self.dispatchers.get(&(trait_id, method)) {
+            return f;
+        }
+        let def = &self.program.traits[trait_id.0];
+        let name = format!("dispatch.{}.{}", def.name, def.methods[method].name);
+        let function = self.module.add_function(&name, self.method_type(trait_id, method, 2), Some(Linkage::Private));
+        function.set_call_conventions(CALLCONV_FAST);
+        let always = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("alwaysinline"), 0);
+        function.add_attribute(AttributeLoc::Function, always);
+        self.dispatchers.insert((trait_id, method), function);
+        function
+    }
+
+    /// Write the dispatchers' bodies (docs/09, phase 4, devirtualisation). The compiler sees
+    /// the whole program, so it knows every type converted to each trait. When there are at
+    /// most `DIRECT_CALLS` of them, a dispatcher compares the vtable with each one's and calls
+    /// that type's method directly, which LLVM can then inline; the indirect call through the
+    /// vtable stays as the last case. With more, the dispatcher is just the indirect call.
+    pub(crate) fn define_dispatchers(&mut self) {
+        const DIRECT_CALLS: usize = 4;
+        // Writing a body can generate a derived method that itself calls through a trait
+        // object, so repeat until every dispatcher has a body. A vtable made after a body was
+        // written is still handled, by the indirect call.
+        loop {
+            let mut keys: Vec<(TraitId, usize)> =
+                self.dispatchers.iter().filter(|(_, f)| f.count_basic_blocks() == 0).map(|(k, _)| *k).collect();
+            if keys.is_empty() {
+                return;
+            }
+            keys.sort_by_key(|(t, m)| (t.0, *m));
+            for (trait_id, method) in keys {
+                self.define_dispatcher(trait_id, method, DIRECT_CALLS);
+            }
+        }
+    }
+
+    fn define_dispatcher(&mut self, trait_id: TraitId, method: usize, direct_calls: usize) {
+        {
+            let function = self.dispatchers[&(trait_id, method)];
+            // Every vtable for the trait, in a fixed order.
+            let mut cases: Vec<(Ty, PointerValue<'ctx>)> =
+                self.vtables.iter().filter(|((_, t), _)| *t == trait_id).map(|((ty, _), v)| (*ty, *v)).collect();
+            cases.sort_by_key(|(_, vtable)| vtable.get_name().to_string_lossy().into_owned());
+            if cases.len() > direct_calls {
+                cases.clear();
+            }
+            let targets: Vec<(PointerValue<'ctx>, FunctionValue<'ctx>)> = cases
+                .iter()
+                .map(|&(ty, vtable)| {
+                    let target = match self.explicit_method(trait_id, ty, method) {
+                        Some(f) => f,
+                        None => self.derived_method(trait_id, method, ty),
+                    };
+                    (vtable, target)
+                })
+                .collect();
+            let slot = 1 + self.program.traits[trait_id.0].supertraits.len() + method;
+            let fn_type = self.method_type(trait_id, method, 1);
+            self.in_function(function, |this| {
+                let vtable = function.get_nth_param(0).unwrap().into_pointer_value();
+                let args: Vec<BasicMetadataValueEnum> =
+                    function.get_param_iter().skip(1).map(BasicMetadataValueEnum::from).collect();
+                let finish = |this: &mut Self, result: Option<BasicValueEnum<'ctx>>| match result {
+                    Some(value) => this.b.build_return(Some(&value)).must(),
+                    None => this.b.build_return(None).must(),
+                };
+                for (expected, target) in targets {
+                    let direct = this.cx.append_basic_block(function, "direct");
+                    let next = this.cx.append_basic_block(function, "next");
+                    let same = this.b.build_int_compare(IntPredicate::EQ, vtable, expected, "").must();
+                    this.b.build_conditional_branch(same, direct, next).must();
+                    this.b.position_at_end(direct);
+                    let call = this.b.build_call(target, &args, "").must();
+                    call.set_call_convention(CALLCONV_FAST);
+                    finish(this, call.try_as_basic_value().basic());
+                    this.b.position_at_end(next);
+                }
+                let pointer = this.vtable_slot(vtable, slot);
+                let call = this.b.build_indirect_call(fn_type, pointer, &args, "").must();
+                call.set_call_convention(CALLCONV_FAST);
+                finish(this, call.try_as_basic_value().basic());
+            });
+        }
     }
 
     // ---- implementations of the built-in traits -----------------------------------------

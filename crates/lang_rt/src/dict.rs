@@ -11,7 +11,7 @@
 //! the key type. Generated code finds a value at `entry + 8 + round8(key size)`; that layout must
 //! match `dict_value_offset` in `lang_codegen`.
 
-use crate::{TypeDesc, gc};
+use crate::{Str, TypeDesc, gc};
 
 #[repr(C)]
 pub struct Dict {
@@ -67,13 +67,38 @@ impl Dict {
         unsafe { *(entry as *const i64) }
     }
 
+    /// Whether the keys are `str`, whose hash and equality are done here directly instead of
+    /// through the descriptor's functions (docs/09, phase 4): no indirect call per probe, and
+    /// the hash inlined.
+    fn str_keys(&self) -> bool {
+        let str_hash: crate::HashFn = crate::strings::lrt_str_hash_ptr;
+        self.desc().hash.is_some_and(|hash| hash as usize == str_hash as usize)
+    }
+
     fn hash(&self, key: *const u8) -> i64 {
-        let hash = self.desc().hash.expect("dict descriptor has a hash function");
-        // SAFETY: `key` points to a key of this dict's key type.
-        (mix(unsafe { hash(key) } as u64) | 1) as i64
+        let hash = if self.str_keys() {
+            // SAFETY: the keys are `str`.
+            let key = unsafe { *(key as *const Str) };
+            crate::strings::hash_str(unsafe { std::slice::from_raw_parts(key.ptr, key.len as usize) })
+        } else {
+            let hash = self.desc().hash.expect("dict descriptor has a hash function");
+            // SAFETY: `key` points to a key of this dict's key type.
+            unsafe { hash(key) as u64 }
+        };
+        (mix(hash) | 1) as i64
     }
 
     fn keys_equal(&self, a: *const u8, b: *const u8) -> bool {
+        if self.str_keys() {
+            // SAFETY: the keys are `str`.
+            let (a, b) = unsafe { (*(a as *const Str), *(b as *const Str)) };
+            return a.len == b.len
+                && (a.ptr == b.ptr
+                    || unsafe {
+                        std::slice::from_raw_parts(a.ptr, a.len as usize)
+                            == std::slice::from_raw_parts(b.ptr, b.len as usize)
+                    });
+        }
         let eq = self.desc().eq.expect("dict descriptor has an equality function");
         // SAFETY: both point to keys of this dict's key type.
         unsafe { eq(a, b) != 0 }

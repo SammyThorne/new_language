@@ -129,10 +129,10 @@ Ordered by expected payoff for web workloads. None of this is prototype work exc
 3. Per-connection buffer reuse and lazy header materialisation in the HTTP path.
 4. Fibers and epoll (M10).
 5. Escape analysis: stack-allocate structs, closures and small lists that do not outlive their function. Done for structs on the typed IR, without a mid-level IR (D83); closures and lists remain.
-6. Devirtualisation: when a trait object's concrete type is known at the call site, call directly; speculative devirtualisation for traits with one implementor in the program.
+6. Devirtualisation: when a trait object's concrete type is known at the call site, call directly; speculative devirtualisation for traits with one implementor in the program. Done for traits with up to four implementing types: a vtable compare and a direct call (D85).
 7. Small-string optimisation: strings up to 15 bytes stored inline in the (pointer, length) pair.
-8. String builder elision: f-strings and concatenation chains sized once and written once.
-9. Collections in Weby: monomorphised `dict` with an open-addressing table, so hashing and comparison inline.
+8. String builder elision: f-strings and concatenation chains sized once and written once. Done (D82 for f-strings, D85 for chains).
+9. Collections in Weby: monomorphised `dict` with an open-addressing table, so hashing and comparison inline. Done in part: dicts with `str` keys hash and compare in the runtime without indirect calls (D85).
 10. Loop yield checks that cost one predictable branch.
 11. ThinLTO across the runtime boundary, if LLVM versions of `rustc` and the compiler can be aligned.
 12. Profile-guided optimisation as a build option.

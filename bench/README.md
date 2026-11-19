@@ -51,6 +51,74 @@ python3 bench/ws_idle/run.py --connections 50000
 
 ## Results
 
+### 2026-11-19, performance plan phase 4
+
+Phase 4 of [docs/09](../docs/09-performance-plan.md): devirtualised trait calls, `str` keys hashed and compared directly in dicts, cheaper `split` and lower-casing, and string concatenation chains allocated once (docs/08, D85). Best of 3 runs.
+
+| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+|---|---|---|---|---|---|---|
+| binary_trees | 0.646 s | 0.834 s | 20.149 s | 1.29x faster | 31.2x faster | 90 / 42 / 56 MB |
+| dispatch | 0.009 s | 0.031 s | 0.591 s | 3.38x faster | 64.4x faster | 13 / 13 / 13 MB |
+| fib | 0.021 s | 0.036 s | 0.644 s | 1.73x faster | 30.7x faster | 13 / 13 / 13 MB |
+| json_orders | 0.523 s | 0.602 s | 3.390 s | 1.15x faster | 6.5x faster | 79 / 67 / 130 MB |
+| sieve | 0.051 s | 0.052 s | 2.277 s | 1.03x faster | 44.6x faster | 61 / 64 / 161 MB |
+| sort | 0.477 s | 1.132 s | 2.094 s | 2.37x faster | 4.4x faster | 148 / 79 / 302 MB |
+| spawn | 0.040 s | 0.042 s | 0.993 s | 1.03x faster | 24.7x faster | 16 / 14 / 47 MB |
+| word_count | 0.648 s | 0.778 s | 2.331 s | 1.20x faster | 3.6x faster | 13 / 13 / 13 MB |
+
+HTTP at 256 connections, requests per second (median / p99 latency in ms; peak memory), median of 3 runs of 5 s, pinned:
+
+| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+|---|---|---|---|---|
+| `/plaintext` | 1,131,830 (0.19 / 0.68; 27 MB) | 572,537 (0.33 / 1.58; 23 MB) | 30,074 | 1.98x faster |
+| `/json` | 1,122,128 (0.19 / 0.68; 30 MB) | 549,237 (0.35 / 1.71; 24 MB) | 27,921 | 2.04x faster |
+| `/items` | 279,053 (0.82 / 1.76; 24 MB) | 259,527 (0.73 / 3.97; 22 MB) | 18,883 | 1.08x faster |
+| `/users/42` | 965,229 (0.22 / 0.86; 32 MB) | 507,904 (0.38 / 1.78; 25 MB) | 25,836 | 1.90x faster |
+| `POST /orders` | 688,747 (0.33 / 0.99; 24 MB) | 306,248 (0.60 / 3.60; 26 MB) | 20,212 | 2.25x faster |
+
+What changed:
+
+- **`dispatch`** went from 0.052 s to 0.009 s. With three types implementing `Shape`, each call compares the vtable and calls the method directly. LLVM then inlines the three `area` methods, and the running total stays in a register.
+- **`word_count`** went from 0.72 s to 0.65 s. Dicts with `str` keys hash and compare without calls through the descriptor, `split` allocates its list once at its size, and lower-casing checks ASCII text byte by byte.
+- The HTTP rows moved within run-to-run noise, slightly up; the handlers make no trait-object calls.
+- Every benchmark and every endpoint is now at or ahead of Go. `binary_trees` and `sort` still use about twice Go's memory (phase 5).
+
+### 2026-11-19, performance plan phase 3
+
+Phase 3 of [docs/09](../docs/09-performance-plan.md): no collector lock on the context switch, cheaper task creation, a router that does not allocate per route tried, and a 4 MiB floor on allocation between collections (docs/08, D84). Best of 3 runs.
+
+| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+|---|---|---|---|---|---|---|
+| binary_trees | 0.640 s | 0.839 s | 21.627 s | 1.31x faster | 33.8x faster | 90 / 42 / 57 MB |
+| dispatch | 0.052 s | 0.030 s | 0.594 s | 1.73x the time | 11.3x faster | 13 / 13 / 13 MB |
+| fib | 0.021 s | 0.036 s | 0.651 s | 1.67x faster | 30.6x faster | 13 / 13 / 13 MB |
+| json_orders | 0.514 s | 0.604 s | 3.371 s | 1.17x faster | 6.6x faster | 79 / 59 / 130 MB |
+| sieve | 0.052 s | 0.052 s | 2.259 s | 1.02x faster | 43.9x faster | 61 / 55 / 161 MB |
+| sort | 0.484 s | 1.148 s | 2.101 s | 2.37x faster | 4.3x faster | 145 / 75 / 302 MB |
+| spawn | 0.041 s | 0.042 s | 0.983 s | 1.03x faster | 23.8x faster | 19 / 14 / 47 MB |
+| word_count | 0.724 s | 0.771 s | 2.414 s | 1.07x faster | 3.3x faster | 13 / 13 / 13 MB |
+
+HTTP at 256 connections, requests per second (median / p99 latency in ms; peak memory), median of 3 runs of 5 s, pinned:
+
+| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+|---|---|---|---|---|
+| `/plaintext` | 1,102,187 (0.19 / 0.71; 25 MB) | 563,294 (0.34 / 1.65; 24 MB) | 29,611 | 1.96x faster |
+| `/json` | 1,037,666 (0.20 / 0.76; 19 MB) | 526,296 (0.36 / 1.86; 23 MB) | 27,654 | 1.97x faster |
+| `/items` | 264,843 (0.85 / 2.00; 24 MB) | 252,588 (0.73 / 4.53; 24 MB) | 18,645 | 1.05x faster |
+| `/users/42` | 928,818 (0.23 / 0.91; 24 MB) | 505,317 (0.38 / 1.78; 25 MB) | 26,174 | 1.84x faster |
+| `POST /orders` | 684,127 (0.33 / 1.01; 24 MB) | 310,087 (0.62 / 3.25; 24 MB) | 20,283 | 2.21x faster |
+
+At 64 connections `/items` is 306,726 against Go's 269,187 (1.14x).
+
+What changed:
+
+- **`spawn`** went from 0.130 s to 0.041 s, level with Go. The main thread was spending its time in contended locks and in glibc's allocator. Now a fiber's record lives on its own stack, the global run queue is lock-free, and stacks move between threads in batches.
+- **`/items`** went from 0.93x to 1.05x Go's rate. It was limited by how often the collector ran, over a thousand times a second, which the 4 MiB floor (`WEBY_GC_MIN_ALLOC`) cuts by 70%. Peak memory rose from 19 to 24 MB, as much as Go's.
+- **`/users/42`** (a route with a parameter, behind ten others) went from 578,000 to 929,000 requests a second: the router no longer builds a dictionary for every route it tries.
+- **`/plaintext`**, **`/json`** and **`POST /orders`** gained 18% to 63%, from the router, the response headers and the collector floor together.
+- p99 latency fell on every endpoint.
+- Programs with little live data use up to 4 MiB more before their first collection (`spawn`: 19 MB instead of 13 MB).
+
 ### 2026-11-19, performance plan phase 2
 
 Phase 2 of [docs/09](../docs/09-performance-plan.md): inline allocation from per-thread free lists, pointer-free structs in memory the collector does not scan, and escape analysis for structs (docs/08, D83). Best of 3 runs.

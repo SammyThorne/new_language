@@ -1,0 +1,142 @@
+# Calls through trait objects (docs/09, phase 4): with at most four implementing types the call
+# compares the vtable and calls the method directly; with more, it stays indirect. Both must
+# reach the right method, through supertraits too, for methods with and without results.
+# expect: one 1
+# expect: three 6
+# expect: five 15
+# expect: upcast hello Ann / hello Bo
+# expect: logged a,b,c
+# expect: scaled 2 6 12
+
+trait Only:
+    def value(self) -> int
+
+struct Single:
+    n: int
+
+impl Only for Single:
+    def value(self) -> int:
+        return self.n
+
+trait Few:
+    def value(self) -> int
+
+struct A:
+    n: int
+struct B:
+    n: int
+struct C:
+    n: int
+
+impl Few for A:
+    def value(self) -> int:
+        return 1
+impl Few for B:
+    def value(self) -> int:
+        return 2
+impl Few for C:
+    def value(self) -> int:
+        return 3
+
+trait Many:
+    def value(self) -> int
+
+struct M1:
+    n: int
+struct M2:
+    n: int
+struct M3:
+    n: int
+struct M4:
+    n: int
+struct M5:
+    n: int
+
+impl Many for M1:
+    def value(self) -> int:
+        return 1
+impl Many for M2:
+    def value(self) -> int:
+        return 2
+impl Many for M3:
+    def value(self) -> int:
+        return 3
+impl Many for M4:
+    def value(self) -> int:
+        return 4
+impl Many for M5:
+    def value(self) -> int:
+        return 5
+
+trait Named:
+    def name(self) -> str
+
+trait Greeter(Named):
+    def greet(self) -> str
+
+struct Person:
+    who: str
+
+struct Robot:
+    id: str
+
+impl Named for Person:
+    def name(self) -> str:
+        return self.who
+impl Greeter for Person:
+    def greet(self) -> str:
+        return "hello"
+
+impl Named for Robot:
+    def name(self) -> str:
+        return self.id
+impl Greeter for Robot:
+    def greet(self) -> str:
+        return "hello"
+
+def describe(g: Greeter) -> str:
+    named: Named = g
+    return f"{g.greet()} {named.name()}"
+
+trait Sink:
+    def log(self, text: str)
+
+struct Collector:
+    lines: list[str]
+
+impl Sink for Collector:
+    def log(self, text: str):
+        self.lines.append(text)
+
+trait Scale:
+    def scale(self, by: int, plus: int) -> int
+
+struct Twice:
+    n: int
+
+struct Thrice:
+    n: int
+
+impl Scale for Twice:
+    def scale(self, by: int, plus: int) -> int:
+        return 2 * by + plus
+
+impl Scale for Thrice:
+    def scale(self, by: int, plus: int) -> int:
+        return 3 * by + plus
+
+def main():
+    only: list[Only] = [Single(1)]
+    print(f"one {sum([o.value() for o in only])}")
+    few: list[Few] = [A(0), B(0), C(0)]
+    print(f"three {sum([f.value() for f in few])}")
+    many: list[Many] = [M1(0), M2(0), M3(0), M4(0), M5(0)]
+    print(f"five {sum([m.value() for m in many])}")
+    print(f"upcast {describe(Person('Ann'))} / {describe(Robot('Bo'))}")
+    collector = Collector([])
+    sink: Sink = collector
+    for text in ["a", "b", "c"]:
+        sink.log(text)
+    print(f"logged {','.join(collector.lines)}")
+    scales: list[Scale] = [Twice(0), Thrice(0), Twice(0)]
+    print(f"scaled {scales[0].scale(1, 0)} {scales[1].scale(2, 0)} {scales[2].scale(5, 2)}")
