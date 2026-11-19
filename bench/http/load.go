@@ -2,7 +2,9 @@
 // after another for `seconds`, and the program prints requests per second and latency
 // percentiles. Written because no load-testing tool is installed on the benchmark machine.
 //
-// Usage: load PORT PATH CONNECTIONS SECONDS
+// Usage: load PORT PATH CONNECTIONS SECONDS [METHOD BODY]
+//
+// With METHOD and BODY, each request is that method with BODY as a JSON body.
 package main
 
 import (
@@ -22,6 +24,11 @@ func main() {
 	connections, _ := strconv.Atoi(os.Args[3])
 	seconds, _ := strconv.ParseFloat(os.Args[4], 64)
 	request := []byte("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	if len(os.Args) > 6 {
+		body := os.Args[6]
+		request = []byte(os.Args[5] + " " + path + " HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: " +
+			strconv.Itoa(len(body)) + "\r\n\r\n" + body)
+	}
 	deadline := time.Now().Add(time.Duration(seconds * float64(time.Second)))
 	var mu sync.Mutex
 	var latencies []time.Duration
