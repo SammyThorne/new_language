@@ -22,7 +22,7 @@ fn share(part: &str) -> Str {
 /// # Safety
 /// Both strings must be valid (pointer, length) pairs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_concat(ap: *const u8, al: i64, bp: *const u8, bl: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_str_concat(ap: *const u8, al: i64, bp: *const u8, bl: i64) -> Str {
     if al == 0 {
         return Str { ptr: bp, len: bl };
     }
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn lrt_str_concat(ap: *const u8, al: i64, bp: *const u8, b
 /// # Safety
 /// Both strings must be valid (pointer, length) pairs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_eq(ap: *const u8, al: i64, bp: *const u8, bl: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_str_eq(ap: *const u8, al: i64, bp: *const u8, bl: i64) -> i64 {
     (al == bl && unsafe { s(ap, al) == s(bp, bl) }) as i64
 }
 
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn lrt_str_eq(ap: *const u8, al: i64, bp: *const u8, bl: i
 /// # Safety
 /// Both strings must be valid (pointer, length) pairs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_cmp(ap: *const u8, al: i64, bp: *const u8, bl: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_str_cmp(ap: *const u8, al: i64, bp: *const u8, bl: i64) -> i64 {
     match unsafe { s(ap, al).cmp(s(bp, bl)) } {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -100,7 +100,7 @@ pub fn hash_bytes(bytes: &[u8], seed: u64) -> u64 {
 /// # Safety
 /// The string must be a valid (pointer, length) pair.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_hash(ptr: *const u8, len: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_str_hash(ptr: *const u8, len: i64) -> i64 {
     hash_bytes(unsafe { s(ptr, len) }.as_bytes(), seed()) as i64
 }
 
@@ -110,7 +110,7 @@ pub unsafe extern "C" fn lrt_str_hash(ptr: *const u8, len: i64) -> i64 {
 /// # Safety
 /// `key` must point to a `Str`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_hash_ptr(key: *const u8) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_str_hash_ptr(key: *const u8) -> i64 {
     let key = unsafe { *(key as *const Str) };
     unsafe { lrt_str_hash(key.ptr, key.len) }
 }
@@ -120,7 +120,7 @@ pub unsafe extern "C" fn lrt_str_hash_ptr(key: *const u8) -> i64 {
 /// # Safety
 /// Both must point to `Str` values.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_eq_ptr(a: *const u8, b: *const u8) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_str_eq_ptr(a: *const u8, b: *const u8) -> i64 {
     let (a, b) = unsafe { (*(a as *const Str), *(b as *const Str)) };
     unsafe { lrt_str_eq(a.ptr, a.len, b.ptr, b.len) }
 }
@@ -130,7 +130,7 @@ pub unsafe extern "C" fn lrt_str_eq_ptr(a: *const u8, b: *const u8) -> i64 {
 /// # Safety
 /// Both strings must be valid (pointer, length) pairs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_find(hp: *const u8, hl: i64, np: *const u8, nl: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_str_find(hp: *const u8, hl: i64, np: *const u8, nl: i64) -> i64 {
     unsafe { s(hp, hl).find(s(np, nl)) }.map_or(-1, |i| i as i64)
 }
 
@@ -155,7 +155,7 @@ fn clamp_slice(len: i64, start: i64, stop: i64, has_start: i64, has_stop: i64) -
 /// The string and the location must be valid (pointer, length) pairs.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn lrt_str_slice(
+pub unsafe extern "C-unwind" fn lrt_str_slice(
     ptr: *const u8,
     len: i64,
     start: i64,
@@ -181,7 +181,7 @@ macro_rules! str_to_str {
         /// # Safety
         /// The string must be a valid (pointer, length) pair.
         #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn $name(ptr: *const u8, len: i64) -> Str {
+        pub unsafe extern "C-unwind" fn $name(ptr: *const u8, len: i64) -> Str {
             let f: fn(&str) -> Str = $body;
             f(unsafe { s(ptr, len) })
         }
@@ -229,7 +229,7 @@ fn list_of_strs<'a>(desc: *const TypeDesc, parts: impl Iterator<Item = &'a str>)
 /// # Safety
 /// The strings and location must be valid (pointer, length) pairs; `desc` describes `list[str]`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_split(
+pub unsafe extern "C-unwind" fn lrt_str_split(
     ptr: *const u8,
     len: i64,
     sep: *const u8,
@@ -249,7 +249,7 @@ pub unsafe extern "C" fn lrt_str_split(
 /// # Safety
 /// The string must be a valid (pointer, length) pair; `desc` describes `list[str]`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_split_ws(ptr: *const u8, len: i64, desc: *const TypeDesc) -> *mut List {
+pub unsafe extern "C-unwind" fn lrt_str_split_ws(ptr: *const u8, len: i64, desc: *const TypeDesc) -> *mut List {
     let text = unsafe { s(ptr, len) };
     // ASCII text, the common case, can be split byte by byte.
     if text.is_ascii() {
@@ -264,7 +264,7 @@ pub unsafe extern "C" fn lrt_str_split_ws(ptr: *const u8, len: i64, desc: *const
 /// # Safety
 /// `sep` must be a valid (pointer, length) pair and `items` a `list[str]`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_join(sep: *const u8, sep_len: i64, items: *mut List) -> Str {
+pub unsafe extern "C-unwind" fn lrt_str_join(sep: *const u8, sep_len: i64, items: *mut List) -> Str {
     let sep = unsafe { s(sep, sep_len) };
     let count = unsafe { (*items).len } as usize;
     let part = |i: usize| unsafe {
@@ -292,7 +292,7 @@ pub unsafe extern "C" fn lrt_str_join(sep: *const u8, sep_len: i64, items: *mut 
 /// # Safety
 /// All three strings must be valid (pointer, length) pairs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_replace(
+pub unsafe extern "C-unwind" fn lrt_str_replace(
     ptr: *const u8,
     len: i64,
     old: *const u8,
@@ -310,14 +310,14 @@ pub unsafe extern "C" fn lrt_str_replace(
 /// # Safety
 /// Both strings must be valid (pointer, length) pairs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_starts_with(ptr: *const u8, len: i64, p: *const u8, pl: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_str_starts_with(ptr: *const u8, len: i64, p: *const u8, pl: i64) -> i64 {
     unsafe { s(ptr, len).starts_with(s(p, pl)) as i64 }
 }
 
 /// # Safety
 /// Both strings must be valid (pointer, length) pairs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_ends_with(ptr: *const u8, len: i64, p: *const u8, pl: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_str_ends_with(ptr: *const u8, len: i64, p: *const u8, pl: i64) -> i64 {
     unsafe { s(ptr, len).ends_with(s(p, pl)) as i64 }
 }
 
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn lrt_str_ends_with(ptr: *const u8, len: i64, p: *const u
 /// # Safety
 /// The string must be a valid (pointer, length) pair and `*offset` a character boundary.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_next_char(ptr: *const u8, len: i64, offset: *mut i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_str_next_char(ptr: *const u8, len: i64, offset: *mut i64) -> Str {
     let text = unsafe { s(ptr, len) };
     let at = unsafe { *offset } as usize;
     match text[at..].chars().next() {
@@ -344,7 +344,7 @@ pub unsafe extern "C" fn lrt_str_next_char(ptr: *const u8, len: i64, offset: *mu
 /// # Safety
 /// `ptr` and `len` must describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_str_repeat(ptr: *const u8, len: i64, n: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_str_repeat(ptr: *const u8, len: i64, n: i64) -> Str {
     if n <= 0 || len <= 0 {
         return Str::empty();
     }

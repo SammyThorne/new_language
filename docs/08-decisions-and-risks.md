@@ -429,18 +429,45 @@ The roadmap's bar is Autobahn's fuzzing client with no failures in the non-exten
 
 An `@http.ws` handler takes one `http.WebSocket` and may also take the upgrade `http.Request`, path parameters and query parameters, bound by the same rules as other routes; a body parameter or `status=` is an error. It must return nothing: there is no response to make once the connection is upgraded, and errors on the connection show up as `recv` returning `None`.
 
+### D61. Fibers are hand-written: the context switch, the stacks and the scheduler
+
+This replaces D42 and D50. `corosensei` and `crossbeam` would have been the obvious crates, and adding them is a download, so the runtime has its own (`crates/lang_rt/src/fiber.rs` and `poll.rs`, about 1,250 lines with comments). The context switch is about twenty instructions of x86-64 assembly that save the callee-saved registers and the MXCSR and x87 control words. Each stack is an `mmap` reservation, 1 MiB by default (`WEBY_TASK_STACK`), with a guard page; only touched pages use memory. Up to 16,384 stacks are kept for reuse, which takes task creation from 3.4x to 2.7x Go's time, at the cost of keeping their touched pages. Each worker has a FIFO run queue behind a lock; an idle worker takes from the global queue, then steals half of another's, then waits in `epoll_wait`. Parking uses a permit and a state word, so that a wake-up racing with going to sleep is never lost. There is one worker per core (`WEBY_WORKERS`), and no cap on tasks: the 10,000-task cap existed to protect against thread exhaustion.
+
+### D62. How fibers and the Boehm collector cooperate
+
+Boehm scans each registered thread from its stack pointer to the stack bottom it was told about. A worker switching to a fiber calls `GC_set_stackbottom` with the fiber's stack top, and back to its own when the fiber switches out, both inside `GC_alloc_lock`, which the collector holds while it stops the world and marks, so no collection sees a stack pointer on one stack and a bottom on another. Fibers that are not running are reported through `GC_set_push_other_roots` (chaining Boehm's own hook, which pushes the thread stacks): the live part of each stack, and a small array of each fiber's references (its entry's environment and task, and the mutexes it holds). The list of fibers changes only under the same lock. This is the cost of the design: two lock acquisitions per switch. At 690,000 requests per second on 12 workers it has not shown up as a bottleneck.
+
+### D63. The main function stays on the main thread
+
+`main` runs on the main thread as before; only spawned tasks and HTTP connections are fibers. When the main thread waits (a `join`, a channel), it blocks the thread instead of parking. The workers start on the first `spawn` or `serve`, so a program that does neither never starts a thread and keeps D46's single-threaded allocation speed. Waiting code calls one `park` that does the right thing in either context.
+
+### D64. A panic in a task unwinds to the task's entry
+
+docs/04 planned to discard a panicking fiber's stack and run a list of cleanups recorded by `with`. Instead, a panic in a fiber unwinds with Rust's unwinder to `catch_unwind` at the fiber's entry, so Rust frames in between (runtime functions that call back into compiled code) are cleaned up properly. That needs unwind tables in generated code, so functions are now marked `uwtable` instead of `nounwind`, and runtime entry points use the `C-unwind` ABI. Generated code has no landing pads, so a `with` block that a panic leaves does not run its `exit`; the runtime instead tracks the mutexes each fiber holds and releases them when it panics, which is the cleanup that matters for other tasks. The value in such a mutex is as it was before the block, since a guarded value is written back only when the block ends normally (D43). Joining a panicked task panics in the joiner. A panicking HTTP handler gets a 500 response and its connection is closed. A panic on the main thread still ends the process with status 101 (D24).
+
+### D65. Sockets: edge-triggered epoll, shared by the workers, with deadlines swept
+
+A connection's socket is non-blocking and registered once with one epoll instance (`EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET`). A read or write that would block records the fiber as the waiter for that direction and parks; any worker that calls `epoll_wait` marks the direction ready and wakes the waiter. Busy workers poll without waiting every 61 scheduling rounds, so the network is not starved when no worker is idle. The registration records are never freed, only recycled, so an event that arrives after a socket is closed is a harmless spurious wake-up. Read deadlines (the idle and request timeouts, WebSocket keep-alives) are not put in a timer heap, since almost every one is cancelled by data arriving first; the timer thread instead checks waiting sockets' deadlines every 250 ms. Explicit timers (`sleep`, `join_timeout`) go in a heap served by the same thread. At shutdown, every waiting socket is woken so its fiber sees the flag. An idle connection costs about 11 KiB: its stack's touched pages, a 4 KiB read buffer that grows only when needed, and the runtime's records.
+
+### D66. What stage 2 leaves out
+
+- **A blocking pool.** File I/O and `@extern` calls run on the worker that makes them, which stalls the fibers queued there for that long. Reading standard input in a task can therefore hold a worker indefinitely.
+- **Preemption.** A fiber runs until it waits. A CPU-bound loop holds its worker; with one worker per core, as many such loops as cores stop everything else. The planned fix (a check on loop back-edges) is on the optimisation backlog.
+- **Clean stack overflow.** Overflowing a fiber's stack hits its guard page and kills the process with a segmentation fault. Turning that into a panic needs a signal handler on an alternate stack.
+- **Per-worker timers and aarch64.** One timer thread serves all workers; the context switch exists only for x86-64.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
 | R1 | Boehm cannot keep up with Go on allocation-heavy request handling | High | Medium | Use pointer-free allocation for strings and byte buffers; reduce allocation in the HTTP path; escape analysis; precise GC as the planned exit. Measured at the M8 gate. |
 | R2 | A GC reference is held only in Rust-allocated memory and gets collected | Medium | High (memory corruption) | The Rust heap rule in [04](04-runtime-and-memory.md#the-rust-heap-rule); a single handle-table API; a GC stress mode (collect on every allocation) run in CI. |
-| R3 | Fibers plus conservative stack scanning across worker threads is fragile | Medium | High | Own the fiber implementation; register stacks through the documented Boehm hook; stage 2 is after the prototype, so the prototype does not depend on it. |
+| R3 | Fibers plus conservative stack scanning across worker threads is fragile | Medium | High | Own the fiber implementation; register stacks through the documented Boehm hook; stage 2 is after the prototype, so the prototype does not depend on it. As built (D62), every concurrency and server test passes with a collection before every allocation, and the stress script ran a thousand times without a failure. |
 | R4 | Scope creep in the language (features before the web stack works) | High | High | The roadmap's exit criteria are programs, not features. Anything not needed by a milestone's demo waits. |
 | R5 | Indentation lexing and f-strings produce confusing errors | Medium | Medium | Dedicated diagnostics tests from milestone 1; tabs are rejected outright. |
 | R6 | Generic syntax `f[T](x)` is ambiguous with indexing | Certain | Low | Parse as an index expression; the type checker reinterprets it when the base names a generic. Documented in [03](03-compiler-architecture.md#parser). |
 | R7 | Trait system grows into Rust's (associated types, blanket impls, specialisation) | Medium | Medium | Explicit feature fence in [02](02-type-system-and-traits.md#what-the-trait-system-deliberately-lacks). |
-| R8 | A panic in one request handler takes down the server | Certain in stage 1 | Medium | Stage 1 documents it; most failures are `Result`s. Task-scoped panics arrive with fibers ([04](04-runtime-and-memory.md#panics)). |
+| R8 | A panic in one request handler takes down the server | Resolved in M10 | Medium | A panic now ends only its task, and a handler's becomes a 500 (D64). |
 | R9 | `inkwell` lags LLVM or lacks an API | Low | Low | LLVM is pinned; `llvm-sys` is available underneath. |
 | R10 | The sharing rules reject too much, and programmers wrap everything in `Mutex` to get past them | Medium | Medium | Diagnostics that name the fix; immutable collections in M6; review the rules against the M8 and M9 services, which are the realistic test. See D20 for what the rules do not cover |
 | R11 | Route binding rules grow into a framework inside the compiler | Medium | Medium | The fixed rule table in [05](05-standard-library.md#how-handler-parameters-are-bound); everything else goes through `http.Request` |

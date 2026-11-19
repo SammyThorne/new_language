@@ -648,7 +648,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         let ptr = self.ptr_type();
         let entry_type = self.cx.void_type().fn_type(&[ptr.into(), ptr.into(), self.cx.i64_type().into()], false);
         let entry = self.module.add_function("http.entry", entry_type, Some(inkwell::module::Linkage::Private));
-        entry.add_attribute(inkwell::attributes::AttributeLoc::Function, self.nounwind);
+        entry.add_attribute(inkwell::attributes::AttributeLoc::Function, self.unwind_table);
         self.in_function(entry, |this| {
             let code = entry.get_nth_param(0).unwrap();
             let env = entry.get_nth_param(1).unwrap();

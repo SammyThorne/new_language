@@ -38,7 +38,7 @@ impl<'ctx> Codegen<'ctx, '_> {
             }
         };
         let function = self.module.add_function(&format!("{label}.{name}"), fn_type, Some(Linkage::Private));
-        function.add_attribute(AttributeLoc::Function, self.nounwind);
+        function.add_attribute(AttributeLoc::Function, self.unwind_table);
         if fast {
             function.set_call_conventions(crate::CALLCONV_FAST);
         }

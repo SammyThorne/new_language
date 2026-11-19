@@ -8,7 +8,7 @@ use crate::{Str, location};
 /// # Safety
 /// `loc` and `loc_len` must describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_int_pow(base: i64, exp: i64, loc: *const u8, loc_len: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_int_pow(base: i64, exp: i64, loc: *const u8, loc_len: i64) -> i64 {
     if exp < 0 {
         // SAFETY: guaranteed by the caller.
         panic_at("negative exponent for `int`; convert to `float` first", unsafe { location(loc, loc_len) });
@@ -29,7 +29,7 @@ pub unsafe extern "C" fn lrt_int_pow(base: i64, exp: i64, loc: *const u8, loc_le
 /// # Safety
 /// `loc` and `loc_len` must describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_float_to_int(x: f64, loc: *const u8, loc_len: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_float_to_int(x: f64, loc: *const u8, loc_len: i64) -> i64 {
     // 2^63 is exactly representable; every float below it in magnitude fits in an i64.
     const LIMIT: f64 = 9_223_372_036_854_775_808.0;
     if x.is_nan() || x >= LIMIT || x < -LIMIT {
@@ -98,7 +98,7 @@ pub fn parse_float(text: &str) -> Option<f64> {
 /// # Safety
 /// The string must be a valid (pointer, length) pair and `out` must be writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_parse_int(ptr: *const u8, len: i64, out: *mut i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_parse_int(ptr: *const u8, len: i64, out: *mut i64) -> i64 {
     match parse_int(unsafe { Str::from_raw(ptr, len) }) {
         Some(value) => {
             unsafe { *out = value };
@@ -113,7 +113,7 @@ pub unsafe extern "C" fn lrt_parse_int(ptr: *const u8, len: i64, out: *mut i64) 
 /// # Safety
 /// The string must be a valid (pointer, length) pair and `out` must be writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_parse_float(ptr: *const u8, len: i64, out: *mut f64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_parse_float(ptr: *const u8, len: i64, out: *mut f64) -> i64 {
     match parse_float(unsafe { Str::from_raw(ptr, len) }) {
         Some(value) => {
             unsafe { *out = value };

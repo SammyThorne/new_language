@@ -14,6 +14,7 @@
 pub mod builder;
 pub mod bytes;
 pub mod dict;
+pub mod fiber;
 pub mod gc;
 pub mod http;
 pub mod json;
@@ -21,6 +22,7 @@ pub mod list;
 pub mod num;
 pub mod out;
 pub mod panic;
+pub mod poll;
 pub mod strings;
 pub mod sys;
 pub mod tasks;
@@ -29,7 +31,7 @@ pub mod ws;
 /// Program entry. The C runtime calls this; it runs the compiled program's `main`.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub extern "C" fn main(argc: std::ffi::c_int, argv: *const *const std::ffi::c_char) -> std::ffi::c_int {
+pub extern "C-unwind" fn main(argc: std::ffi::c_int, argv: *const *const std::ffi::c_char) -> std::ffi::c_int {
     unsafe extern "C" {
         /// The compiled program's `main`, emitted by the code generator.
         fn lang_user_main();
@@ -66,10 +68,10 @@ pub struct TypeDesc {
     pub eq: Option<EqFn>,
 }
 
-pub type HashFn = unsafe extern "C" fn(*const u8) -> i64;
-pub type EqFn = unsafe extern "C" fn(*const u8, *const u8) -> i64;
+pub type HashFn = unsafe extern "C-unwind" fn(*const u8) -> i64;
+pub type EqFn = unsafe extern "C-unwind" fn(*const u8, *const u8) -> i64;
 /// Three-way comparison for sorting: negative, zero or positive.
-pub type CmpFn = unsafe extern "C" fn(*const u8, *const u8) -> i64;
+pub type CmpFn = unsafe extern "C-unwind" fn(*const u8, *const u8) -> i64;
 
 /// A string value: a pointer to UTF-8 bytes and their length. Returned by value, which the C ABI
 /// on x86-64 puts in two registers.

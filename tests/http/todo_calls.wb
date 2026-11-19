@@ -78,6 +78,11 @@ def health(req: http.Request) -> Result[http.Response]:
 def echo(req: http.Request) -> Result[http.Response]:
     return http.text(f"{req.method} {req.param('rest')} from {req.header('User-Agent').unwrap_or('?')}")
 
+def boom(req: http.Request) -> Result[http.Response]:
+    """A handler with a bug: the panic becomes a 500 and the server carries on."""
+    parts = req.path.split("/")
+    return http.text(parts[10])
+
 def main():
     store = Store(todos=Mutex({}), next_id=Atomic(0))
     server = http.Server()
@@ -88,6 +93,7 @@ def main():
     api.patch("/todos/{id}", store.update)
     api.delete("/todos/{id}", store.remove)
     server.get("/health", health)
+    server.get("/boom", boom)
     server.get("/echo/{rest...}", echo)
     port = server.bind("127.0.0.1:0").unwrap()
     io.eprint(f"listening on {port}")

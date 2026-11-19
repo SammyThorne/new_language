@@ -67,21 +67,21 @@ unsafe fn builder<'a>(b: *mut Builder) -> &'a mut Builder {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_builder_new() -> *mut Builder {
+pub extern "C-unwind" fn lrt_builder_new() -> *mut Builder {
     gc::alloc(std::mem::size_of::<Builder>()) as *mut Builder
 }
 
 /// # Safety
 /// `b` comes from `lrt_builder_new`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_push(b: *mut Builder, ptr: *const u8, len: i64) {
+pub unsafe extern "C-unwind" fn lrt_builder_push(b: *mut Builder, ptr: *const u8, len: i64) {
     unsafe { builder(b).push(Str::from_raw(ptr, len).as_bytes()) };
 }
 
 /// # Safety
 /// `b` comes from `lrt_builder_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_push_int(b: *mut Builder, value: i64) {
+pub unsafe extern "C-unwind" fn lrt_builder_push_int(b: *mut Builder, value: i64) {
     unsafe { builder(b).push(value.to_string().as_bytes()) };
 }
 
@@ -90,21 +90,21 @@ pub unsafe extern "C" fn lrt_builder_push_int(b: *mut Builder, value: i64) {
 /// # Safety
 /// `b` comes from `lrt_builder_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_push_uint(b: *mut Builder, value: i64) {
+pub unsafe extern "C-unwind" fn lrt_builder_push_uint(b: *mut Builder, value: i64) {
     unsafe { builder(b).push((value as u64).to_string().as_bytes()) };
 }
 
 /// # Safety
 /// `b` comes from `lrt_builder_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_push_float(b: *mut Builder, value: f64) {
+pub unsafe extern "C-unwind" fn lrt_builder_push_float(b: *mut Builder, value: f64) {
     unsafe { builder(b).push(lang_format::float_repr(value).as_bytes()) };
 }
 
 /// # Safety
 /// `b` comes from `lrt_builder_new`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_push_str_repr(b: *mut Builder, ptr: *const u8, len: i64) {
+pub unsafe extern "C-unwind" fn lrt_builder_push_str_repr(b: *mut Builder, ptr: *const u8, len: i64) {
     unsafe { builder(b).push(str_repr(Str::from_raw(ptr, len)).as_bytes()) };
 }
 
@@ -118,14 +118,19 @@ unsafe fn spec(ptr: *const u8, len: i64) -> lang_format::Spec {
 /// # Safety
 /// `b` comes from `lrt_builder_new`; the spec is a UTF-8 string the compiler validated.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_push_format_int(b: *mut Builder, value: i64, spec_ptr: *const u8, spec_len: i64) {
+pub unsafe extern "C-unwind" fn lrt_builder_push_format_int(
+    b: *mut Builder,
+    value: i64,
+    spec_ptr: *const u8,
+    spec_len: i64,
+) {
     unsafe { builder(b).push(lang_format::format_int(value, &spec(spec_ptr, spec_len)).as_bytes()) };
 }
 
 /// # Safety
 /// `b` comes from `lrt_builder_new`; the spec is a UTF-8 string the compiler validated.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_push_format_float(
+pub unsafe extern "C-unwind" fn lrt_builder_push_format_float(
     b: *mut Builder,
     value: f64,
     spec_ptr: *const u8,
@@ -137,7 +142,7 @@ pub unsafe extern "C" fn lrt_builder_push_format_float(
 /// # Safety
 /// `b` comes from `lrt_builder_new`; both strings are UTF-8 and the compiler validated the spec.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_push_format_str(
+pub unsafe extern "C-unwind" fn lrt_builder_push_format_str(
     b: *mut Builder,
     ptr: *const u8,
     len: i64,
@@ -155,7 +160,7 @@ pub unsafe extern "C" fn lrt_builder_push_format_str(
 /// # Safety
 /// `b` comes from `lrt_builder_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_finish(b: *mut Builder) -> Str {
+pub unsafe extern "C-unwind" fn lrt_builder_finish(b: *mut Builder) -> Str {
     let b = unsafe { builder(b) };
     if b.len == 0 { Str::empty() } else { Str { ptr: b.data, len: b.len } }
 }
@@ -165,7 +170,7 @@ pub unsafe extern "C" fn lrt_builder_finish(b: *mut Builder) -> Str {
 /// # Safety
 /// `b` comes from `lrt_builder_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_print(b: *mut Builder) {
+pub unsafe extern "C-unwind" fn lrt_builder_print(b: *mut Builder) {
     crate::out::write(unsafe { builder(b) }.bytes());
 }
 

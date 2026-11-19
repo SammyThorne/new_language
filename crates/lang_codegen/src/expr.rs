@@ -299,7 +299,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         // The entry function, called by the runtime on the new thread with the C convention.
         let entry_type = self.cx.void_type().fn_type(&[ptr.into()], false);
         let entry = self.module.add_function("spawn.entry", entry_type, Some(inkwell::module::Linkage::Private));
-        entry.add_attribute(inkwell::attributes::AttributeLoc::Function, self.nounwind);
+        entry.add_attribute(inkwell::attributes::AttributeLoc::Function, self.unwind_table);
         let has_callee = callee.is_some();
         let callee_ty = callee.map(|c| c.ty);
         self.in_function(entry, |this| {
@@ -384,7 +384,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         let name = format!("{}.adapter", function.name);
         let adapter = self.module.add_function(&name, fn_type, Some(inkwell::module::Linkage::Private));
         adapter.set_call_conventions(crate::CALLCONV_FAST);
-        adapter.add_attribute(inkwell::attributes::AttributeLoc::Function, self.nounwind);
+        adapter.add_attribute(inkwell::attributes::AttributeLoc::Function, self.unwind_table);
         self.adapters.insert((func, bound), adapter);
         self.in_function(adapter, |this| {
             let mut args: Vec<BasicMetadataValueEnum> = Vec::new();

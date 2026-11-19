@@ -15,7 +15,7 @@ unsafe fn data<'a>(ptr: *const u8, len: i64) -> &'a [u8] {
 /// # Safety
 /// `ptr` and `len` describe a valid byte range.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_bytes_at(ptr: *const u8, len: i64, index: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_bytes_at(ptr: *const u8, len: i64, index: i64) -> i64 {
     let bytes = unsafe { data(ptr, len) };
     let index = if index < 0 { index + len } else { index };
     if (0..len).contains(&index) { bytes[index as usize] as i64 } else { -1 }
@@ -26,7 +26,7 @@ pub unsafe extern "C" fn lrt_bytes_at(ptr: *const u8, len: i64, index: i64) -> i
 /// # Safety
 /// `ptr` and `len` describe a valid byte range.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_bytes_slice(ptr: *const u8, len: i64, start: i64, end: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_bytes_slice(ptr: *const u8, len: i64, start: i64, end: i64) -> Str {
     let clamp = |i: i64| if i < 0 { (i + len).max(0) } else { i.min(len) };
     let (start, end) = (clamp(start), clamp(end));
     if start >= end {
@@ -40,7 +40,7 @@ pub unsafe extern "C" fn lrt_bytes_slice(ptr: *const u8, len: i64, start: i64, e
 /// # Safety
 /// `ptr` and `len` describe a valid byte range.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_bytes_is_utf8(ptr: *const u8, len: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_bytes_is_utf8(ptr: *const u8, len: i64) -> i64 {
     std::str::from_utf8(unsafe { data(ptr, len) }).is_ok() as i64
 }
 
@@ -49,7 +49,7 @@ pub unsafe extern "C" fn lrt_bytes_is_utf8(ptr: *const u8, len: i64) -> i64 {
 /// # Safety
 /// `ptr` and `len` describe a valid byte range.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_bytes_repr(ptr: *const u8, len: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_bytes_repr(ptr: *const u8, len: i64) -> Str {
     let bytes = unsafe { data(ptr, len) };
     let quote = if bytes.contains(&b'\'') && !bytes.contains(&b'"') { '"' } else { '\'' };
     let mut out = format!("b{quote}");
@@ -76,13 +76,13 @@ pub unsafe extern "C" fn lrt_bytes_repr(ptr: *const u8, len: i64) -> Str {
 /// # Safety
 /// `ptr` and `len` describe a valid byte range.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_bytes_hex(ptr: *const u8, len: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_bytes_hex(ptr: *const u8, len: i64) -> Str {
     let text: String = unsafe { data(ptr, len) }.iter().map(|b| format!("{b:02x}")).collect();
     Str::from_bytes(text.as_bytes())
 }
 
 /// One byte (the low 8 bits of `value`) as a one-byte `bytes`.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_bytes_of(value: i64) -> Str {
+pub extern "C-unwind" fn lrt_bytes_of(value: i64) -> Str {
     Str::from_bytes(&[value as u8])
 }

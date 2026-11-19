@@ -1,0 +1,20 @@
+# An echo WebSocket server for the idle-connection benchmark (docs/07, "Targets": 50,000 idle
+# WebSocket connections at under 16 KiB each). Prints its port, then serves until SIGTERM.
+
+import http
+import io
+
+def echo(ws: http.WebSocket):
+    for msg in ws:
+        match msg:
+            case Text(body):
+                _ = ws.send(body)
+            case Binary(data):
+                _ = ws.send_bytes(data)
+
+def main():
+    server = http.Server()
+    server.ws("/ws", echo)
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()

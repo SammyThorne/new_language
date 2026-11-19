@@ -149,7 +149,7 @@ unsafe fn dict<'a>(d: *mut Dict) -> &'a mut Dict {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_dict_new(desc: *const TypeDesc) -> *mut Dict {
+pub extern "C-unwind" fn lrt_dict_new(desc: *const TypeDesc) -> *mut Dict {
     let d = gc::alloc(std::mem::size_of::<Dict>()) as *mut Dict;
     // SAFETY: fresh, zeroed allocation of the right size.
     unsafe { (*d).desc = desc };
@@ -161,7 +161,7 @@ pub extern "C" fn lrt_dict_new(desc: *const TypeDesc) -> *mut Dict {
 /// # Safety
 /// `d` must be a dict and `key` must point to a key of its key type.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_dict_find(d: *mut Dict, key: *const u8) -> *mut u8 {
+pub unsafe extern "C-unwind" fn lrt_dict_find(d: *mut Dict, key: *const u8) -> *mut u8 {
     unsafe {
         let d = dict(d);
         match d.find(key) {
@@ -176,7 +176,7 @@ pub unsafe extern "C" fn lrt_dict_find(d: *mut Dict, key: *const u8) -> *mut u8 
 /// # Safety
 /// `d` must be a dict and `key` must point to a key of its key type.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_dict_slot(d: *mut Dict, key: *const u8) -> *mut u8 {
+pub unsafe extern "C-unwind" fn lrt_dict_slot(d: *mut Dict, key: *const u8) -> *mut u8 {
     unsafe {
         let d = dict(d);
         if d.index_cap == 0 {
@@ -208,7 +208,7 @@ pub unsafe extern "C" fn lrt_dict_slot(d: *mut Dict, key: *const u8) -> *mut u8 
 /// `d` must be a dict, `key` must point to a key of its key type, and `out` must be null or
 /// have room for a value.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_dict_remove(d: *mut Dict, key: *const u8, out: *mut u8) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_dict_remove(d: *mut Dict, key: *const u8, out: *mut u8) -> i64 {
     unsafe {
         let d = dict(d);
         if d.index_cap == 0 {
@@ -235,7 +235,7 @@ pub unsafe extern "C" fn lrt_dict_remove(d: *mut Dict, key: *const u8, out: *mut
 /// # Safety
 /// `d` must be a dict and `cursor` must point to a cursor that started at 0.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_dict_next(d: *mut Dict, cursor: *mut i64) -> *mut u8 {
+pub unsafe extern "C-unwind" fn lrt_dict_next(d: *mut Dict, cursor: *mut i64) -> *mut u8 {
     unsafe {
         let d = dict(d);
         while *cursor < d.used {
@@ -252,7 +252,7 @@ pub unsafe extern "C" fn lrt_dict_next(d: *mut Dict, cursor: *mut i64) -> *mut u
 /// # Safety
 /// `d` must be a dict.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_dict_clear(d: *mut Dict) {
+pub unsafe extern "C-unwind" fn lrt_dict_clear(d: *mut Dict) {
     unsafe {
         let d = dict(d);
         d.len = 0;
@@ -269,7 +269,7 @@ pub unsafe extern "C" fn lrt_dict_clear(d: *mut Dict) {
 /// # Safety
 /// `d` must be a dict.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_dict_copy(d: *mut Dict) -> *mut Dict {
+pub unsafe extern "C-unwind" fn lrt_dict_copy(d: *mut Dict) -> *mut Dict {
     unsafe {
         let copy = lrt_dict_new((*d).desc);
         let (key_size, value_offset, value_size) = {
@@ -296,7 +296,7 @@ pub unsafe extern "C" fn lrt_dict_copy(d: *mut Dict) -> *mut Dict {
 /// # Safety
 /// Both must be dicts of the same type, and `value_eq` must compare their values.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_dict_eq(a: *mut Dict, b: *mut Dict, value_eq: crate::EqFn) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_dict_eq(a: *mut Dict, b: *mut Dict, value_eq: crate::EqFn) -> i64 {
     unsafe {
         if (*a).len != (*b).len {
             return 0;

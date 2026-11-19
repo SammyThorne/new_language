@@ -93,14 +93,14 @@ unsafe fn remove_at(list: *mut List, index: usize, out: *mut u8) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_list_new(desc: *const TypeDesc, cap: i64) -> *mut List {
+pub extern "C-unwind" fn lrt_list_new(desc: *const TypeDesc, cap: i64) -> *mut List {
     new(desc, cap.max(0) as usize)
 }
 
 /// # Safety
 /// `list` must be a list.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_push(list: *mut List) -> *mut u8 {
+pub unsafe extern "C-unwind" fn lrt_list_push(list: *mut List) -> *mut u8 {
     unsafe { push_slot(list) }
 }
 
@@ -109,7 +109,7 @@ pub unsafe extern "C" fn lrt_list_push(list: *mut List) -> *mut u8 {
 /// # Safety
 /// `list` must be a list.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_insert(list: *mut List, index: i64) -> *mut u8 {
+pub unsafe extern "C-unwind" fn lrt_list_insert(list: *mut List, index: i64) -> *mut u8 {
     unsafe {
         let len = (*list).len;
         let index = if index < 0 { (index + len).max(0) } else { index.min(len) } as usize;
@@ -126,7 +126,7 @@ pub unsafe extern "C" fn lrt_list_insert(list: *mut List, index: i64) -> *mut u8
 /// # Safety
 /// `list` must be a list, `out` must have room for one element, and the location must be UTF-8.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_pop(list: *mut List, index: i64, out: *mut u8, loc: *const u8, loc_len: i64) {
+pub unsafe extern "C-unwind" fn lrt_list_pop(list: *mut List, index: i64, out: *mut u8, loc: *const u8, loc_len: i64) {
     unsafe {
         let len = (*list).len;
         if len == 0 {
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn lrt_list_pop(list: *mut List, index: i64, out: *mut u8,
 /// # Safety
 /// `list` must be a list.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_slice(
+pub unsafe extern "C-unwind" fn lrt_list_slice(
     list: *mut List,
     start: i64,
     stop: i64,
@@ -178,7 +178,7 @@ pub unsafe extern "C" fn lrt_list_slice(
 /// # Safety
 /// `list` must be a list.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_copy(list: *mut List) -> *mut List {
+pub unsafe extern "C-unwind" fn lrt_list_copy(list: *mut List) -> *mut List {
     unsafe { lrt_list_slice(list, 0, 0, 0, 0) }
 }
 
@@ -187,7 +187,7 @@ pub unsafe extern "C" fn lrt_list_copy(list: *mut List) -> *mut List {
 /// # Safety
 /// Both must be lists of the same type.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_extend(list: *mut List, other: *mut List) {
+pub unsafe extern "C-unwind" fn lrt_list_extend(list: *mut List, other: *mut List) {
     unsafe {
         let count = (*other).len as usize;
         reserve(list, count);
@@ -204,7 +204,7 @@ pub unsafe extern "C" fn lrt_list_extend(list: *mut List, other: *mut List) {
 /// # Safety
 /// Both must be lists of the same type.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_concat(a: *mut List, b: *mut List) -> *mut List {
+pub unsafe extern "C-unwind" fn lrt_list_concat(a: *mut List, b: *mut List) -> *mut List {
     unsafe {
         let out = new((*a).desc, ((*a).len + (*b).len) as usize);
         lrt_list_extend(out, a);
@@ -216,7 +216,7 @@ pub unsafe extern "C" fn lrt_list_concat(a: *mut List, b: *mut List) -> *mut Lis
 /// # Safety
 /// `list` must be a list.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_clear(list: *mut List) {
+pub unsafe extern "C-unwind" fn lrt_list_clear(list: *mut List) {
     unsafe {
         (*list).len = 0;
         (*list).cap = 0;
@@ -227,7 +227,7 @@ pub unsafe extern "C" fn lrt_list_clear(list: *mut List) {
 /// # Safety
 /// `list` must be a list.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_reverse(list: *mut List) {
+pub unsafe extern "C-unwind" fn lrt_list_reverse(list: *mut List) {
     unsafe {
         let len = (*list).len as usize;
         let size = elem_size(list);
@@ -243,7 +243,7 @@ pub unsafe extern "C" fn lrt_list_reverse(list: *mut List) {
 /// `list` must be a list, `value` must point to an element-typed value, and `eq` must compare
 /// two elements.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_index_of(list: *mut List, value: *const u8, eq: EqFn) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_list_index_of(list: *mut List, value: *const u8, eq: EqFn) -> i64 {
     unsafe {
         for i in 0..(*list).len as usize {
             if eq(slot(list, i), value) != 0 {
@@ -259,7 +259,7 @@ pub unsafe extern "C" fn lrt_list_index_of(list: *mut List, value: *const u8, eq
 /// # Safety
 /// As for `lrt_list_index_of`; the location must be UTF-8.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_remove_value(
+pub unsafe extern "C-unwind" fn lrt_list_remove_value(
     list: *mut List,
     value: *const u8,
     eq: EqFn,
@@ -280,7 +280,7 @@ pub unsafe extern "C" fn lrt_list_remove_value(
 /// # Safety
 /// `list` must be a list and `cmp` must compare two of its elements.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_sort(list: *mut List, cmp: CmpFn) {
+pub unsafe extern "C-unwind" fn lrt_list_sort(list: *mut List, cmp: CmpFn) {
     unsafe {
         let len = (*list).len as usize;
         if len < 2 {
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn lrt_list_sort(list: *mut List, cmp: CmpFn) {
 /// `list` must be a list; `keys`, if not null, a list of the same length; `cmp` must compare two
 /// keys (or two elements).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_sort_by(list: *mut List, keys: *mut List, cmp: CmpFn, reverse: i64) {
+pub unsafe extern "C-unwind" fn lrt_list_sort_by(list: *mut List, keys: *mut List, cmp: CmpFn, reverse: i64) {
     unsafe {
         let len = (*list).len as usize;
         if len < 2 {
@@ -333,7 +333,7 @@ pub unsafe extern "C" fn lrt_list_sort_by(list: *mut List, keys: *mut List, cmp:
 /// # Safety
 /// Both must be lists of the same type and `eq` must compare two elements.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_list_eq(a: *mut List, b: *mut List, eq: EqFn) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_list_eq(a: *mut List, b: *mut List, eq: EqFn) -> i64 {
     unsafe {
         if (*a).len != (*b).len {
             return 0;

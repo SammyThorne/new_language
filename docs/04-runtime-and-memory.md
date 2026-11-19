@@ -114,6 +114,8 @@ A task becomes a **fiber**: a user-space thread with its own stack, scheduled by
 
 **Collector integration.** While Boehm is the collector, it must see every fiber's stack. Running fibers are on worker threads it already knows. For parked fibers, the runtime registers a callback (Boehm's "push other roots" hook) that reports the live region of every parked fiber stack; saved registers are on those stacks because the context switch pushes them. This is the mechanism Crystal uses. It is the reason we own fiber stack allocation and do not adopt an off-the-shelf coroutine runtime.
 
+**As built in M10** ([08](08-decisions-and-risks.md), D61 to D66): as above, with these differences. Stacks reserve 1 MiB by default rather than 256 KiB (only touched pages cost memory). The scheduler's queues are locked deques rather than lock-free ones. Idle workers wait in `epoll_wait` on one shared poller instead of a separate poller thread, and one timer thread replaces per-worker timer heaps. There is no blocking pool yet, no yield check, and a stack overflow is a segmentation fault rather than a panic. Running fibers are made visible to the collector by moving the worker thread's registered stack bottom on every switch, under the collector's allocation lock (D62). The program's `main` stays on the main thread (D63).
+
 **io_uring** is a possible later replacement for epoll. It is not planned: epoll is sufficient for Go parity and far simpler.
 
 ### Synchronisation primitives
@@ -196,6 +198,8 @@ A panic means the program has a bug. It prints the message, the source location 
 
 - **Stage 1.** The process exits with a non-zero status. A panicking request handler therefore takes the server down; a process supervisor restarts it. This is harsh and is accepted for the prototype because expected failures are `Result`s.
 - **Stage 2.** A panic terminates only its task. Each task keeps a small stack of active `with` cleanups; on panic the runtime runs them (releasing locks, closing sockets), marks the task as panicked, discards its fiber stack and switches to the scheduler. No unwinding tables are needed because nothing below the fiber's entry point has to be resumed. The HTTP server turns a panicked handler into a 500 response and keeps serving.
+
+As built in M10 (D64): a panic in a task unwinds, using unwind tables the compiler now emits, to the task's entry in the runtime. The runtime releases the mutexes the task held; other `with` cleanups (closing files) do not run yet, because generated code has no landing pads. Joining a panicked task panics in the joiner, and a panicking HTTP handler gets a 500 and its connection is closed. A panic in `main` ends the process with status 101.
 
 Catching panics in user code is not provided.
 

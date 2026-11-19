@@ -74,6 +74,11 @@ impl App:
 def health() -> str:
     return "ok"
 
+@http.get("/boom")
+def boom(req: http.Request) -> str:
+    """A handler with a bug: the panic becomes a 500 and the server carries on."""
+    return req.path.split("/")[10]
+
 @http.get("/echo/{rest...}")
 def echo(rest: str, req: http.Request) -> http.Response:
     return http.text(f"{req.method} {rest} from {req.header('User-Agent').unwrap_or('?')}")
@@ -91,6 +96,7 @@ def main():
     server.mount(app, prefix="/api")
     server.mount(health)
     server.mount(echo)
+    server.mount(boom)
     port = server.bind("127.0.0.1:0").unwrap()
     io.eprint(f"listening on {port}")
     server.serve()

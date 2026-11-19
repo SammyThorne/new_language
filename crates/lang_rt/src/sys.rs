@@ -45,7 +45,7 @@ unsafe fn text<'a>(ptr: *const u8, len: i64) -> &'a str {
 
 /// The message of the last failed call on this thread, or `""`, and clear it.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_io_error() -> Str {
+pub extern "C-unwind" fn lrt_io_error() -> Str {
     let message = LAST_ERROR.with(|e| std::mem::take(&mut *e.borrow_mut()));
     Str::from_bytes(message.as_bytes())
 }
@@ -53,7 +53,7 @@ pub extern "C" fn lrt_io_error() -> Str {
 /// # Safety
 /// The arguments must describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_io_read_file(path: *const u8, path_len: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_io_read_file(path: *const u8, path_len: i64) -> Str {
     let path = unsafe { text(path, path_len) };
     match std::fs::read(path) {
         Ok(bytes) => match String::from_utf8(bytes) {
@@ -75,7 +75,7 @@ pub unsafe extern "C" fn lrt_io_read_file(path: *const u8, path_len: i64) -> Str
 /// # Safety
 /// The arguments must describe UTF-8 strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_io_write_file(
+pub unsafe extern "C-unwind" fn lrt_io_write_file(
     path: *const u8,
     path_len: i64,
     data: *const u8,
@@ -96,7 +96,7 @@ pub unsafe extern "C" fn lrt_io_write_file(
 /// # Safety
 /// The arguments must describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_io_exists(path: *const u8, path_len: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_io_exists(path: *const u8, path_len: i64) -> i64 {
     i64::from(std::path::Path::new(unsafe { text(path, path_len) }).exists())
 }
 
@@ -105,7 +105,7 @@ pub unsafe extern "C" fn lrt_io_exists(path: *const u8, path_len: i64) -> i64 {
 /// # Safety
 /// The arguments must describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_io_remove(path: *const u8, path_len: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_io_remove(path: *const u8, path_len: i64) -> i64 {
     match std::fs::remove_file(unsafe { text(path, path_len) }) {
         Ok(()) => 1,
         Err(error) => {
@@ -125,7 +125,7 @@ thread_local! {
 /// # Safety
 /// The arguments must describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_io_list_dir(path: *const u8, path_len: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_io_list_dir(path: *const u8, path_len: i64) -> i64 {
     let entries = std::fs::read_dir(unsafe { text(path, path_len) }).and_then(|dir| {
         dir.map(|entry| entry.map(|e| e.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()
     });
@@ -145,13 +145,13 @@ pub unsafe extern "C" fn lrt_io_list_dir(path: *const u8, path_len: i64) -> i64 
 
 /// Entry `index` of the last directory listed on this thread.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_io_list_entry(index: i64) -> Str {
+pub extern "C-unwind" fn lrt_io_list_entry(index: i64) -> Str {
     LISTING.with(|l| l.borrow().get(index as usize).map_or_else(Str::empty, |name| Str::from_bytes(name.as_bytes())))
 }
 
 /// A line from standard input without its line ending, or `None` (a null string) at the end.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_io_read_line() -> Str {
+pub extern "C-unwind" fn lrt_io_read_line() -> Str {
     out::flush();
     let mut line = String::new();
     match std::io::stdin().lock().read_line(&mut line) {
@@ -168,7 +168,7 @@ pub extern "C" fn lrt_io_read_line() -> Str {
 /// # Safety
 /// The arguments must describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_io_eprint(data: *const u8, len: i64) {
+pub unsafe extern "C-unwind" fn lrt_io_eprint(data: *const u8, len: i64) {
     out::flush();
     let data = unsafe { text(data, len) };
     let _ = writeln!(std::io::stderr().lock(), "{data}");
@@ -199,7 +199,7 @@ fn with_file<R>(handle: i64, body: impl FnOnce(&mut OpenFile) -> R) -> Option<R>
 /// # Safety
 /// The arguments must describe UTF-8 strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_file_open(path: *const u8, path_len: i64, mode: *const u8, mode_len: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_file_open(path: *const u8, path_len: i64, mode: *const u8, mode_len: i64) -> i64 {
     let (path, mode) = unsafe { (text(path, path_len), text(mode, mode_len)) };
     let opened = match mode {
         "r" => File::open(path).map(|f| OpenFile::Read(BufReader::new(f))),
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn lrt_file_open(path: *const u8, path_len: i64, mode: *co
 
 /// The rest of the file. On error, records it and returns `""`.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_file_read(handle: i64) -> Str {
+pub extern "C-unwind" fn lrt_file_read(handle: i64) -> Str {
     let result = with_file(handle, |file| match file {
         OpenFile::Read(reader) => {
             let mut text = String::new();
@@ -253,7 +253,7 @@ pub extern "C" fn lrt_file_read(handle: i64) -> Str {
 
 /// The next line without its line ending, or `None` (a null string) at the end of the file.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_file_read_line(handle: i64) -> Str {
+pub extern "C-unwind" fn lrt_file_read_line(handle: i64) -> Str {
     let none = Str { ptr: std::ptr::null(), len: 0 };
     let line = with_file(handle, |file| match file {
         OpenFile::Read(reader) => {
@@ -279,7 +279,7 @@ pub extern "C" fn lrt_file_read_line(handle: i64) -> Str {
 /// # Safety
 /// The arguments must describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_file_write(handle: i64, data: *const u8, len: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_file_write(handle: i64, data: *const u8, len: i64) -> i64 {
     let data = unsafe { text(data, len) };
     let result = with_file(handle, |file| match file {
         OpenFile::Write(f) => f.write_all(data.as_bytes()).map_err(describe),
@@ -297,7 +297,7 @@ pub unsafe extern "C" fn lrt_file_write(handle: i64, data: *const u8, len: i64) 
 
 /// Close a file. Closing twice does nothing.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_file_close(handle: i64) {
+pub extern "C-unwind" fn lrt_file_close(handle: i64) {
     let mut files = FILES.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(slot) = files.get_mut(handle as usize) {
         *slot = None;
@@ -317,13 +317,13 @@ pub fn set_args(argc: i64, argv: *const *const std::ffi::c_char) {
 
 /// The number of command-line arguments, including the program's name.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_os_arg_count() -> i64 {
+pub extern "C-unwind" fn lrt_os_arg_count() -> i64 {
     ARGC.load(Ordering::Relaxed)
 }
 
 /// Argument `index`, or `""` if there is none.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_os_arg(index: i64) -> Str {
+pub extern "C-unwind" fn lrt_os_arg(index: i64) -> Str {
     let argv = ARGV.load(Ordering::Relaxed);
     if argv.is_null() || index < 0 || index >= ARGC.load(Ordering::Relaxed) {
         return Str::empty();
@@ -338,7 +338,7 @@ pub extern "C" fn lrt_os_arg(index: i64) -> Str {
 /// # Safety
 /// The arguments must describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_os_getenv(name: *const u8, len: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_os_getenv(name: *const u8, len: i64) -> Str {
     match std::env::var(unsafe { text(name, len) }) {
         Ok(value) => Str::from_bytes(value.as_bytes()),
         Err(_) => Str { ptr: std::ptr::null(), len: 0 },
@@ -347,14 +347,14 @@ pub unsafe extern "C" fn lrt_os_getenv(name: *const u8, len: i64) -> Str {
 
 /// End the program with an exit status, after flushing standard output.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_os_exit(code: i64) {
+pub extern "C-unwind" fn lrt_os_exit(code: i64) {
     out::flush();
     std::process::exit(code as i32)
 }
 
 /// The current working directory.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_os_cwd() -> Str {
+pub extern "C-unwind" fn lrt_os_cwd() -> Str {
     let dir = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
     Str::from_bytes(dir.as_bytes())
 }

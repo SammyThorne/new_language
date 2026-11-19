@@ -15,11 +15,10 @@
 //!
 //! Sockets hold only Rust data; messages are copied into collected strings when received.
 
+use crate::fiber::FiberLock;
 use crate::{Str, http, sys};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -48,7 +47,7 @@ const CLOSE_WAIT: Duration = Duration::from_secs(2);
 static MAX_MESSAGE: AtomicI64 = AtomicI64::new(16 * 1024 * 1024);
 static PING_SECONDS: AtomicI64 = AtomicI64::new(30);
 static NEXT_ID: AtomicI64 = AtomicI64::new(1);
-static SOCKETS: LazyLock<Mutex<HashMap<i64, Arc<Socket>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static SOCKETS: LazyLock<Mutex<HashMap<i64, Arc<WebSocket>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 thread_local! {
     /// The message the last `lrt_ws_recv` on this thread received, until `lrt_ws_payload`.
@@ -59,9 +58,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-struct Socket {
-    writer: Mutex<Writer>,
-    reader: Mutex<Reader>,
+/// The locks park fibers: the reader's is held while waiting for the peer, and the writer's
+/// while waiting for room to send.
+struct WebSocket {
+    writer: FiberLock<Writer>,
+    reader: FiberLock<Reader>,
     /// From the upgrade request.
     query: String,
     headers: Vec<(String, String)>,
@@ -69,7 +70,7 @@ struct Socket {
 }
 
 struct Writer {
-    stream: TcpStream,
+    socket: Arc<http::Socket>,
     close_sent: bool,
 }
 
@@ -96,7 +97,7 @@ impl Writer {
         if opcode == OP_CLOSE {
             self.close_sent = true;
         }
-        self.stream.write_all(&out).is_ok()
+        self.socket.write_all(&out).is_ok()
     }
 
     fn close(&mut self, code: u16, reason: &[u8]) {
@@ -107,7 +108,7 @@ impl Writer {
 }
 
 struct Reader {
-    stream: TcpStream,
+    socket: Arc<http::Socket>,
     buffer: Vec<u8>,
     /// The peer's close frame has arrived, or the connection failed: nothing more to read.
     closed: bool,
@@ -133,43 +134,52 @@ enum Stop {
 
 impl Reader {
     /// Read more bytes, sending keep-alive pings while the peer is quiet.
-    fn fill(&mut self, socket: &Socket) -> Result<(), Stop> {
-        let mut chunk = [0u8; 16 * 1024];
+    fn fill(&mut self, socket: &WebSocket) -> Result<(), Stop> {
         loop {
-            if self.deadline.is_some_and(|d| Instant::now() > d) {
+            let now = Instant::now();
+            if self.deadline.is_some_and(|d| now > d) {
                 return Err(Stop::Gone(None));
             }
             if http::shutting_down() && self.deadline.is_none() {
                 return Err(Stop::Gone(Some(CLOSE_GOING_AWAY)));
             }
             let interval = Duration::from_secs(PING_SECONDS.load(Ordering::Relaxed).max(1) as u64);
-            let quiet = self.last_heard.elapsed();
+            let quiet = now.duration_since(self.last_heard);
             if quiet > interval * 2 {
                 return Err(Stop::Gone(Some(CLOSE_GOING_AWAY)));
             }
             if quiet > interval && !self.ping_sent {
                 self.ping_sent = true;
-                if !lock(&socket.writer).frame(OP_PING, b"") {
+                if !socket.writer.lock().frame(OP_PING, b"") {
                     return Err(Stop::Gone(None));
                 }
             }
-            match self.stream.read(&mut chunk) {
+            let mut wake_at = self.last_heard + if self.ping_sent { interval * 2 } else { interval };
+            if let Some(deadline) = self.deadline {
+                wake_at = wake_at.min(deadline);
+            }
+            if self.buffer.capacity() - self.buffer.len() < 1024 {
+                self.buffer.reserve(self.buffer.len().max(4096));
+            }
+            let spare = self.buffer.spare_capacity_mut();
+            // SAFETY: only the bytes `read` wrote are added to the buffer.
+            let room = unsafe { std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, spare.len()) };
+            match self.socket.read(room, Some(wake_at), self.deadline.is_none()) {
                 Ok(0) => return Err(Stop::Gone(None)),
                 Ok(n) => {
-                    self.buffer.extend_from_slice(&chunk[..n]);
+                    unsafe { self.buffer.set_len(self.buffer.len() + n) };
                     self.last_heard = Instant::now();
                     self.ping_sent = false;
                     return Ok(());
                 }
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
                 Err(_) => return Err(Stop::Gone(None)),
             }
         }
     }
 
     /// Ensure `n` bytes are buffered.
-    fn need(&mut self, socket: &Socket, n: usize) -> Result<(), Stop> {
+    fn need(&mut self, socket: &WebSocket, n: usize) -> Result<(), Stop> {
         while self.buffer.len() < n {
             self.fill(socket)?;
         }
@@ -177,7 +187,7 @@ impl Reader {
     }
 
     /// The next frame, checked against the rules that do not depend on earlier frames.
-    fn frame(&mut self, socket: &Socket, max: usize) -> Result<Frame, Stop> {
+    fn frame(&mut self, socket: &WebSocket, max: usize) -> Result<Frame, Stop> {
         self.need(socket, 2)?;
         let (b0, b1) = (self.buffer[0], self.buffer[1]);
         let fin = b0 & 0x80 != 0;
@@ -228,20 +238,20 @@ impl Reader {
     }
 
     /// The next complete message as (opcode, data), answering control frames on the way.
-    fn message(&mut self, socket: &Socket) -> Result<(u8, Vec<u8>), Stop> {
+    fn message(&mut self, socket: &WebSocket) -> Result<(u8, Vec<u8>), Stop> {
         let max = MAX_MESSAGE.load(Ordering::Relaxed).max(125) as usize;
         let mut message: Option<(u8, Vec<u8>)> = None;
         loop {
             let frame = self.frame(socket, max)?;
             match frame.opcode {
                 OP_PING => {
-                    lock(&socket.writer).frame(OP_PONG, &frame.payload);
+                    socket.writer.lock().frame(OP_PONG, &frame.payload);
                 }
                 OP_PONG => {}
                 OP_CLOSE => {
                     let reply = close_reply(&frame.payload);
                     self.closed = true;
-                    let mut writer = lock(&socket.writer);
+                    let mut writer = socket.writer.lock();
                     match reply {
                         Ok(code) if !writer.close_sent => writer.close(code, b""),
                         Ok(_) => {}
@@ -300,7 +310,7 @@ fn close_reply(payload: &[u8]) -> Result<u16, u16> {
     }
 }
 
-fn socket(id: i64) -> Option<Arc<Socket>> {
+fn socket(id: i64) -> Option<Arc<WebSocket>> {
     lock(&SOCKETS).get(&id).cloned()
 }
 
@@ -393,7 +403,7 @@ fn base64_len(text: &str) -> Option<usize> {
 /// # Safety
 /// `handle` is a live request.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_ws_accept(handle: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_ws_accept(handle: i64) -> i64 {
     if handle < 0 {
         sys::record_error("the request did not come from a connection");
         return -1;
@@ -415,26 +425,22 @@ pub unsafe extern "C" fn lrt_ws_accept(handle: i64) -> i64 {
         return -1;
     };
     let accept = accept_key(key);
-    let Some((stream, leftover)) = request.take_connection() else {
+    let Some((connection, leftover)) = request.take_connection() else {
         sys::record_error("the connection is not available");
-        return -1;
-    };
-    let (Ok(read_half), Ok(mut write_half)) = (stream.try_clone(), stream.try_clone()) else {
-        sys::record_error("could not share the connection");
         return -1;
     };
     let response = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
     );
-    if write_half.write_all(response.as_bytes()).is_err() {
+    if connection.write_all(response.as_bytes()).is_err() {
         sys::record_error("the connection closed during the handshake");
         return -1;
     }
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let socket = Socket {
-        writer: Mutex::new(Writer { stream: write_half, close_sent: false }),
-        reader: Mutex::new(Reader {
-            stream: read_half,
+    let socket = WebSocket {
+        writer: FiberLock::new(Writer { socket: connection.clone(), close_sent: false }),
+        reader: FiberLock::new(Reader {
+            socket: connection,
             buffer: leftover,
             closed: false,
             last_heard: Instant::now(),
@@ -455,9 +461,9 @@ pub unsafe extern "C" fn lrt_ws_accept(handle: i64) -> i64 {
 /// Wait for the next message. Returns 1 for text or 2 for binary, with the data available from
 /// `lrt_ws_payload`; 0 once the connection is closed.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_ws_recv(id: i64) -> i64 {
+pub extern "C-unwind" fn lrt_ws_recv(id: i64) -> i64 {
     let Some(socket) = socket(id) else { return RECV_CLOSED };
-    let mut reader = lock(&socket.reader);
+    let mut reader = socket.reader.lock();
     if reader.closed {
         return RECV_CLOSED;
     }
@@ -468,7 +474,7 @@ pub extern "C" fn lrt_ws_recv(id: i64) -> i64 {
         }
         Err(stop) => {
             reader.closed = true;
-            let mut writer = lock(&socket.writer);
+            let mut writer = socket.writer.lock();
             match stop {
                 Stop::Fail(code) => writer.close(code, b""),
                 Stop::Gone(Some(code)) => writer.close(code, b""),
@@ -481,7 +487,7 @@ pub extern "C" fn lrt_ws_recv(id: i64) -> i64 {
 
 /// The data of the message the last `lrt_ws_recv` on this thread returned.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_ws_payload() -> Str {
+pub extern "C-unwind" fn lrt_ws_payload() -> Str {
     PAYLOAD.with(|p| Str::from_bytes(&std::mem::take(&mut *p.borrow_mut())))
 }
 
@@ -490,11 +496,11 @@ pub extern "C" fn lrt_ws_payload() -> Str {
 /// # Safety
 /// `ptr` and `len` describe the message's bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_ws_send(id: i64, binary: i64, ptr: *const u8, len: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_ws_send(id: i64, binary: i64, ptr: *const u8, len: i64) -> i64 {
     let Some(socket) = socket(id) else { return -1 };
     let data = unsafe { Str::from_raw(ptr, len) }.as_bytes();
     let opcode = if binary != 0 { OP_BINARY } else { OP_TEXT };
-    if lock(&socket.writer).frame(opcode, data) { 0 } else { -1 }
+    if socket.writer.lock().frame(opcode, data) { 0 } else { -1 }
 }
 
 /// Start the closing handshake with a status code and a reason.
@@ -502,21 +508,21 @@ pub unsafe extern "C" fn lrt_ws_send(id: i64, binary: i64, ptr: *const u8, len: 
 /// # Safety
 /// `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_ws_close(id: i64, code: i64, ptr: *const u8, len: i64) {
+pub unsafe extern "C-unwind" fn lrt_ws_close(id: i64, code: i64, ptr: *const u8, len: i64) {
     let Some(socket) = socket(id) else { return };
     let reason = unsafe { Str::from_raw(ptr, len) };
     let code = if (1000..=4999).contains(&code) { code as u16 } else { CLOSE_NORMAL };
-    lock(&socket.writer).close(code, reason.as_bytes());
+    socket.writer.lock().close(code, reason.as_bytes());
 }
 
 /// After the handler returns: close the socket if it is still open, wait briefly for the peer's
 /// close frame, and forget the socket.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_ws_finish(id: i64) {
+pub extern "C-unwind" fn lrt_ws_finish(id: i64) {
     let Some(socket) = socket(id) else { return };
     {
-        let mut reader = lock(&socket.reader);
-        lock(&socket.writer).close(CLOSE_NORMAL, b"");
+        let mut reader = socket.reader.lock();
+        socket.writer.lock().close(CLOSE_NORMAL, b"");
         reader.deadline = Some(Instant::now() + CLOSE_WAIT);
         // Discard anything else until the peer's close frame arrives (or it goes away).
         while !reader.closed {
@@ -537,7 +543,7 @@ pub(crate) fn forget(id: i64) {
 
 /// Set the largest message accepted, in bytes, and the keep-alive ping interval in seconds.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_ws_set_limits(max_message: i64, ping_seconds: i64) {
+pub extern "C-unwind" fn lrt_ws_set_limits(max_message: i64, ping_seconds: i64) {
     if max_message > 0 {
         MAX_MESSAGE.store(max_message, Ordering::Relaxed);
     }
@@ -553,7 +559,7 @@ pub extern "C" fn lrt_ws_set_limits(max_message: i64, ping_seconds: i64) {
 /// # Safety
 /// `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_ws_query(id: i64, ptr: *const u8, len: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_ws_query(id: i64, ptr: *const u8, len: i64) -> Str {
     let wanted = unsafe { Str::from_raw(ptr, len) };
     let Some(socket) = socket(id) else { return http::optional(None) };
     http::optional(http::query_value(&socket.query, wanted).as_deref())
@@ -564,7 +570,7 @@ pub unsafe extern "C" fn lrt_ws_query(id: i64, ptr: *const u8, len: i64) -> Str 
 /// # Safety
 /// `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_ws_header(id: i64, ptr: *const u8, len: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_ws_header(id: i64, ptr: *const u8, len: i64) -> Str {
     let wanted = unsafe { Str::from_raw(ptr, len) }.to_ascii_lowercase();
     let Some(socket) = socket(id) else { return http::optional(None) };
     http::optional(socket.headers.iter().find(|(n, _)| *n == wanted).map(|(_, v)| v.as_str()))
@@ -572,7 +578,7 @@ pub unsafe extern "C" fn lrt_ws_header(id: i64, ptr: *const u8, len: i64) -> Str
 
 /// The peer's address.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_ws_remote(id: i64) -> Str {
+pub extern "C-unwind" fn lrt_ws_remote(id: i64) -> Str {
     match socket(id) {
         Some(socket) => Str::from_bytes(socket.remote.as_bytes()),
         None => Str::empty(),

@@ -351,7 +351,7 @@ unsafe fn reader<'a>(r: *mut Reader) -> &'a mut Reader {
 /// # Safety
 /// `ptr` and `len` describe a UTF-8 string that outlives the reader.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_reader_new(ptr: *const u8, len: i64) -> *mut Reader {
+pub unsafe extern "C-unwind" fn lrt_json_reader_new(ptr: *const u8, len: i64) -> *mut Reader {
     let input: &'static [u8] = if len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(ptr, len as usize) } };
     Box::into_raw(Box::new(Reader { input, pos: 0, frames: Vec::new(), path: Vec::new(), error: None }))
 }
@@ -359,7 +359,7 @@ pub unsafe extern "C" fn lrt_json_reader_new(ptr: *const u8, len: i64) -> *mut R
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_reader_free(r: *mut Reader) {
+pub unsafe extern "C-unwind" fn lrt_json_reader_free(r: *mut Reader) {
     drop(unsafe { Box::from_raw(r) });
 }
 
@@ -368,7 +368,7 @@ pub unsafe extern "C" fn lrt_json_reader_free(r: *mut Reader) {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_finish(r: *mut Reader) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_finish(r: *mut Reader) -> i64 {
     let r = unsafe { reader(r) };
     if !r.failed() {
         r.skip_ws();
@@ -383,14 +383,14 @@ pub unsafe extern "C" fn lrt_json_finish(r: *mut Reader) -> i64 {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_failed(r: *mut Reader) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_failed(r: *mut Reader) -> i64 {
     i64::from(unsafe { reader(r) }.failed())
 }
 
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_error_message(r: *mut Reader) -> Str {
+pub unsafe extern "C-unwind" fn lrt_json_error_message(r: *mut Reader) -> Str {
     let message = unsafe { reader(r) }.error.as_ref().map_or("", |(m, _)| m.as_str()).to_string();
     Str::from_bytes(message.as_bytes())
 }
@@ -398,7 +398,7 @@ pub unsafe extern "C" fn lrt_json_error_message(r: *mut Reader) -> Str {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_error_path(r: *mut Reader) -> Str {
+pub unsafe extern "C-unwind" fn lrt_json_error_path(r: *mut Reader) -> Str {
     let path = unsafe { reader(r) }.error.as_ref().map_or("", |(_, p)| p.as_str()).to_string();
     Str::from_bytes(path.as_bytes())
 }
@@ -406,7 +406,7 @@ pub unsafe extern "C" fn lrt_json_error_path(r: *mut Reader) -> Str {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_push_key(r: *mut Reader, ptr: *const u8, len: i64) {
+pub unsafe extern "C-unwind" fn lrt_json_push_key(r: *mut Reader, ptr: *const u8, len: i64) {
     let key = unsafe { Str::from_raw(ptr, len) }.to_string();
     unsafe { reader(r) }.path.push(PathPart::Key(key));
 }
@@ -414,14 +414,14 @@ pub unsafe extern "C" fn lrt_json_push_key(r: *mut Reader, ptr: *const u8, len: 
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_push_index(r: *mut Reader, index: i64) {
+pub unsafe extern "C-unwind" fn lrt_json_push_index(r: *mut Reader, index: i64) {
     unsafe { reader(r) }.path.push(PathPart::Index(index));
 }
 
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_pop(r: *mut Reader) {
+pub unsafe extern "C-unwind" fn lrt_json_pop(r: *mut Reader) {
     unsafe { reader(r) }.path.pop();
 }
 
@@ -430,7 +430,7 @@ pub unsafe extern "C" fn lrt_json_pop(r: *mut Reader) {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_fail_expected(r: *mut Reader, ptr: *const u8, len: i64) {
+pub unsafe extern "C-unwind" fn lrt_json_fail_expected(r: *mut Reader, ptr: *const u8, len: i64) {
     let what = unsafe { Str::from_raw(ptr, len) }.to_string();
     let r = unsafe { reader(r) };
     r.skip_ws();
@@ -442,7 +442,7 @@ pub unsafe extern "C" fn lrt_json_fail_expected(r: *mut Reader, ptr: *const u8, 
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_fail(r: *mut Reader, ptr: *const u8, len: i64) {
+pub unsafe extern "C-unwind" fn lrt_json_fail(r: *mut Reader, ptr: *const u8, len: i64) {
     let message = unsafe { Str::from_raw(ptr, len) }.to_string();
     unsafe { reader(r) }.fail(message);
 }
@@ -452,7 +452,7 @@ pub unsafe extern "C" fn lrt_json_fail(r: *mut Reader, ptr: *const u8, len: i64)
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_read_null(r: *mut Reader) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_read_null(r: *mut Reader) -> i64 {
     let r = unsafe { reader(r) };
     if r.failed() {
         return 0;
@@ -466,7 +466,7 @@ pub unsafe extern "C" fn lrt_json_read_null(r: *mut Reader) -> i64 {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_read_bool(r: *mut Reader) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_read_bool(r: *mut Reader) -> i64 {
     let r = unsafe { reader(r) };
     if r.failed() {
         return -1;
@@ -507,7 +507,7 @@ fn number(r: &mut Reader) -> Option<Number> {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`; `out` is writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_read_int(r: *mut Reader, out: *mut i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_read_int(r: *mut Reader, out: *mut i64) -> i64 {
     let r = unsafe { reader(r) };
     let start = {
         r.skip_ws();
@@ -537,7 +537,7 @@ pub unsafe extern "C" fn lrt_json_read_int(r: *mut Reader, out: *mut i64) -> i64
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`; `out` is writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_read_float(r: *mut Reader, out: *mut f64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_read_float(r: *mut Reader, out: *mut f64) -> i64 {
     let r = unsafe { reader(r) };
     match number(r) {
         Some(Number::Int(value)) => {
@@ -562,7 +562,7 @@ pub unsafe extern "C" fn lrt_json_read_float(r: *mut Reader, out: *mut f64) -> i
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`; the outputs are writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_read_number(r: *mut Reader, int_out: *mut i64, float_out: *mut f64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_read_number(r: *mut Reader, int_out: *mut i64, float_out: *mut f64) -> i64 {
     let r = unsafe { reader(r) };
     match number(r) {
         Some(Number::Int(value)) => {
@@ -587,7 +587,7 @@ pub unsafe extern "C" fn lrt_json_read_number(r: *mut Reader, int_out: *mut i64,
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_read_str(r: *mut Reader) -> Str {
+pub unsafe extern "C-unwind" fn lrt_json_read_str(r: *mut Reader) -> Str {
     let r = unsafe { reader(r) };
     let null = Str { ptr: std::ptr::null(), len: 0 };
     if r.failed() {
@@ -604,7 +604,7 @@ pub unsafe extern "C" fn lrt_json_read_str(r: *mut Reader) -> Str {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_array_start(r: *mut Reader) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_array_start(r: *mut Reader) -> i64 {
     i64::from(unsafe { reader(r) }.open(b'[', "an array"))
 }
 
@@ -613,7 +613,7 @@ pub unsafe extern "C" fn lrt_json_array_start(r: *mut Reader) -> i64 {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`, inside an array.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_array_next(r: *mut Reader) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_array_next(r: *mut Reader) -> i64 {
     unsafe { reader(r) }.next(b']')
 }
 
@@ -622,7 +622,7 @@ pub unsafe extern "C" fn lrt_json_array_next(r: *mut Reader) -> i64 {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_object_start(r: *mut Reader) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_object_start(r: *mut Reader) -> i64 {
     i64::from(unsafe { reader(r) }.open(b'{', "an object"))
 }
 
@@ -632,7 +632,7 @@ pub unsafe extern "C" fn lrt_json_object_start(r: *mut Reader) -> i64 {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`, inside an object.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_object_key(r: *mut Reader) -> Str {
+pub unsafe extern "C-unwind" fn lrt_json_object_key(r: *mut Reader) -> Str {
     let r = unsafe { reader(r) };
     let null = Str { ptr: std::ptr::null(), len: 0 };
     if r.next(b'}') != 1 {
@@ -653,7 +653,7 @@ pub unsafe extern "C" fn lrt_json_object_key(r: *mut Reader) -> Str {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_skip_value(r: *mut Reader) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_skip_value(r: *mut Reader) -> i64 {
     let r = unsafe { reader(r) };
     if r.failed() {
         return 0;
@@ -677,7 +677,7 @@ pub unsafe extern "C" fn lrt_json_skip_value(r: *mut Reader) -> i64 {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_peek_kind(r: *mut Reader) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_json_peek_kind(r: *mut Reader) -> i64 {
     let r = unsafe { reader(r) };
     if r.failed() {
         return -1;
@@ -704,7 +704,7 @@ pub unsafe extern "C" fn lrt_json_peek_kind(r: *mut Reader) -> i64 {
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_json_peek_tag(r: *mut Reader, ptr: *const u8, len: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_json_peek_tag(r: *mut Reader, ptr: *const u8, len: i64) -> Str {
     let wanted = unsafe { Str::from_raw(ptr, len) };
     let r = unsafe { reader(r) };
     let null = Str { ptr: std::ptr::null(), len: 0 };
@@ -745,7 +745,7 @@ pub unsafe extern "C" fn lrt_json_peek_tag(r: *mut Reader, ptr: *const u8, len: 
 /// # Safety
 /// `b` comes from `lrt_builder_new`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_push_json_str(b: *mut Builder, ptr: *const u8, len: i64) {
+pub unsafe extern "C-unwind" fn lrt_builder_push_json_str(b: *mut Builder, ptr: *const u8, len: i64) {
     let text = unsafe { Str::from_raw(ptr, len) }.as_bytes();
     let mut out = Vec::with_capacity(text.len() + 2);
     out.push(b'"');
@@ -781,7 +781,7 @@ pub unsafe extern "C" fn lrt_builder_push_json_str(b: *mut Builder, ptr: *const 
 /// # Safety
 /// `b` comes from `lrt_builder_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_builder_push_json_float(b: *mut Builder, value: f64) {
+pub unsafe extern "C-unwind" fn lrt_builder_push_json_float(b: *mut Builder, value: f64) {
     let text = if value.is_finite() { lang_format::float_repr(value) } else { "null".to_string() };
     unsafe { lrt_builder_push(b, text.as_ptr(), text.len() as i64) };
 }

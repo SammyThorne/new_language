@@ -106,6 +106,12 @@ fn run_script(program: &str) {
     bad.write_all(b"NONSENSE\r\n\r\n").unwrap();
     assert_eq!(read_response(&mut bad_reader, false).status, 400);
 
+    // A handler that panics gets a 500 and the connection is closed; the server carries on,
+    // with a panic in some task, not the whole process.
+    let (mut panicky, mut panicky_reader) = connect(server.port);
+    let failed = request(&mut panicky, &mut panicky_reader, "GET", "/boom", None);
+    assert_eq!((failed.status, failed.header("connection")), (500, Some("close")), "{program}: /boom");
+
     // Concurrent clients.
     let port = server.port;
     let clients: Vec<_> = (0..8)

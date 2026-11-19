@@ -1,0 +1,39 @@
+# A panic in a task ends only that task (milestone 10): mutexes it held are released (the value
+# is as it was: a `with` block writes back only when it ends normally), other
+# tasks carry on, and joining it panics in the joiner, which here is the main function.
+# expect: joined: 2
+# expect: lock released: 0
+# expect: others finished: 45
+# expect-exit: 101
+# expect-stderr: panic in task
+# expect-stderr: index 10 is out of range for a list of length 3
+# expect-stderr: --> tests/run/task_panic.wb:17:12
+# expect-stderr: panic: joined a task that panicked
+
+import time
+
+def pick(n: int) -> int:
+    items = [1, 2, 3]
+    return items[n]
+
+def hold_and_fail(m: Mutex[int]):
+    with m.lock() as v:
+        v += 1
+        pick(10)
+
+def add(a: int, b: int) -> int:
+    time.sleep(0.01)
+    return a + b
+
+def main():
+    print("joined:", (spawn pick(1)).join())
+    m = Mutex(0)
+    failing = spawn hold_and_fail(m)
+    others = [spawn add(i, i) for i in range(5)]
+    while not failing.is_done():
+        time.sleep(0.001)
+    with m.lock() as v:
+        print("lock released:", v)
+    print("others finished:", sum([t.join() for t in others]) + 25)
+    failing.join()
+    print("not reached")

@@ -6,7 +6,8 @@
 //!   [`ENTRY_SYMBOL`] with the C calling convention; the runtime's C `main` calls it.
 //! - Locals live in `alloca` slots; the `mem2reg` pass turns them into SSA values.
 //! - Integer arithmetic has no `nsw`/`nuw` flags, so it wraps on overflow (docs/08, D16).
-//! - Every function is `nounwind`: the language has no exceptions.
+//! - Every function has unwind tables (`uwtable`): the language has no exceptions, but a panic in
+//!   a task unwinds through generated code to the task's entry in the runtime.
 //!
 //! Value representations:
 //!
@@ -332,7 +333,7 @@ struct Codegen<'ctx, 'a> {
     strings: HashMap<String, PointerValue<'ctx>>,
     descs: HashMap<Ty, PointerValue<'ctx>>,
     helpers: HashMap<(Helper, Ty), FunctionValue<'ctx>>,
-    nounwind: Attribute,
+    unwind_table: Attribute,
     state: Option<FnState<'ctx>>,
 }
 
@@ -389,7 +390,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             strings: HashMap::new(),
             descs: HashMap::new(),
             helpers: HashMap::new(),
-            nounwind: cx.create_enum_attribute(Attribute::get_named_enum_kind_id("nounwind"), 0),
+            unwind_table: cx.create_enum_attribute(Attribute::get_named_enum_kind_id("uwtable"), 2),
             state: None,
         };
         // Struct bodies can refer to each other, so they are filled in after all are declared.
@@ -685,7 +686,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             r => self.letter_type(r.chars().next().unwrap()).fn_type(&params, false),
         };
         let function = self.module.add_function(name, fn_type, Some(Linkage::External));
-        function.add_attribute(AttributeLoc::Function, self.nounwind);
+        function.add_attribute(AttributeLoc::Function, self.unwind_table);
         if name.starts_with("lrt_panic") {
             for attr in ["noreturn", "cold"] {
                 let attribute = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id(attr), 0);
@@ -816,7 +817,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
                 value.set_call_conventions(CALLCONV_FAST);
                 value
             };
-            value.add_attribute(AttributeLoc::Function, self.nounwind);
+            value.add_attribute(AttributeLoc::Function, self.unwind_table);
             let skip = usize::from(function.closure);
             for (param, local) in value.get_param_iter().skip(skip).zip(&function.params) {
                 param.set_name(&function.locals[local.0].name);

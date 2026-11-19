@@ -87,7 +87,7 @@ pub fn alloc_atomic(size: usize) -> *mut u8 {
 /// # Safety
 /// `size` must be at least one word.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_alloc(size: i64, desc: *const TypeDesc) -> *mut u8 {
+pub unsafe extern "C-unwind" fn lrt_alloc(size: i64, desc: *const TypeDesc) -> *mut u8 {
     let ptr = alloc(size as usize);
     // SAFETY: the allocation is at least one word and suitably aligned.
     unsafe { *(ptr as *mut *const TypeDesc) = desc };
@@ -97,6 +97,6 @@ pub unsafe extern "C" fn lrt_alloc(size: i64, desc: *const TypeDesc) -> *mut u8 
 /// Allocate zeroed, scanned memory with no descriptor: the cells of captured variables and the
 /// environments of closures.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_alloc_raw(size: i64) -> *mut u8 {
+pub extern "C-unwind" fn lrt_alloc_raw(size: i64) -> *mut u8 {
     alloc(size as usize)
 }

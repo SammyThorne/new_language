@@ -17,11 +17,13 @@
 //! The parsed request lives on the connection thread's Rust stack and holds no references to
 //! collected objects. Its handle is only valid while the callback runs.
 
-use crate::{Str, out, tasks};
+use crate::fiber;
+use crate::poll::{self, IoSource, Wait};
+use crate::{Str, tasks};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_HEADER: usize = 64 * 1024;
@@ -52,7 +54,7 @@ fn set_error(message: impl std::fmt::Display) {
 /// # Safety
 /// `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_http_listen(ptr: *const u8, len: i64) -> i64 {
+pub unsafe extern "C-unwind" fn lrt_http_listen(ptr: *const u8, len: i64) -> i64 {
     let address = unsafe { Str::from_raw(ptr, len) };
     let address = if address.starts_with(':') { format!("0.0.0.0{address}") } else { address.to_string() };
     match TcpListener::bind(&address) {
@@ -70,7 +72,7 @@ pub unsafe extern "C" fn lrt_http_listen(ptr: *const u8, len: i64) -> i64 {
 
 /// The port a listener is bound to, for an address such as `:0` that asks for any free port.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_http_port(listener: i64) -> i64 {
+pub extern "C-unwind" fn lrt_http_port(listener: i64) -> i64 {
     let listeners = LISTENERS.lock().unwrap_or_else(|p| p.into_inner());
     listeners
         .get(listener as usize)
@@ -81,17 +83,17 @@ pub extern "C" fn lrt_http_port(listener: i64) -> i64 {
 
 /// The largest request body to accept, in bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_http_set_max_body(bytes: i64) {
+pub extern "C-unwind" fn lrt_http_set_max_body(bytes: i64) {
     MAX_BODY.store(bytes.max(0), Ordering::Relaxed);
 }
 
 /// Ask a running `lrt_http_serve` to stop, as SIGTERM does.
 #[unsafe(no_mangle)]
-pub extern "C" fn lrt_http_shutdown() {
+pub extern "C-unwind" fn lrt_http_shutdown() {
     SHUTDOWN.store(true, Ordering::SeqCst);
 }
 
-type Entry = extern "C" fn(*mut u8, *mut u8, i64);
+type Entry = extern "C-unwind" fn(*mut u8, *mut u8, i64);
 
 struct Callback {
     entry: Entry,
@@ -117,9 +119,10 @@ unsafe extern "C" {
 /// `entry` must be the C-ABI function generated for this purpose, and `code` and `env` the
 /// function value it calls.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_http_serve(listener: i64, entry: Entry, code: *mut u8, env: *mut u8) {
+pub unsafe extern "C-unwind" fn lrt_http_serve(listener: i64, entry: Entry, code: *mut u8, env: *mut u8) {
     use std::os::fd::AsRawFd;
-    tasks::allow_threads();
+    fiber::start_workers();
+    raise_file_limit();
     SHUTDOWN.store(false, Ordering::SeqCst);
     // SAFETY: installing a handler that only stores to an atomic.
     unsafe {
@@ -144,28 +147,137 @@ pub unsafe extern "C" fn lrt_http_serve(listener: i64, entry: Entry, code: *mut 
         if ready <= 0 {
             continue;
         }
-        let Ok((stream, peer)) = listener.accept() else { continue };
-        tasks::acquire_slot();
-        ACTIVE.fetch_add(1, Ordering::SeqCst);
-        let (entry, roots) = (callback.entry, callback.roots);
-        let started = std::thread::Builder::new().stack_size(tasks::stack_size()).spawn(move || {
-            tasks::register_thread();
-            serve_connection(stream, peer.to_string(), entry, roots as *mut *mut u8);
-            tasks::unregister_thread();
-            ACTIVE.fetch_sub(1, Ordering::SeqCst);
-            tasks::release_slot();
-        });
-        if started.is_err() {
-            ACTIVE.fetch_sub(1, Ordering::SeqCst);
-            tasks::release_slot();
+        // Take every connection that is waiting, each served by its own fiber.
+        while let Ok((stream, peer)) = listener.accept() {
+            ACTIVE.fetch_add(1, Ordering::SeqCst);
+            let (entry, roots) = (callback.entry, callback.roots);
+            fiber::spawn(
+                [std::ptr::null_mut(); 2],
+                Box::new(move |_| {
+                    serve_connection(stream, peer.to_string(), entry, roots as *mut *mut u8);
+                    ACTIVE.fetch_sub(1, Ordering::SeqCst);
+                }),
+            );
+            if listener.set_nonblocking(true).is_err() {
+                break;
+            }
         }
+        let _ = listener.set_nonblocking(false);
     }
     drop(listener);
+    // Wake connections waiting for their next request, so they see the shutdown and close;
+    // again every so often for ones that were busy the first time.
     let deadline = Instant::now() + Duration::from_secs(10);
     while ACTIVE.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+        poll::wake_all_io();
         std::thread::sleep(Duration::from_millis(20));
     }
     tasks::free_roots(roots);
+}
+
+/// Let the process have as many open files as the hard limit allows, as Go does: each
+/// connection is one.
+fn raise_file_limit() {
+    #[repr(C)]
+    struct Rlimit {
+        current: u64,
+        max: u64,
+    }
+    unsafe extern "C" {
+        fn getrlimit(resource: i32, limit: *mut Rlimit) -> i32;
+        fn setrlimit(resource: i32, limit: *const Rlimit) -> i32;
+    }
+    const RLIMIT_NOFILE: i32 = 7;
+    let mut limit = Rlimit { current: 0, max: 0 };
+    // SAFETY: plain system calls on a local structure.
+    unsafe {
+        if getrlimit(RLIMIT_NOFILE, &mut limit) == 0 && limit.current < limit.max {
+            limit.current = limit.max;
+            setrlimit(RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
+/// A connected socket: non-blocking, and registered with the poller when fibers are running,
+/// so that waiting for it parks the task instead of blocking a thread.
+pub(crate) struct Socket {
+    stream: TcpStream,
+    source: Option<&'static IoSource>,
+}
+
+impl Socket {
+    pub(crate) fn new(stream: TcpStream) -> Socket {
+        use std::os::fd::AsRawFd;
+        let _ = stream.set_nodelay(true);
+        let _ = stream.set_nonblocking(true);
+        let source = IoSource::register(stream.as_raw_fd());
+        Socket { stream, source }
+    }
+
+    fn wait(&self, write: bool, deadline: Option<Instant>) -> Wait {
+        use std::os::fd::AsRawFd;
+        match self.source {
+            Some(source) => source.wait(write, deadline),
+            None => poll::wait_blocking(self.stream.as_raw_fd(), write, deadline),
+        }
+    }
+
+    /// Read some bytes, waiting until `deadline` for them. `Ok(0)` at the end of the stream;
+    /// an error of kind `TimedOut` at the deadline or, with `stop_at_shutdown`, at shutdown.
+    pub(crate) fn read(
+        &self,
+        buffer: &mut [u8],
+        deadline: Option<Instant>,
+        stop_at_shutdown: bool,
+    ) -> std::io::Result<usize> {
+        use std::io::ErrorKind;
+        loop {
+            if stop_at_shutdown && SHUTDOWN.load(Ordering::SeqCst) {
+                return Err(ErrorKind::TimedOut.into());
+            }
+            match (&self.stream).read(buffer) {
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    if self.wait(false, deadline) == Wait::TimedOut {
+                        return Err(ErrorKind::TimedOut.into());
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                other => return other,
+            }
+        }
+    }
+
+    /// Write all of `bytes`, waiting while the peer's window is full (for at most a minute).
+    pub(crate) fn write_all(&self, mut bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::ErrorKind;
+        let deadline = Instant::now() + IDLE_TIMEOUT;
+        while !bytes.is_empty() {
+            match (&self.stream).write(bytes) {
+                Ok(0) => return Err(ErrorKind::WriteZero.into()),
+                Ok(n) => bytes = &bytes[n..],
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    if self.wait(true, Some(deadline)) == Wait::TimedOut {
+                        return Err(ErrorKind::TimedOut.into());
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn shutdown(&self) {
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        if let Some(source) = self.source.take() {
+            source.deregister();
+        }
+    }
 }
 
 pub struct Request {
@@ -207,14 +319,13 @@ impl Request {
         self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
     }
 
-    /// For a WebSocket upgrade: the connection's stream and the bytes already read past the
+    /// For a WebSocket upgrade: the connection's socket and the bytes already read past the
     /// request.
-    pub(crate) fn take_connection(&mut self) -> Option<(TcpStream, Vec<u8>)> {
+    pub(crate) fn take_connection(&mut self) -> Option<(Arc<Socket>, Vec<u8>)> {
         // SAFETY: `connection` points at the connection serving this request, which outlives
         // the handler call.
         let connection = unsafe { self.connection.as_mut()? };
-        let stream = connection.stream.try_clone().ok()?;
-        Some((stream, std::mem::take(&mut connection.buffer)))
+        Some((connection.socket.clone(), std::mem::take(&mut connection.buffer)))
     }
 
     pub(crate) fn set_upgraded(&mut self, id: i64) {
@@ -235,7 +346,7 @@ enum ReadError {
 }
 
 struct Connection {
-    stream: TcpStream,
+    socket: Arc<Socket>,
     buffer: Vec<u8>,
 }
 
@@ -243,27 +354,26 @@ impl Connection {
     /// Read more bytes into the buffer. With `idle`, waits for the next request, noticing a
     /// shutdown; otherwise the request must arrive within the request timeout.
     fn fill(&mut self, idle: bool, started: Instant) -> Result<(), ReadError> {
-        let mut chunk = [0u8; 16 * 1024];
-        loop {
-            if idle && SHUTDOWN.load(Ordering::SeqCst) {
-                return Err(ReadError::Closed);
+        let deadline = started + if idle { IDLE_TIMEOUT } else { REQUEST_TIMEOUT };
+        // Read straight into the buffer's spare room, which starts small: an idle connection
+        // should cost little memory.
+        if self.buffer.capacity() - self.buffer.len() < 1024 {
+            self.buffer.reserve(self.buffer.len().max(4096));
+        }
+        let spare = self.buffer.spare_capacity_mut();
+        // SAFETY: the bytes are only read after `read` has written them, and `set_len` covers
+        // only those.
+        let room = unsafe { std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, spare.len()) };
+        match self.socket.read(room, Some(deadline), idle) {
+            Ok(0) => Err(ReadError::Closed),
+            Ok(n) => {
+                unsafe { self.buffer.set_len(self.buffer.len() + n) };
+                Ok(())
             }
-            let limit = if idle { IDLE_TIMEOUT } else { REQUEST_TIMEOUT };
-            if started.elapsed() > limit {
-                return Err(if idle { ReadError::Closed } else { ReadError::Status(408, "Request Timeout") });
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut && !idle => {
+                Err(ReadError::Status(408, "Request Timeout"))
             }
-            match self.stream.read(&mut chunk) {
-                Ok(0) => return Err(ReadError::Closed),
-                Ok(n) => {
-                    self.buffer.extend_from_slice(&chunk[..n]);
-                    return Ok(());
-                }
-                Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
-                    continue;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(ReadError::Closed),
-            }
+            Err(_) => Err(ReadError::Closed),
         }
     }
 
@@ -329,7 +439,7 @@ impl Connection {
         let (method, target) = (method.to_string(), target.to_string());
         self.buffer.drain(..header_end + 4);
         if expects_continue && (chunked || length.is_some_and(|n| n > 0)) {
-            let _ = self.stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+            let _ = self.socket.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
         }
         let body = if chunked {
             self.read_chunked(max_body, started)?
@@ -510,38 +620,46 @@ fn format_http_date(seconds: u64) -> String {
     )
 }
 
-fn write_simple(stream: &mut TcpStream, status: u16, text: &str) {
+fn write_simple(socket: &Socket, status: u16, text: &str) {
     let response = format!(
         "HTTP/1.1 {status} {text}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}\n",
         text.len() + 1
     );
-    let _ = stream.write_all(response.as_bytes());
+    let _ = socket.write_all(response.as_bytes());
 }
 
 fn serve_connection(stream: TcpStream, remote: String, entry: Entry, roots: *mut *mut u8) {
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let mut connection = Connection { stream, buffer: Vec::with_capacity(16 * 1024) };
+    let mut connection = Connection { socket: Arc::new(Socket::new(stream)), buffer: Vec::new() };
     loop {
         let (mut request, keep_alive) = match connection.read_request(&remote) {
             Ok(request) => request,
             Err(ReadError::Closed) => break,
             Err(ReadError::Status(status, text)) => {
-                write_simple(&mut connection.stream, status, text);
+                write_simple(&connection.socket, status, text);
                 break;
             }
         };
         // SAFETY: `roots` holds the function value for the server's lifetime.
         let (code, env) = unsafe { (roots.read(), roots.add(1).read()) };
         request.connection = &mut connection;
-        entry(code, env, &mut request as *mut Request as i64);
+        let handle = &mut request as *mut Request as i64;
+        // A panicking handler ends only this request, with a 500; the panic was reported
+        // where it happened. Mutexes it held are released.
+        let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(code, env, handle)));
         request.connection = std::ptr::null_mut();
+        let panicked = handled.is_err();
+        if panicked {
+            if let Some(me) = fiber::current() {
+                fiber::release_held(me);
+            }
+            request.response = None;
+        }
         if let Some(id) = request.upgraded {
             // The handler has run the WebSocket to its end; the connection is finished.
             crate::ws::forget(id);
             break;
         }
-        let keep_alive = keep_alive && !SHUTDOWN.load(Ordering::SeqCst);
+        let keep_alive = keep_alive && !panicked && !SHUTDOWN.load(Ordering::SeqCst);
         let (status, header_lines, body) = request.response.take().unwrap_or_else(|| {
             (500, "Content-Type: text/plain; charset=utf-8\r\n".to_string(), b"internal server error\n".to_vec())
         });
@@ -561,11 +679,14 @@ fn serve_connection(stream: TcpStream, remote: String, entry: Entry, roots: *mut
         if !request.head && status != 204 && status != 304 {
             out.extend_from_slice(&body);
         }
-        if connection.stream.write_all(&out).is_err() || !keep_alive {
+        if connection.socket.write_all(&out).is_err() || !keep_alive {
             break;
         }
+        if connection.buffer.is_empty() && connection.buffer.capacity() > 64 * 1024 {
+            connection.buffer = Vec::new();
+        }
     }
-    let _ = connection.stream.shutdown(Shutdown::Both);
+    connection.socket.shutdown();
 }
 
 // ---- the request, as seen from compiled code --------------------------------------------
@@ -586,21 +707,21 @@ pub(crate) fn optional(value: Option<&str>) -> Str {
 /// # Safety
 /// `handle` is a live request.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_http_req_method(handle: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_http_req_method(handle: i64) -> Str {
     Str::from_bytes(unsafe { request(handle) }.method.as_bytes())
 }
 
 /// # Safety
 /// `handle` is a live request.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_http_req_path(handle: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_http_req_path(handle: i64) -> Str {
     Str::from_bytes(unsafe { request(handle) }.path.as_bytes())
 }
 
 /// # Safety
 /// `handle` is a live request.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_http_req_remote(handle: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_http_req_remote(handle: i64) -> Str {
     Str::from_bytes(unsafe { request(handle) }.remote.as_bytes())
 }
 
@@ -609,7 +730,7 @@ pub unsafe extern "C" fn lrt_http_req_remote(handle: i64) -> Str {
 /// # Safety
 /// `handle` is a live request; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_http_req_query(handle: i64, ptr: *const u8, len: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_http_req_query(handle: i64, ptr: *const u8, len: i64) -> Str {
     let wanted = unsafe { Str::from_raw(ptr, len) };
     optional(query_value(&unsafe { request(handle) }.query, wanted).as_deref())
 }
@@ -630,7 +751,7 @@ pub(crate) fn query_value(query: &str, wanted: &str) -> Option<String> {
 /// # Safety
 /// `handle` is a live request; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_http_req_header(handle: i64, ptr: *const u8, len: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_http_req_header(handle: i64, ptr: *const u8, len: i64) -> Str {
     let wanted = unsafe { Str::from_raw(ptr, len) }.to_ascii_lowercase();
     let request = unsafe { request(handle) };
     optional(request.headers.iter().find(|(n, _)| *n == wanted).map(|(_, v)| v.as_str()))
@@ -641,7 +762,7 @@ pub unsafe extern "C" fn lrt_http_req_header(handle: i64, ptr: *const u8, len: i
 /// # Safety
 /// `handle` is a live request.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_http_req_body(handle: i64) -> Str {
+pub unsafe extern "C-unwind" fn lrt_http_req_body(handle: i64) -> Str {
     optional(std::str::from_utf8(&unsafe { request(handle) }.body).ok())
 }
 
@@ -650,7 +771,7 @@ pub unsafe extern "C" fn lrt_http_req_body(handle: i64) -> Str {
 /// # Safety
 /// `handle` is a live request; the strings are UTF-8.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_http_respond(
+pub unsafe extern "C-unwind" fn lrt_http_respond(
     handle: i64,
     status: i64,
     headers: *const u8,
@@ -693,7 +814,7 @@ fn log_level() -> i64 {
 /// # Safety
 /// `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_log_set_level(ptr: *const u8, len: i64) {
+pub unsafe extern "C-unwind" fn lrt_log_set_level(ptr: *const u8, len: i64) {
     LOG_LEVEL.store(level_number(unsafe { Str::from_raw(ptr, len) }), Ordering::Relaxed);
 }
 
@@ -702,7 +823,7 @@ pub unsafe extern "C" fn lrt_log_set_level(ptr: *const u8, len: i64) {
 /// # Safety
 /// The arguments describe UTF-8 strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lrt_log_write(level: *const u8, level_len: i64, message: *const u8, message_len: i64) {
+pub unsafe extern "C-unwind" fn lrt_log_write(level: *const u8, level_len: i64, message: *const u8, message_len: i64) {
     let level = unsafe { Str::from_raw(level, level_len) };
     if level_number(level) < log_level() {
         return;
@@ -720,7 +841,7 @@ pub unsafe extern "C" fn lrt_log_write(level: *const u8, level_len: i64, message
         now.subsec_millis(),
         level.to_ascii_uppercase()
     );
-    out::flush();
+    crate::out::flush();
     let _ = std::io::stderr().lock().write_all(line.as_bytes());
 }
 
