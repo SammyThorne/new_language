@@ -21,6 +21,8 @@ unsafe extern "C" {
     fn GC_init();
     fn GC_malloc(size: usize) -> *mut u8;
     fn GC_malloc_atomic(size: usize) -> *mut u8;
+    fn GC_malloc_many(size: usize) -> *mut u8;
+    fn GC_malloc_uncollectable(size: usize) -> *mut u8;
     fn GC_gcollect();
     fn GC_expand_hp(bytes: usize) -> i32;
     fn GC_set_free_space_divisor(divisor: usize);
@@ -89,4 +91,80 @@ pub fn alloc_atomic(size: usize) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_alloc_raw(size: i64) -> *mut u8 {
     alloc(size as usize)
+}
+
+/// Allocate memory the collector never scans, for a struct or enum variant with no reference
+/// fields (numbers and bools only). Not zeroed: the generated code stores every field. Declared
+/// to LLVM as an allocator of uninitialised memory, so it must stay free of other effects.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_alloc_atomic_raw(size: i64) -> *mut u8 {
+    alloc_atomic(size as usize)
+}
+
+// ---- the inline allocation fast path (docs/09, phase 2) ----------------------------------------
+//
+// Generated code allocates small fixed-size objects without calling the runtime. Each thread has
+// an `AllocCache`: for each size, a free list of zeroed objects linked through their first word.
+// The code generator lowers `lrt_alloc_raw(size)` into: read the thread's cache pointer (a
+// thread-local defined in the program's object, read with inline assembly so that LLVM never
+// reuses the read after a fiber has moved to another thread), pop the list's head, and clear its
+// link word. When the cache is missing or the list is empty, it calls `lrt_alloc_slow`, which
+// refills the list from `GC_malloc_many`, as Boehm's `gc_inline.h` does.
+//
+// The cache itself comes from `GC_malloc_uncollectable`: the collector scans it, so every object
+// on a free list stays reachable (through the head and the link words) and is never reclaimed
+// while it waits there.
+
+/// The largest size, in 16-byte granules, served from a thread's free lists. Must match
+/// `ALLOC_CACHE_GRANULES` in `lang_codegen`.
+pub const CACHE_GRANULES: usize = 16;
+
+/// One thread's free lists, indexed by size in granules. Must match the layout the code
+/// generator assumes: an array of `CACHE_GRANULES + 1` list heads.
+#[repr(C)]
+pub struct AllocCache {
+    lists: [*mut u8; CACHE_GRANULES + 1],
+}
+
+/// The slow path of an inline allocation of `size` bytes, which needs `granules` granules
+/// (`size` plus the collector's extra byte, rounded up to 16). `slot` is the calling thread's
+/// cache pointer, which is null until the thread's first allocation. Returns zeroed memory, like
+/// `lrt_alloc_raw`.
+///
+/// # Safety
+/// `slot` is the calling thread's cache slot, and `granules` is at most `CACHE_GRANULES`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_alloc_slow(granules: i64, size: i64, slot: *mut *mut AllocCache) -> *mut u8 {
+    // In stress mode nothing is cached, so that every allocation comes here and collects first.
+    if STRESS.load(Ordering::Relaxed) {
+        return alloc(size as usize);
+    }
+    let granules = granules as usize;
+    debug_assert!((1..=CACHE_GRANULES).contains(&granules));
+    // SAFETY: the caller passes this thread's slot.
+    let mut cache = unsafe { *slot };
+    if cache.is_null() {
+        // SAFETY: plain allocation; the memory is zeroed, so every list starts empty.
+        cache = unsafe { GC_malloc_uncollectable(std::mem::size_of::<AllocCache>()) }.cast();
+        if cache.is_null() {
+            out_of_memory(std::mem::size_of::<AllocCache>())
+        }
+        // SAFETY: as above.
+        unsafe { *slot = cache };
+    }
+    // Asking for one byte less than the granules hold gives objects of exactly that size class,
+    // whether or not the collector adds its extra byte for interior pointers.
+    // SAFETY: plain allocation. The objects are zeroed except for the link in their first word.
+    let first = unsafe { GC_malloc_many(granules * 16 - 1) };
+    if first.is_null() {
+        out_of_memory(size as usize)
+    }
+    // SAFETY: `first` heads a list of objects of at least 16 bytes, linked through word 0, and
+    // `granules` indexes the cache's lists.
+    unsafe {
+        let next = *first.cast::<*mut u8>();
+        (*cache).lists[granules] = next;
+        *first.cast::<*mut u8>() = std::ptr::null_mut();
+    }
+    first
 }

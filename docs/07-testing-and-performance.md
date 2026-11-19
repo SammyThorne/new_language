@@ -69,7 +69,7 @@ On every change: build, compiler unit and snapshot tests, end-to-end suite in de
 | Cost | Size | Plan |
 |---|---|---|
 | Garbage collection (Boehm) | The largest known gap to Go on allocation-heavy code | Pointer-free allocation, fewer allocations, then precise GC ([04](04-runtime-and-memory.md#beyond-boehm)) |
-| Every struct on the heap | Significant for small short-lived values | Escape analysis; optional value structs |
+| Every struct on the heap | Significant for small short-lived values | Escape analysis (done for structs, D83); optional value structs |
 | Thread-per-task (stage 1) | Dominant at high connection counts | Fibers (M10) |
 | Runtime calls not inlined | Small per call, adds up in collection-heavy loops | Inline fast paths; move collections into Weby |
 | Bounds checks | Usually a few percent | LLVM removes many; iteration emits none |
@@ -128,7 +128,7 @@ Ordered by expected payoff for web workloads. None of this is prototype work exc
 2. Derived JSON without intermediate trees (in the M7 design).
 3. Per-connection buffer reuse and lazy header materialisation in the HTTP path.
 4. Fibers and epoll (M10).
-5. Escape analysis: stack-allocate structs, closures and small lists that do not outlive their function. Requires the mid-level IR.
+5. Escape analysis: stack-allocate structs, closures and small lists that do not outlive their function. Done for structs on the typed IR, without a mid-level IR (D83); closures and lists remain.
 6. Devirtualisation: when a trait object's concrete type is known at the call site, call directly; speculative devirtualisation for traits with one implementor in the program.
 7. Small-string optimisation: strings up to 15 bytes stored inline in the (pointer, length) pair.
 8. String builder elision: f-strings and concatenation chains sized once and written once.

@@ -38,7 +38,9 @@
 //! methods (`builtins.rs`), and per-type helper functions such as equality and printing
 //! (`helpers.rs`).
 
+mod alloc;
 mod builtins;
+mod escape;
 mod expr;
 mod helpers;
 mod json;
@@ -154,6 +156,12 @@ fn with_module<R>(
     module
         .run_passes(passes, &machine, PassBuilderOptions::create())
         .map_err(|e| format!("LLVM optimisation failed: {}", e.to_string()))?;
+    // After optimisation, so that allocations LLVM could delete are gone first.
+    if alloc::lower_allocations(&context, &module)? > 0 {
+        module
+            .run_passes("always-inline", &machine, PassBuilderOptions::create())
+            .map_err(|e| format!("LLVM inlining failed: {}", e.to_string()))?;
+    }
     then(&module, &machine)
 }
 
@@ -179,6 +187,7 @@ fn symbol_name(module: &str, function: &str) -> String {
 /// `i` i64, `f` double, `s` the `{ ptr, i64 }` string pair, `v` void.
 const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_alloc_raw", "p", "i"),
+    ("lrt_alloc_atomic_raw", "p", "i"),
     ("lrt_task_new", "p", "i"),
     ("lrt_task_result", "p", "p"),
     ("lrt_spawn", "v", "ppp"),
@@ -351,6 +360,9 @@ struct Codegen<'ctx, 'a> {
     td: &'a TargetData,
     program: &'a Program,
     sources: &'a SourceMap,
+    /// Struct constructions whose objects never outlive their call, created on the stack
+    /// (docs/09, phase 2; `escape.rs`).
+    stack_sites: escape::StackSites,
     /// Indexed by [`FuncId`]; `None` for generic functions, which are not compiled.
     functions: Vec<Option<FunctionValue<'ctx>>>,
     /// Adapters that let named functions and bound methods be called as function values.
@@ -416,6 +428,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             dyn_type: cx.struct_type(&[ptr.into(), ptr.into()], false),
             unit_variants: HashMap::new(),
             vtables: HashMap::new(),
+            stack_sites: escape::stack_sites(program),
             derived_methods: HashMap::new(),
             str_type: cx.struct_type(&[ptr.into(), i64_type.into()], false),
             list_type: cx.struct_type(&[ptr.into(), i64_type.into(), i64_type.into(), ptr.into()], false),
@@ -762,13 +775,15 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             // The collector's allocation: fresh, zeroed, 16-byte aligned memory that nothing
             // else points to. Telling LLVM this lets it delete allocations whose objects never
             // escape, and drop the zeroing that used to follow each one.
-            "lrt_alloc_raw" => {
+            "lrt_alloc_raw" | "lrt_alloc_atomic_raw" => {
                 for kind in ["noalias", "nonnull", "noundef"] {
                     function.add_attribute(AttributeLoc::Return, enum_attr(kind, 0));
                 }
                 function.add_attribute(AttributeLoc::Return, enum_attr("align", 16));
-                // AllocFnKind: Alloc (1) | Zeroed (16).
-                on_fn(enum_attr("allockind", 1 | 16));
+                // AllocFnKind: Alloc (1) | Zeroed (16), or Alloc | Uninitialized (8) for the
+                // memory the collector does not scan, which is not cleared.
+                let zeroed = if name == "lrt_alloc_raw" { 16 } else { 8 };
+                on_fn(enum_attr("allockind", 1 | zeroed));
                 // allocsize(0): the size is argument 0; no element-count argument (all ones).
                 on_fn(enum_attr("allocsize", 0xFFFF_FFFF));
                 on_fn(self.cx.create_string_attribute("alloc-family", "lang_rt_gc"));
@@ -848,13 +863,39 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         format!("field.{}.{index}", id.0)
     }
 
-    /// A new collected object of `size` bytes whose first word is the descriptor `desc`, the
-    /// rest zeroed. The descriptor is stored here rather than by the runtime, so that LLVM sees
-    /// every write to the object.
-    pub(crate) fn alloc_object(&mut self, size: IntValue<'ctx>, desc: PointerValue<'ctx>) -> PointerValue<'ctx> {
-        let object = self.call_rt("lrt_alloc_raw", &[size.into()]).unwrap().into_pointer_value();
+    /// A new collected object laid out as `layout`, whose first word is the descriptor `desc`.
+    /// The descriptor is stored here rather than by the runtime, so that LLVM sees every write to
+    /// the object.
+    ///
+    /// An object with no field that can hold a reference (only numbers and bools after the
+    /// descriptor) goes in memory the collector never scans (docs/09, phase 2, item 2). That
+    /// memory is not zeroed, so the caller must store every field; every caller does. Other
+    /// objects are zeroed.
+    pub(crate) fn alloc_object(&mut self, layout: StructType<'ctx>, desc: PointerValue<'ctx>) -> PointerValue<'ctx> {
+        let size = self.i64(self.td.get_abi_size(&layout) as i64);
+        let allocator = if Self::pointer_free(layout) { "lrt_alloc_atomic_raw" } else { "lrt_alloc_raw" };
+        let object = self.call_rt(allocator, &[size.into()]).unwrap().into_pointer_value();
         self.b.build_store(object, desc).must();
         object
+    }
+
+    /// Stack memory for an object laid out as `layout` whose descriptor is `desc`, for a
+    /// construction the escape analysis has proved never outlives the call. The slot is in the
+    /// entry block and reused each time the construction runs; the caller stores every field.
+    pub(crate) fn stack_object(&mut self, layout: StructType<'ctx>, desc: PointerValue<'ctx>) -> PointerValue<'ctx> {
+        let object = self.alloca(layout.into(), "stack_object");
+        // Heap objects are 16-byte aligned; keep the same guarantee.
+        if let Some(instruction) = object.as_instruction() {
+            instruction.set_alignment(16).must();
+        }
+        self.b.build_store(object, desc).must();
+        object
+    }
+
+    /// Whether no field of an object laid out as `layout` can hold a reference. The first field,
+    /// the descriptor, points to constant data the collector need not see.
+    fn pointer_free(layout: StructType<'ctx>) -> bool {
+        layout.get_field_types().iter().skip(1).all(|field| field.is_int_type() || field.is_float_type())
     }
 
     fn call_rt(&mut self, name: &str, args: &[BasicValueEnum<'ctx>]) -> Option<BasicValueEnum<'ctx>> {

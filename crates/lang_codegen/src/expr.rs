@@ -85,10 +85,13 @@ impl<'ctx> Codegen<'ctx, '_> {
             }
             ExprKind::StructNew { id, fields } => {
                 let struct_type = self.struct_types[id.0];
-                let size = self.i64(self.td.get_abi_size(&struct_type) as i64);
                 let desc = self.desc(expr.ty);
                 let values: Vec<BasicValueEnum> = fields.iter().map(|f| self.value(f)).collect();
-                let object = self.alloc_object(size, desc);
+                let object = if self.stack_sites.contains(&(expr as *const Expr)) {
+                    self.stack_object(struct_type, desc)
+                } else {
+                    self.alloc_object(struct_type, desc)
+                };
                 for (index, value) in values.into_iter().enumerate() {
                     let ptr = self.b.build_struct_gep(struct_type, object, index as u32 + 1, "").must();
                     let tag = self.field_tag(expr.ty, index);

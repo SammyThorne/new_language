@@ -548,6 +548,41 @@ LLVM could not optimise around runtime calls, because it knew nothing about them
 
 **A caveat on memory figures.** With a conservative collector, peak memory can move by a fifth on unrelated changes. One choice of f-string size estimate left a stale word that looked like a pointer to a tree, and `binary_trees` peaked at 90 MB instead of 73 MB. Every other estimate tried gave 73 MB. Compare memory across several builds before attributing a change to it.
 
+### D83. Allocate less: inline allocation, pointer-free structs, escape analysis (performance plan, phase 2)
+
+Phase 2 of [09](09-performance-plan.md) attacks the cost of each allocation and the number of allocations, without changing object layouts.
+
+- **Inline allocation fast path** (`lang_codegen/src/alloc.rs`, `lrt_alloc_slow` in `lang_rt/src/gc.rs`).
+  - **Each thread's free lists.** Each thread has an `AllocCache`: a free list of zeroed objects for each size up to 16 granules (255 bytes), refilled with `GC_malloc_many`, as Boehm's `gc_inline.h` describes.
+  - **Lowered after optimisation.** Code generation still emits `lrt_alloc_raw(size)`, so LLVM can delete allocations that do not escape, as in D82. Only after the optimisation pipeline is each remaining constant-size call redirected to an always-inlined function that pops the thread's list: two loads, a compare and two stores, with no call. An empty list or a missing cache calls `lrt_alloc_slow`.
+  - **Thread-local access.** The cache pointer is a thread-local defined in the program's object and read with side-effecting inline assembly (`movq %fs:lang_alloc_cache@tpoff`). LLVM assumes a thread-local's address is constant within a function, but a task can resume on another worker thread after any wait. The assembly can never be merged with an earlier read or hoisted out of a loop, so a task always pops from the list of the thread it is running on.
+  - **Keeping free objects alive.** The cache is allocated with `GC_malloc_uncollectable`, so it is a root: the collector keeps every object on a list reachable through the heads and the link words, and never reclaims one while it waits.
+  - **Stress mode.** With `WEBY_GC_STRESS`, the slow path never fills a cache, so every allocation still collects first.
+- **Pointer-free structs** (numbers and bools only, in structs and enum variants) are allocated with `GC_malloc_atomic`, so the collector never scans them. Their memory is not zeroed, and `lrt_alloc_atomic_raw` says so to LLVM (`allockind("alloc,uninitialized")`). Every construction stores every field. They take the runtime call, not the inline path: a free list of objects the collector does not scan would not keep its own tail alive.
+- **Escape analysis** (`lang_codegen/src/escape.rs`).
+  - **What it puts on the stack.** A struct construction whose object provably never outlives the call is an `alloca` in the entry block. The analysis is flow-insensitive: each expression has a set of sources, which are construction sites and parameters.
+  - **What counts as escaping.** A source escapes into returns, other objects, collections, closures, trait objects, tasks, f-strings, operators and `match`, and into any call except to a parameter that is itself known not to escape.
+  - **Parameter summaries** cover the whole program and are iterated to a fixed point.
+  - **Loops.** Each site has one slot per call, so a site inside a loop also needs at most one local that can hold its object: when the site runs again, that local is overwritten, so no reference to the previous object remains. `tests/run/escape.wb` covers the cases that must stay on the heap.
+  - **What it adds.** After D82, LLVM already deletes allocations it can see through after inlining. This handles the ones it cannot, such as a temporary passed to a function that is not inlined: 0.071 s to 0.018 s for 5 million such calls.
+- **The object header** stays, as the plan recommended: the decision waits for phase 5, since a precise collector is what the header was kept for.
+
+**Results** ([bench/README.md](../bench/README.md)):
+- `binary_trees` went from 0.97 s to 0.65 s, now faster than Go (0.83 s).
+- `json_orders` is about 5% faster; the rest is unchanged.
+- HTTP `/items` at 256 connections went from 0.91x to 0.93x Go's rate, short of the phase's goal of parity. Its time is not mostly in allocation, so the next step is phase 3's first item, the collector's lock on every context switch.
+
+**Memory.** `binary_trees` peaks at 90 MB instead of 73 MB.
+- The size classes are unchanged: `GC_malloc_many` gives 32-byte objects for the 24-byte node, as `GC_malloc` did.
+- The live data at the end is the same, about 17 MB.
+- At one mid-run collection, 25 MB was still reachable instead of 20 MB, and the heap kept the size it grew to then. This is the conservative-scanning effect described under D82: a word on the stack or in a register briefly looked like a pointer to a dead tree.
+
+`json_orders` went from 81 to 88 MB.
+
+**Rejected.**
+- **Using LLVM's `HeapToStack`** (part of the Attributor) instead of a custom analysis. It is not in the standard pipeline, places its stack memory where the allocation was, which grows the stack on every loop iteration, and cannot see the program's own rules about what escapes.
+- **Reading the thread-local through `llvm.threadlocal.address`.** It is the documented way, but nothing stops later passes from reusing the address across a task switch.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

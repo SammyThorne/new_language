@@ -162,7 +162,13 @@ These are small code-generation changes with no change to layouts or the runtime
 
 Exit: every test passes, including under the collector's stress mode. Allocation counts drop on `/items` and `json_orders`; `sieve` is at or below Go's time.
 
-### Phase 2 — Allocate less (one to two weeks)
+### Phase 2 — Allocate less (one to two weeks) — done 2026-11-19
+
+Items 1, 2 and 4 are done; item 3 waits for phase 5, as recommended. See D83 in [08](08-decisions-and-risks.md) and the results in [bench/README.md](../bench/README.md).
+
+- **`binary_trees` met its exit criterion and more.** It went from 0.97 s to 0.65 s and is now faster than Go (0.83 s), at the cost of more memory (90 MB against 73 MB).
+- **`/items` did not.** At 256 connections it is at 0.93x Go's rate, against 0.91x in the same pinned setup before the phase, so allocation is not what limits it. The likeliest limit left is the collector's lock, taken twice on every context switch (finding 7), which phase 3 removes first.
+- `json_orders` gained about 5%; the rest is unchanged within noise.
 
 1. **Escape analysis on the typed IR.** This is intraprocedural to start with. A struct, list literal, closure environment or builder whose reference is never:
    - stored into the heap,

@@ -51,6 +51,40 @@ python3 bench/ws_idle/run.py --connections 50000
 
 ## Results
 
+### 2026-11-19, performance plan phase 2
+
+Phase 2 of [docs/09](../docs/09-performance-plan.md): inline allocation from per-thread free lists, pointer-free structs in memory the collector does not scan, and escape analysis for structs (docs/08, D83). Best of 3 runs.
+
+| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+|---|---|---|---|---|---|---|
+| binary_trees | 0.648 s | 0.831 s | 21.374 s | 1.28x faster | 33.0x faster | 90 / 40 / 56 MB |
+| dispatch | 0.053 s | 0.031 s | 0.580 s | 1.72x the time | 10.9x faster | 13 / 13 / 13 MB |
+| fib | 0.021 s | 0.037 s | 0.652 s | 1.80x faster | 31.8x faster | 13 / 13 / 13 MB |
+| json_orders | 0.519 s | 0.637 s | 3.503 s | 1.23x faster | 6.7x faster | 81 / 84 / 130 MB |
+| sieve | 0.052 s | 0.054 s | 2.243 s | 1.04x faster | 43.1x faster | 61 / 57 / 161 MB |
+| sort | 0.539 s | 1.218 s | 2.184 s | 2.26x faster | 4.1x faster | 149 / 78 / 302 MB |
+| spawn | 0.130 s | 0.042 s | 1.040 s | 3.13x the time | 8.0x faster | 13 / 14 / 47 MB |
+| word_count | 0.720 s | 0.754 s | 2.390 s | 1.05x faster | 3.3x faster | 13 / 13 / 13 MB |
+
+HTTP at 256 connections, requests per second (median / p99 latency in ms; peak memory), median of 3 runs of 5 s, server and load generator pinned to separate cores:
+
+| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+|---|---|---|---|---|
+| `/plaintext` | 933,516 (0.23 / 0.67; 15 MB) | 566,764 (0.33 / 1.69; 24 MB) | 28,787 | 1.65x faster |
+| `/json` | 882,838 (0.24 / 0.74; 15 MB) | 542,505 (0.35 / 1.74; 24 MB) | 27,508 | 1.63x faster |
+| `/items` | 236,597 (1.07 / 2.02; 19 MB) | 254,760 (0.72 / 4.52; 24 MB) | 18,566 | 0.93x |
+| `/users/42` | 578,410 (0.47 / 0.91; 15 MB) | 502,499 (0.37 / 1.90; 23 MB) | 25,136 | 1.15x faster |
+| `POST /orders` | 418,592 (0.63 / 1.20; 15 MB) | 308,268 (0.59 / 3.76; 24 MB) | 19,843 | 1.36x faster |
+
+At 64 connections `/items` is 253,940 against Go's 270,474 (0.94x). Python's server returned errors at 256 connections on every endpoint, as before.
+
+What changed:
+
+- **`binary_trees`** went from 0.93 s to 0.65 s and is now faster than Go. Every node comes from an inline pop off the thread's free list instead of a call into the collector. It peaks at 90 MB instead of 73 MB: the live data is the same, but one collection mid-run found more still reachable through stale stack words, and the heap kept that size (D83).
+- **`json_orders`** is about 5% faster, with the same memory.
+- **`/items`** went from 0.91x to 0.93x Go's rate, against a run in the same pinned setup just before the phase. That is within noise, so allocation is not what limits it. Phase 3 takes the collector's lock off the context switch next.
+- The machine was slower for this run: Go's `json_orders` took 0.637 s against 0.580 s in phase 1, and the small-response HTTP rows moved by similar amounts for both servers. Compare ratios, not times.
+
 ### 2026-11-19, performance plan phase 1
 
 Phase 1 of [docs/09](../docs/09-performance-plan.md): allocator and alias information for LLVM, inline `append` and string equality, builders on the stack (docs/08, D82). Best of 3 runs.

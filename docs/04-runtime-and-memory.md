@@ -74,7 +74,7 @@ Enforcement: Weby references cross the ABI as a distinct newtype that does not i
 
 Boehm's limits are known: no compaction, no generations, whole-heap pauses that grow with heap size, and occasional false retention. Whether they matter is an empirical question answered at the M8 gate ([06](06-roadmap.md#gates)). If they do, the path is:
 
-1. **Reduce allocation** first. Escape analysis to stack-allocate non-escaping structs and closures; per-connection buffer reuse in the HTTP path; avoiding intermediate strings in JSON. This helps under any collector.
+1. **Reduce allocation** first. Escape analysis to stack-allocate non-escaping structs and closures; per-connection buffer reuse in the HTTP path; avoiding intermediate strings in JSON. This helps under any collector. Structs are done, along with an inline allocation fast path and pointer-free structs in unscanned memory ([08](08-decisions-and-risks.md), D83).
 2. **Precise stack scanning.** Introduce the mid-level IR, then either LLVM's shadow-stack strategy (simple, slower) or statepoints (fast, complex) so the collector knows exactly which stack slots are references.
 3. **A precise, moving collector.** The leading candidate is [MMTk](https://www.mmtk.io/), a Rust framework that provides production collectors (Immix, generational Immix) behind a binding interface. We would implement object scanning (using the pointer bitmaps we already emit) and root enumeration. Writing our own Go-style concurrent collector is a last resort.
 

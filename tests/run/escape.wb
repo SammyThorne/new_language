@@ -1,0 +1,106 @@
+# Objects the escape analysis may put on the stack (docs/09, phase 2), next to ones it must not.
+# Every line's value is the same whichever way an object is allocated; a wrong decision shows up
+# as a changed value or a crash, in debug, release and collector-stress runs.
+# expect: temporaries 4950
+# expect: accumulator 45 90
+# expect: copies 0 1 2 3 4
+# expect: previous 0 0 1 2 3
+# expect: kept 3 6
+# expect: returned 7 1
+# expect: captured 5
+# expect: written 10 20
+# expect: recursive 120
+# expect: interleaved 0 10 20
+# expect: stored 4 10
+
+struct Point:
+    x: int
+    y: int
+
+struct Pair:
+    a: Point
+    b: Point
+
+def dot(p: Point, q: Point) -> int:
+    return p.x * q.x + p.y * q.y
+
+def sum_of(p: Point) -> int:
+    return p.x + p.y
+
+def same(p: Point) -> Point:
+    return p
+
+def keep(p: Point, into: list[Point]):
+    into.append(p)
+
+def factorial(p: Point) -> int:
+    # Recursion with a fresh temporary at each level.
+    if p.x <= 1:
+        return p.y
+    return factorial(Point(p.x - 1, p.y * p.x))
+
+def main():
+    # Temporaries passed to functions that only read them.
+    total = 0
+    for i in range(100):
+        total += dot(Point(i, 0), Point(1, 0))
+    print(f"temporaries {total}")
+
+    # A local reassigned from the same site on every iteration.
+    acc = Point(0, 0)
+    for i in range(10):
+        acc = Point(acc.x + i, acc.y + 2 * i)
+    print(f"accumulator {acc.x} {acc.y}")
+
+    # Copied into a list each iteration: every object must stay distinct.
+    points: list[Point] = []
+    for i in range(5):
+        p = Point(i, i)
+        points.append(p)
+    print(f"copies {points[0].x} {points[1].x} {points[2].x} {points[3].x} {points[4].x}")
+
+    # A second local keeps the previous iteration's object alive across the next construction.
+    previous = Point(0, 0)
+    seen: list[int] = []
+    for i in range(5):
+        current = Point(i, i)
+        seen.append(previous.x)
+        previous = current
+    print(f"previous {seen[0]} {seen[1]} {seen[2]} {seen[3]} {seen[4]}")
+
+    # Passed to a function that stores its parameter.
+    kept: list[Point] = []
+    keep(Point(1, 2), kept)
+    keep(Point(2, 4), kept)
+    print(f"kept {kept[0].x + kept[0].y} {kept[1].x + kept[1].y}")
+
+    # Returned by the function it is passed to.
+    r = same(Point(3, 4))
+    other = Point(1, 1)
+    print(f"returned {sum_of(r)} {other.x}")
+
+    # Captured by a closure that outlives the construction's statement.
+    c = Point(2, 3)
+    get = lambda: sum_of(c)
+    print(f"captured {get()}")
+
+    # Fields written after construction.
+    w = Point(0, 0)
+    w.x = 10
+    w.y = 20
+    print(f"written {w.x} {w.y}")
+
+    print(f"recursive {factorial(Point(5, 1))}")
+
+    # Two sites alive together in one loop.
+    out: list[int] = []
+    for i in range(3):
+        a = Point(i, 0)
+        b = Point(0, i * 10)
+        out.append(sum_of(a) * 0 + sum_of(b))
+    print(f"interleaved {out[0]} {out[1]} {out[2]}")
+
+    # Inside another struct, which is on the heap.
+    pair = Pair(Point(1, 3), Point(2, 4))
+    holder: list[Pair] = [pair]
+    print(f"stored {holder[0].a.x + holder[0].a.y} {holder[0].b.x * 5}")

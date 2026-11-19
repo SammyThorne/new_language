@@ -57,8 +57,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         let enum_index = self.enum_index(ty);
         let variant_type = self.variant_types[enum_index][index];
         let desc = self.desc(ty);
-        let size = self.i64(self.td.get_abi_size(&variant_type) as i64);
-        let object = self.alloc_object(size, desc);
+        let object = self.alloc_object(variant_type, desc);
         let tag = self.b.build_struct_gep(variant_type, object, 1, "").must();
         self.b.build_store(tag, self.i64(index as i64)).must();
         for (i, value) in values.into_iter().enumerate() {
@@ -403,9 +402,8 @@ impl<'ctx> Codegen<'ctx, '_> {
     pub(crate) fn new_struct(&mut self, ty: Ty, values: &[BasicValueEnum<'ctx>]) -> PointerValue<'ctx> {
         let TyKind::Struct(id) = *self.kind(ty) else { unreachable!("not a struct") };
         let struct_type = self.struct_types[id.0];
-        let size = self.i64(self.td.get_abi_size(&struct_type) as i64);
         let desc = self.desc(ty);
-        let object = self.alloc_object(size, desc);
+        let object = self.alloc_object(struct_type, desc);
         for (index, value) in values.iter().enumerate() {
             let ptr = self.b.build_struct_gep(struct_type, object, index as u32 + 1, "").must();
             self.b.build_store(ptr, *value).must();
@@ -417,9 +415,8 @@ impl<'ctx> Codegen<'ctx, '_> {
         let id = self.program.parse_error;
         let struct_type = self.struct_types[id.0];
         let ty = self.program.structs[id.0].ty;
-        let size = self.i64(self.td.get_abi_size(&struct_type) as i64);
         let desc = self.desc(ty);
-        let object = self.alloc_object(size, desc);
+        let object = self.alloc_object(struct_type, desc);
         let expected = self.str_const(expected);
         for (index, value) in [text, expected.as_basic_value_enum()].into_iter().enumerate() {
             let ptr = self.b.build_struct_gep(struct_type, object, index as u32 + 1, "").must();
