@@ -36,7 +36,7 @@ The name "Weby" and the `.wb` extension may still change, so the name is kept ou
 Rename checklist:
 
 1. Change the constants in `lang_names`.
-2. Change the binary name in the `lang_cli` manifest.
+2. Change the binary name in the `lang_cli` manifest, and `CLI` at the top of the Makefile.
 3. Rename source files (`stdlib/`, `tests/`, `bench/`) to the new extension with a one-line script; the test harness finds files through the constant.
 4. Search and replace in `docs/` and the README.
 5. Update the editor syntax-highlighting file association, once one exists.

@@ -214,22 +214,32 @@ Programs are 3x to 42x faster than the same programs in CPython. The numbers and
 
 ## Building and running
 
-Requires Rust 1.85 or newer, LLVM 19 development files, a C compiler (for linking, and for the `ring` cryptography library behind TLS), and the Boehm garbage collector library. On Debian or Ubuntu: `apt install llvm-19-dev gcc libgc1`. The path to LLVM is set in `.cargo/config.toml`; adjust it if LLVM 19 lives elsewhere. Programs do not depend on the system's OpenSSL or certificate store: TLS is `rustls`, with the Mozilla root certificates built in, and `SSL_CERT_FILE` adds more.
+Requires Linux on x86-64, Rust 1.85 or newer, LLVM 19 development files, a C compiler (for linking, and for the `ring` cryptography library behind TLS), and the Boehm garbage collector library. On Debian or Ubuntu, install Rust from [rustup.rs](https://rustup.rs), then:
 
 ```bash
-cargo build --workspace
+sudo apt install build-essential llvm-19-dev libgc1
 ```
 
 ```bash
-./target/debug/weby run tests/run/hello.wb
+make check-deps
 ```
 
-`--workspace` matters: it builds the runtime library `liblang_rt.a` next to the compiler, where the compiler looks for it.
+```bash
+make
+```
+
+```bash
+./target/release/weby run tests/run/hello.wb
+```
+
+`make` builds the compiler and its runtime library `liblang_rt.a`, optimised, into `target/release`. `make install` builds and installs the `weby` command into `~/.local/bin`, after which `weby server.wb -o server` compiles a program; `make link` does the same but points the command at this checkout, so each rebuild updates it. `make help` lists the other targets (tests, lint, benchmarks). Without make, `cargo build --workspace --release` builds the compiler; `--workspace` matters, because it builds the runtime library next to the compiler, where the compiler looks for it. Compiled programs need only `libgc1` on the machine that runs them. Programs do not depend on the system's OpenSSL or certificate store: TLS is `rustls`, with the Mozilla root certificates built in, and `SSL_CERT_FILE` adds more.
+
+[docs/building.md](docs/building.md) has the details: the packages and what each is for, every make target, what each compiler flag does, the environment variables, and fixes for common build errors.
 
 | Command | Does |
 |---|---|
 | `weby run file.wb` | Compile to a temporary executable and run it |
-| `weby build file.wb [-o out] [--release]` | Compile to an executable |
+| `weby build file.wb [-o out] [--release]` | Compile to an executable; `weby file.wb -o out` is short for this |
 | `weby check file.wb` | Report errors without generating code |
 | `weby build --emit=tokens\|ast\|hir\|llvm-ir\|obj file.wb` | Print or write an intermediate form |
 | `weby test [paths] [--filter text]` | Run the `@test` functions, each in its own task |
@@ -267,6 +277,7 @@ The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real socke
 | Document | What it covers |
 |---|---|
 | [docs/examples.md](docs/examples.md) | Learning the language: short programs for every feature, with their output |
+| [docs/building.md](docs/building.md) | Required packages, make targets, compiler flags, environment variables |
 | [docs/00-overview.md](docs/00-overview.md) | Goals, non-goals, the plan in one page, confirmed decisions |
 | [docs/01-language-design.md](docs/01-language-design.md) | Syntax and semantics, with example programs |
 | [docs/02-type-system-and-traits.md](docs/02-type-system-and-traits.md) | Types, generics, traits, dispatch |

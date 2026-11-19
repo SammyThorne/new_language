@@ -46,8 +46,12 @@ func main() {
 				return
 			}
 			defer conn.Close()
+			// A server that stops answering a connection must not hang the run: reads and writes
+			// fail two seconds after the deadline, and the request is counted as an error.
+			conn.SetDeadline(deadline.Add(2 * time.Second))
 			reader := bufio.NewReaderSize(conn, 64*1024)
 			local := make([]time.Duration, 0, 100000)
+		Requests:
 			for time.Now().Before(deadline) {
 				start := time.Now()
 				if _, err := conn.Write(request); err != nil {
@@ -64,7 +68,10 @@ func main() {
 				for {
 					line, err := reader.ReadString('\n')
 					if err != nil {
-						return
+						mu.Lock()
+						errors++
+						mu.Unlock()
+						break Requests
 					}
 					line = strings.TrimRight(line, "\r\n")
 					if line == "" {

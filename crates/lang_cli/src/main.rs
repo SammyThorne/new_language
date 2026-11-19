@@ -30,7 +30,14 @@ const EXIT_COMPILE_ERROR: u8 = 1;
 const EXIT_INTERNAL_ERROR: u8 = 101;
 
 #[derive(Parser)]
-#[command(name = CLI_NAME, version, about = format!("Compiler for the {LANGUAGE_NAME} programming language"))]
+#[command(
+    name = CLI_NAME,
+    version,
+    about = format!("Compiler for the {LANGUAGE_NAME} programming language"),
+    after_help = format!(
+        "With no command, `build` is assumed: `{CLI_NAME} app.{SOURCE_EXTENSION} -o app` is `{CLI_NAME} build app.{SOURCE_EXTENSION} -o app`."
+    )
+)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -117,7 +124,7 @@ enum Emit {
 struct Failure(u8);
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(with_default_command(env::args_os().collect()));
     let result = match cli.command {
         Cmd::Build { file, output, release, emit } => build(&file, output, opt_level(release), emit),
         Cmd::Run { file, release, args } => run(&file, opt_level(release), &args),
@@ -145,6 +152,23 @@ fn main() -> ExitCode {
         Cmd::Test { paths, filter, release } => run_tests(&paths, filter.as_deref(), opt_level(release)),
     };
     result.unwrap_or_else(|Failure(code)| ExitCode::from(code))
+}
+
+/// `build` is the default command: `<cli> app.<ext> -o app` means `<cli> build app.<ext> -o app`. It is
+/// inserted when the first argument is a source file, or a flag that is not `--help` or
+/// `--version` (as in `<cli> --release app.<ext>`). Anything else, including a mistyped command,
+/// is left for clap to report.
+fn with_default_command(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    use clap::CommandFactory;
+    let Some(first) = args.get(1).and_then(|arg| arg.to_str()) else { return args };
+    let command = Cli::command();
+    let is_command = command.get_subcommands().any(|c| c.get_name() == first) || first == "help";
+    let is_source = Path::new(first).extension().is_some_and(|ext| ext == SOURCE_EXTENSION);
+    let is_build_flag = first.starts_with('-') && !matches!(first, "-h" | "--help" | "-V" | "--version");
+    if !is_command && (is_source || is_build_flag) {
+        args.insert(1, "build".into());
+    }
+    args
 }
 
 fn opt_level(release: bool) -> OptLevel {

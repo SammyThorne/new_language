@@ -72,6 +72,27 @@ fn test_command_runs_each_test_in_its_own_task() {
 }
 
 #[test]
+fn build_is_the_default_command() {
+    build_runtime();
+    let dir = scratch("default");
+    source(&dir, "app", "def main():\n    print(\"built\")\n");
+    let file = format!("app.{SOURCE_EXTENSION}");
+    for args in [vec![file.as_str(), "-o", "short"], vec!["--release", file.as_str(), "-o", "short_release"]] {
+        let output = run(&dir, &args);
+        assert!(output.status.success(), "{args:?}: {}", text(&output));
+        let program = Command::new(dir.join(args.last().unwrap())).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&program.stdout), "built\n");
+    }
+    // Commands, help and mistakes are not taken for a file to build.
+    assert!(run(&dir, &["check", &file]).status.success());
+    assert!(text(&run(&dir, &["--help"])).contains("build"));
+    let typo = run(&dir, &["biuld"]);
+    assert!(!typo.status.success());
+    assert!(text(&typo).contains("unrecognized subcommand"), "{}", text(&typo));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn fmt_check_and_rewrite() {
     let dir = scratch("fmt");
     let path = source(&dir, "messy", "def f( x:int )->int:\n  return x*2\n");
