@@ -52,6 +52,46 @@ unsafe extern "C" {
     fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
     #[link_name = "poll"]
     fn sys_poll(fds: *mut PollFd, count: u64, timeout: i32) -> i32;
+    fn clock_gettime(clock: i32, time: *mut Timespec) -> i32;
+}
+
+#[repr(C)]
+struct Timespec {
+    seconds: i64,
+    nanoseconds: i64,
+}
+
+const CLOCK_REALTIME_COARSE: i32 = 5;
+const CLOCK_MONOTONIC_COARSE: i32 = 6;
+
+fn clock(id: i32) -> Timespec {
+    let mut time = Timespec { seconds: 0, nanoseconds: 0 };
+    // SAFETY: writing one timespec; these clocks always exist on Linux.
+    unsafe { clock_gettime(id, &mut time) };
+    time
+}
+
+/// Monotonic time in nanoseconds at the kernel tick's resolution (1 to 4 ms). Reading it costs
+/// about 2 ns against 20 ns for the precise clock, and I/O deadlines (whole seconds, swept every
+/// quarter second) need no better.
+pub(crate) fn coarse_now() -> u64 {
+    let time = clock(CLOCK_MONOTONIC_COARSE);
+    time.seconds as u64 * 1_000_000_000 + time.nanoseconds as u64
+}
+
+/// Seconds since 1970, at the kernel tick's resolution: for the HTTP `Date` header.
+pub(crate) fn coarse_unix_seconds() -> u64 {
+    clock(CLOCK_REALTIME_COARSE).seconds as u64
+}
+
+/// An I/O deadline (on the [`coarse_now`] clock) `after` from now.
+pub(crate) fn deadline_after(after: Duration) -> u64 {
+    coarse_now().saturating_add(after.as_nanos() as u64)
+}
+
+/// The I/O deadline for an `Instant`, for callers that keep their deadlines as `Instant`s.
+pub(crate) fn deadline_at(at: Instant) -> u64 {
+    deadline_after(at.saturating_duration_since(Instant::now()))
 }
 
 #[repr(C)]
@@ -126,30 +166,53 @@ pub(crate) fn poll(timeout_ms: i32) {
 
 // ---- I/O sources ----------------------------------------------------------------------
 
-/// One direction of a source: whether an edge has been seen, who waits for it, and until when.
+/// One direction of a source: an edge that nobody has consumed yet, who waits for one, and
+/// until when.
+///
+/// An edge either wakes the waiter or, when there is none, sets `ready` for the next `wait` to
+/// find. Both sides decide under the `waiter` mutex, so an edge is never lost and never counted
+/// twice: before docs/10 milestone 2 an edge did both, and the woken task's next `wait`
+/// returned at once, costing a `recv` that found nothing on every request.
 struct Direction {
     ready: AtomicBool,
     waiter: Mutex<Option<Waker>>,
-    /// Nanoseconds since `epoch()` after which the waiter gives up; 0 for none.
+    /// The waiter's deadline on the [`coarse_now`] clock; 0 for none. Written and checked under
+    /// the `waiter` mutex.
     deadline: AtomicU64,
+    /// Set by the deadline sweep when it wakes the waiter because its deadline passed.
+    timed_out: AtomicBool,
 }
 
 impl Direction {
     const fn new() -> Direction {
-        Direction { ready: AtomicBool::new(false), waiter: Mutex::new(None), deadline: AtomicU64::new(0) }
+        Direction {
+            ready: AtomicBool::new(false),
+            waiter: Mutex::new(None),
+            deadline: AtomicU64::new(0),
+            timed_out: AtomicBool::new(false),
+        }
     }
 
     fn ready(&self) {
-        self.ready.store(true, Ordering::SeqCst);
-        if let Some(waker) = lock(&self.waiter).take() {
+        let waker = {
+            let mut waiter = lock(&self.waiter);
+            let waker = waiter.take();
+            if waker.is_none() {
+                self.ready.store(true, Ordering::SeqCst);
+            }
+            waker
+        };
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
 
     fn reset(&self) {
+        let mut waiter = lock(&self.waiter);
+        waiter.take();
         self.ready.store(false, Ordering::SeqCst);
-        lock(&self.waiter).take();
         self.deadline.store(0, Ordering::SeqCst);
+        self.timed_out.store(false, Ordering::SeqCst);
     }
 }
 
@@ -214,43 +277,45 @@ impl IoSource {
         lock(&FREE_SOURCES).push(self);
     }
 
-    /// Wait until the socket may be readable (`write` false) or writable, or `deadline`.
-    pub(crate) fn wait(&self, write: bool, deadline: Option<Instant>) -> Wait {
+    /// Wait until the socket may be readable (`write` false) or writable, or until `deadline`
+    /// (on the [`coarse_now`] clock). A deadline that has already passed is noticed by the next
+    /// sweep, within a quarter of a second; no clock is read here.
+    pub(crate) fn wait(&self, write: bool, deadline: Option<u64>) -> Wait {
         let direction = if write { &self.write } else { &self.read };
-        if direction.ready.swap(false, Ordering::SeqCst) {
-            return Wait::Retry;
+        {
+            let mut waiter = lock(&direction.waiter);
+            if direction.ready.swap(false, Ordering::SeqCst) {
+                return Wait::Retry;
+            }
+            direction.timed_out.store(false, Ordering::SeqCst);
+            direction.deadline.store(deadline.map_or(0, |d| d.max(1)), Ordering::SeqCst);
+            *waiter = Some(Waker::current());
         }
-        if deadline.is_some_and(|d| Instant::now() >= d) {
-            return Wait::TimedOut;
-        }
-        direction.deadline.store(deadline.map_or(0, nanos), Ordering::SeqCst);
-        *lock(&direction.waiter) = Some(Waker::current());
-        // An edge may have come between the check above and registering as the waiter.
-        if !direction.ready.swap(false, Ordering::SeqCst) {
-            fiber::park(None);
-        }
+        // A wake that comes before the park leaves a permit, so it is not lost.
+        fiber::park(None);
         lock(&direction.waiter).take();
         direction.deadline.store(0, Ordering::SeqCst);
-        if deadline.is_some_and(|d| Instant::now() >= d) { Wait::TimedOut } else { Wait::Retry }
+        if direction.timed_out.swap(false, Ordering::SeqCst) { Wait::TimedOut } else { Wait::Retry }
     }
 }
 
 /// Wait for `fd` with `poll(2)`, for a thread that is not running fibers.
-pub(crate) fn wait_blocking(fd: RawFd, write: bool, deadline: Option<Instant>) -> Wait {
+pub(crate) fn wait_blocking(fd: RawFd, write: bool, deadline: Option<u64>) -> Wait {
     let timeout = match deadline {
         None => 500,
         Some(d) => {
-            let left = d.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            let left = d.saturating_sub(coarse_now());
+            if left == 0 {
                 return Wait::TimedOut;
             }
-            left.as_millis().min(500) as i32
+            // Rounded up, so that the deadline has passed when the wait ends.
+            left.div_ceil(1_000_000).min(500) as i32
         }
     };
     let mut pfd = PollFd { fd, events: if write { POLLOUT } else { POLLIN }, revents: 0 };
     // SAFETY: one valid pollfd.
     unsafe { sys_poll(&mut pfd, 1, timeout) };
-    if deadline.is_some_and(|d| Instant::now() >= d) { Wait::TimedOut } else { Wait::Retry }
+    if deadline.is_some_and(|d| coarse_now() >= d) { Wait::TimedOut } else { Wait::Retry }
 }
 
 /// Wake every task waiting on a socket, so it notices a shutdown.
@@ -265,15 +330,6 @@ pub(crate) fn wake_all_io() {
 }
 
 // ---- timers -----------------------------------------------------------------------------
-
-fn epoch() -> Instant {
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
-    *EPOCH.get_or_init(Instant::now)
-}
-
-fn nanos(at: Instant) -> u64 {
-    (at.saturating_duration_since(epoch()).as_nanos() as u64).max(1)
-}
 
 struct Timers {
     heap: Mutex<BinaryHeap<Reverse<(Instant, u64, TimerFiber)>>>,
@@ -343,7 +399,7 @@ pub(crate) fn start_timer_thread() {
             let now = Instant::now();
             if now >= next_sweep {
                 next_sweep = now + SWEEP;
-                sweep_io_deadlines(nanos(now));
+                sweep_io_deadlines(coarse_now());
             }
         }
     });
@@ -358,11 +414,25 @@ fn sweep_io_deadlines(now: u64) {
     let sources: Vec<&'static IoSource> = lock(&SOURCES).clone();
     for source in sources {
         for direction in [&source.read, &source.write] {
-            let deadline = direction.deadline.load(Ordering::SeqCst);
-            if deadline != 0
-                && deadline <= now
-                && let Some(waker) = lock(&direction.waiter).take()
-            {
+            // A cheap look first; then again under the mutex, where the deadline belongs to
+            // the waiter that is there (it may have changed since).
+            let deadline = direction.deadline.load(Ordering::Relaxed);
+            if deadline == 0 || deadline > now {
+                continue;
+            }
+            let waker = {
+                let mut waiter = lock(&direction.waiter);
+                let deadline = direction.deadline.load(Ordering::SeqCst);
+                if deadline == 0 || deadline > now {
+                    continue;
+                }
+                let waker = waiter.take();
+                if waker.is_some() {
+                    direction.timed_out.store(true, Ordering::SeqCst);
+                }
+                waker
+            };
+            if let Some(waker) = waker {
                 waker.wake();
             }
         }

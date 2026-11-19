@@ -14,8 +14,10 @@
 //! headers. A connection idle for 60 seconds, or slower than 30 seconds to send a request, is
 //! closed. SIGINT and SIGTERM stop the accept loop; requests in progress are finished.
 //!
-//! The parsed request lives on the connection thread's Rust stack and holds no references to
-//! collected objects. Its handle is only valid while the callback runs.
+//! The parsed request lives on the connection task's stack, as offsets into the connection's
+//! buffer, and holds no references to collected objects. Its handle is only valid while the
+//! callback runs. Responses are written into a per-connection output buffer, which is sent when
+//! the connection is about to wait for more input (docs/10, milestone 2).
 
 use crate::fiber;
 use crate::poll::{self, IoSource, Wait};
@@ -188,7 +190,7 @@ pub unsafe extern "C-unwind" fn lrt_http_serve(listener: i64, entry: Entry, code
             fiber::spawn(
                 [std::ptr::null_mut(); 2],
                 fiber::Entry::Closure(Box::new(move |_| {
-                    serve_connection(stream, tls, peer.to_string(), entry, roots as *mut *mut u8);
+                    serve_connection(stream, tls, peer, entry, roots as *mut *mut u8);
                     ACTIVE.fetch_sub(1, Ordering::SeqCst);
                 })),
             );
@@ -240,6 +242,39 @@ pub(crate) struct Socket {
     stream: TcpStream,
     source: Option<&'static IoSource>,
     tls: Option<Session>,
+    /// The last read returned less than it asked for, so the socket was empty then; the next
+    /// read waits for an edge first instead of making a `recv` that would find nothing. With
+    /// edge-triggered polling, bytes that arrive after a read always produce a new edge.
+    drained: AtomicBool,
+}
+
+/// When a wait on a socket gives up.
+#[derive(Clone, Copy)]
+pub(crate) enum Deadline {
+    Never,
+    /// An `Instant`, converted only if the task actually waits.
+    At(Instant),
+    /// This long from when the task starts to wait; the clock is read only then.
+    After(Duration),
+    /// On the poller's coarse clock (`poll::deadline_after`).
+    Coarse(u64),
+}
+
+impl Deadline {
+    fn coarse(self) -> Option<u64> {
+        match self {
+            Deadline::Never => None,
+            Deadline::At(at) => Some(poll::deadline_at(at)),
+            Deadline::After(after) => Some(poll::deadline_after(after)),
+            Deadline::Coarse(at) => Some(at),
+        }
+    }
+}
+
+impl From<Option<Instant>> for Deadline {
+    fn from(deadline: Option<Instant>) -> Deadline {
+        deadline.map_or(Deadline::Never, Deadline::At)
+    }
 }
 
 impl Socket {
@@ -248,7 +283,7 @@ impl Socket {
         let _ = stream.set_nodelay(true);
         let _ = stream.set_nonblocking(true);
         let source = IoSource::register(stream.as_raw_fd());
-        Socket { stream, source, tls }
+        Socket { stream, source, tls, drained: AtomicBool::new(false) }
     }
 
     /// Connect to `address` without blocking the worker thread: the task parks until the
@@ -300,7 +335,7 @@ impl Socket {
         let socket = Socket::with_tls(stream, None);
         if in_progress {
             loop {
-                if socket.wait(true, Some(deadline)) == Wait::TimedOut {
+                if socket.wait(true, Deadline::At(deadline)) == Wait::TimedOut {
                     return Err(std::io::ErrorKind::TimedOut.into());
                 }
                 if let Some(error) = socket.stream.take_error()? {
@@ -319,11 +354,11 @@ impl Socket {
         self.tls = Some(session);
     }
 
-    fn wait(&self, write: bool, deadline: Option<Instant>) -> Wait {
+    fn wait(&self, write: bool, deadline: Deadline) -> Wait {
         use std::os::fd::AsRawFd;
         match self.source {
-            Some(source) => source.wait(write, deadline),
-            None => poll::wait_blocking(self.stream.as_raw_fd(), write, deadline),
+            Some(source) => source.wait(write, deadline.coarse()),
+            None => poll::wait_blocking(self.stream.as_raw_fd(), write, deadline.coarse()),
         }
     }
 
@@ -332,42 +367,60 @@ impl Socket {
     pub(crate) fn read(
         &self,
         buffer: &mut [u8],
-        deadline: Option<Instant>,
+        deadline: impl Into<Deadline>,
         stop_at_shutdown: bool,
     ) -> std::io::Result<usize> {
         use std::io::ErrorKind;
+        let deadline = deadline.into();
         if let Some(session) = &self.tls {
             return self.read_tls(session, buffer, deadline, stop_at_shutdown);
+        }
+        // Only a registered socket gets edges; a blocking-mode wait polls the descriptor.
+        if self.source.is_some() && self.drained.swap(false, Ordering::Relaxed) {
+            if stop_at_shutdown && SHUTDOWN.load(Ordering::SeqCst) {
+                return Err(ErrorKind::TimedOut.into());
+            }
+            if self.wait(false, deadline) == Wait::TimedOut {
+                return Err(ErrorKind::TimedOut.into());
+            }
         }
         loop {
             if stop_at_shutdown && SHUTDOWN.load(Ordering::SeqCst) {
                 return Err(ErrorKind::TimedOut.into());
             }
             match (&self.stream).read(buffer) {
+                Ok(n) => {
+                    // A short read emptied the socket. Not after 0 bytes (the end of the
+                    // stream) or a full buffer (more may be waiting).
+                    if n > 0 && n < buffer.len() {
+                        self.drained.store(true, Ordering::Relaxed);
+                    }
+                    return Ok(n);
+                }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
                     if self.wait(false, deadline) == Wait::TimedOut {
                         return Err(ErrorKind::TimedOut.into());
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                other => return other,
+                Err(e) => return Err(e),
             }
         }
     }
 
-    /// Write all of `bytes`, waiting while the peer's window is full (for at most a minute).
+    /// Write all of `bytes`, waiting while the peer's window is full (for at most a minute
+    /// each time). The clock is read only if the write has to wait.
     pub(crate) fn write_all(&self, mut bytes: &[u8]) -> std::io::Result<()> {
         use std::io::ErrorKind;
-        let deadline = Instant::now() + IDLE_TIMEOUT;
         if let Some(session) = &self.tls {
-            return self.write_tls(session, bytes, deadline);
+            return self.write_tls(session, bytes);
         }
         while !bytes.is_empty() {
             match (&self.stream).write(bytes) {
                 Ok(0) => return Err(ErrorKind::WriteZero.into()),
                 Ok(n) => bytes = &bytes[n..],
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    if self.wait(true, Some(deadline)) == Wait::TimedOut {
+                    if self.wait(true, Deadline::After(IDLE_TIMEOUT)) == Wait::TimedOut {
                         return Err(ErrorKind::TimedOut.into());
                     }
                 }
@@ -409,7 +462,7 @@ impl Socket {
         &self,
         session: &Session,
         buffer: &mut [u8],
-        deadline: Option<Instant>,
+        deadline: Deadline,
         stop_at_shutdown: bool,
     ) -> std::io::Result<usize> {
         use std::io::ErrorKind;
@@ -453,7 +506,7 @@ impl Socket {
     }
 
     /// `write_all` through the TLS session.
-    fn write_tls(&self, session: &Session, mut bytes: &[u8], deadline: Instant) -> std::io::Result<()> {
+    fn write_tls(&self, session: &Session, mut bytes: &[u8]) -> std::io::Result<()> {
         use std::io::ErrorKind;
         loop {
             let flushed = {
@@ -470,7 +523,7 @@ impl Socket {
             if flushed && bytes.is_empty() {
                 return Ok(());
             }
-            if !flushed && self.wait(true, Some(deadline)) == Wait::TimedOut {
+            if !flushed && self.wait(true, Deadline::After(IDLE_TIMEOUT)) == Wait::TimedOut {
                 return Err(ErrorKind::TimedOut.into());
             }
         }
@@ -485,54 +538,152 @@ impl Drop for Socket {
     }
 }
 
+/// A range of bytes in the connection's buffer: start and end offsets.
+#[derive(Clone, Copy, Default)]
+struct Span {
+    start: u32,
+    end: u32,
+}
+
+impl Span {
+    fn new(start: usize, end: usize) -> Span {
+        Span { start: start as u32, end: end as u32 }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Header {
+    name: Span,
+    value: Span,
+}
+
+/// Headers kept in the request itself; more go to a `Vec`.
+const INLINE_HEADERS: usize = 32;
+
+/// The methods whose names are handed to compiled code without a copy.
+const METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+
+enum Method {
+    Known(&'static str),
+    Other(Span),
+}
+
+enum Path {
+    /// No `%` escapes: the bytes in the buffer.
+    Raw(Span),
+    Decoded(String),
+}
+
+enum Body {
+    InBuffer(Span),
+    /// A chunked body, decoded.
+    Owned(Vec<u8>),
+}
+
+/// A parsed request: offsets into its connection's buffer, which holds its head and body
+/// unchanged until the response is written (docs/10, milestone 2). Nothing is copied unless the
+/// handler asks for it, and then straight into collected memory.
 pub struct Request {
-    method: String,
+    method: Method,
     /// The path without the query string, percent-decoded.
-    path: String,
-    query: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-    remote: String,
+    path: Path,
+    query: Span,
+    headers: [Header; INLINE_HEADERS],
+    header_count: usize,
+    more_headers: Vec<Header>,
+    body: Body,
     head: bool,
-    /// The whole response, ready to write, once the handler has given it.
-    response: Option<Vec<u8>>,
+    /// Whether the response has been given (`lrt_http_respond`).
+    responded: bool,
+    /// Where the connection's output stood before this request's response.
+    out_start: usize,
+    /// Where this request ends in the buffer.
+    end: usize,
     /// Whether the connection stays open after this request.
     keep_alive: bool,
-    /// The connection the request came on, while the handler runs.
+    /// The connection the request came on. It outlives the request.
     connection: *mut Connection,
     /// The WebSocket id, once the handler has upgraded the connection.
     upgraded: Option<i64>,
 }
 
 impl Request {
+    fn connection(&self) -> &Connection {
+        // SAFETY: the connection outlives its requests.
+        unsafe { &*self.connection }
+    }
+
+    fn bytes(&self, span: Span) -> &[u8] {
+        &self.connection().buffer[span.start as usize..span.end as usize]
+    }
+
+    /// Text from the head, which was checked to be UTF-8 when it was parsed.
+    fn text(&self, span: Span) -> &str {
+        // SAFETY: spans in the head lie within the validated text, at character boundaries
+        // (they start and end at ASCII delimiters or the head's ends).
+        unsafe { std::str::from_utf8_unchecked(self.bytes(span)) }
+    }
+
     pub(crate) fn method(&self) -> &str {
-        &self.method
+        match self.method {
+            Method::Known(name) => name,
+            Method::Other(span) => self.text(span),
+        }
+    }
+
+    fn path(&self) -> &str {
+        match &self.path {
+            Path::Raw(span) => self.text(*span),
+            Path::Decoded(text) => text,
+        }
     }
 
     pub(crate) fn query(&self) -> &str {
-        &self.query
+        self.text(self.query)
     }
 
-    pub(crate) fn remote(&self) -> &str {
-        &self.remote
+    pub(crate) fn remote(&self) -> String {
+        self.connection().peer.to_string()
     }
 
-    pub(crate) fn headers(&self) -> &[(String, String)] {
-        &self.headers
+    fn header_list(&self) -> impl Iterator<Item = &Header> {
+        self.headers[..self.header_count.min(INLINE_HEADERS)].iter().chain(&self.more_headers)
     }
 
-    /// A header's value; `name` is lower-case.
+    /// The headers, names lower-cased, for a WebSocket to keep after the request is gone.
+    pub(crate) fn headers_owned(&self) -> Vec<(String, String)> {
+        self.header_list().map(|h| (self.text(h.name).to_ascii_lowercase(), self.text(h.value).to_string())).collect()
+    }
+
+    /// The first header with this name (case-insensitively).
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+        self.header_list()
+            .find(|h| self.bytes(h.name).eq_ignore_ascii_case(name.as_bytes()))
+            .map(|h| self.text(h.value))
+    }
+
+    fn body(&self) -> &[u8] {
+        match &self.body {
+            Body::InBuffer(span) => self.bytes(*span),
+            Body::Owned(bytes) => bytes,
+        }
     }
 
     /// For a WebSocket upgrade: the connection's socket and the bytes already read past the
-    /// request.
+    /// request. Responses still waiting to be written go first.
     pub(crate) fn take_connection(&mut self) -> Option<(Arc<Socket>, Vec<u8>)> {
-        // SAFETY: `connection` points at the connection serving this request, which outlives
-        // the handler call.
+        // SAFETY: the connection outlives the handler call.
         let connection = unsafe { self.connection.as_mut()? };
-        Some((connection.socket.clone(), std::mem::take(&mut connection.buffer)))
+        if !connection.flush() {
+            return None;
+        }
+        // Only what is left, in a buffer of exactly that size: usually nothing.
+        let leftover = connection.buffer[self.end..].to_vec();
+        // The connection lives as long as the WebSocket (the handler runs it), but needs only
+        // this request's bytes, which the handler may still read.
+        connection.buffer.truncate(self.end);
+        connection.buffer.shrink_to_fit();
+        Some((connection.socket.clone(), leftover))
     }
 
     pub(crate) fn set_upgraded(&mut self, id: i64) {
@@ -552,16 +703,64 @@ enum ReadError {
     Status(u16, &'static str),
 }
 
+/// Responses waiting in the output past this size are written before the next request is read.
+const FLUSH_AT: usize = 16 * 1024;
+
+/// Buffers larger than this are given back once they are empty, so that a connection that once
+/// carried a large request or response does not keep the memory while idle.
+const KEEP_CAPACITY: usize = 64 * 1024;
+
 struct Connection {
     socket: Arc<Socket>,
+    peer: std::net::SocketAddr,
+    /// Bytes read from the socket. `start` is the first byte not yet consumed by a request.
     buffer: Vec<u8>,
+    start: usize,
+    /// How far the search for the end of the next request's head has got.
+    scanned: usize,
+    /// Responses not yet written. They are written when the connection is about to wait for
+    /// more input, so pipelined requests' responses share one `send`.
+    out: Vec<u8>,
+}
+
+unsafe extern "C" {
+    fn memchr(s: *const std::ffi::c_void, c: i32, n: usize) -> *const std::ffi::c_void;
+}
+
+/// The position of the first `\n` in `bytes`.
+fn find_newline(bytes: &[u8]) -> Option<usize> {
+    // SAFETY: searching within the slice.
+    let at = unsafe { memchr(bytes.as_ptr().cast(), i32::from(b'\n'), bytes.len()) };
+    (!at.is_null()).then(|| at as usize - bytes.as_ptr() as usize)
+}
+
+/// Whether `haystack` contains `needle` (lower-case ASCII), ignoring ASCII case.
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    haystack.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 impl Connection {
-    /// Read more bytes into the buffer. With `idle`, waits for the next request, noticing a
-    /// shutdown; otherwise the request must arrive within the request timeout.
-    fn fill(&mut self, idle: bool, started: Instant) -> Result<(), ReadError> {
-        let deadline = started + if idle { IDLE_TIMEOUT } else { REQUEST_TIMEOUT };
+    /// Write the responses waiting in the output. False if the connection is broken.
+    fn flush(&mut self) -> bool {
+        if self.out.is_empty() {
+            return true;
+        }
+        let written = self.socket.write_all(&self.out).is_ok();
+        self.out.clear();
+        if self.out.capacity() > KEEP_CAPACITY {
+            self.out = Vec::new();
+        }
+        written
+    }
+
+    /// Read more bytes into the buffer. With `idle`, waits up to a minute for the next request
+    /// and notices a shutdown. Otherwise this is the middle of a request, which must all arrive
+    /// by `request_deadline`, set the first time it is needed. Responses waiting in the output
+    /// are written first: the peer may be waiting for them.
+    fn fill(&mut self, idle: bool, request_deadline: &mut Option<u64>) -> Result<(), ReadError> {
+        if !self.flush() {
+            return Err(ReadError::Closed);
+        }
         // Read straight into the buffer's spare room, which starts small: an idle connection
         // should cost little memory.
         if self.buffer.capacity() - self.buffer.len() < 1024 {
@@ -571,7 +770,12 @@ impl Connection {
         // SAFETY: the bytes are only read after `read` has written them, and `set_len` covers
         // only those.
         let room = unsafe { std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, spare.len()) };
-        match self.socket.read(room, Some(deadline), idle) {
+        let deadline = if idle {
+            Deadline::After(IDLE_TIMEOUT)
+        } else {
+            Deadline::Coarse(*request_deadline.get_or_insert_with(|| poll::deadline_after(REQUEST_TIMEOUT)))
+        };
+        match self.socket.read(room, deadline, idle) {
             Ok(0) => Err(ReadError::Closed),
             Ok(n) => {
                 unsafe { self.buffer.set_len(self.buffer.len() + n) };
@@ -584,24 +788,67 @@ impl Connection {
         }
     }
 
-    /// The next request, or why there is none. Whether to keep the connection open is returned
-    /// with it.
-    fn read_request(&mut self, remote: &str) -> Result<(Request, bool), ReadError> {
-        let started = Instant::now();
+    /// Drop the bytes of requests already served. Only between requests: a live request's
+    /// spans point into the buffer.
+    fn compact(&mut self) {
+        if self.start == 0 {
+            return;
+        }
+        if self.start >= self.buffer.len() {
+            self.buffer.clear();
+            if self.buffer.capacity() > KEEP_CAPACITY {
+                self.buffer = Vec::new();
+            }
+        } else {
+            self.buffer.copy_within(self.start.., 0);
+            self.buffer.truncate(self.buffer.len() - self.start);
+        }
+        self.scanned = self.scanned.saturating_sub(self.start);
+        self.start = 0;
+    }
+
+    /// The end of the next request's head (the offset of its blank line's `\r\n\r\n`), if it
+    /// has all arrived. Resumes where the last search stopped.
+    fn find_head_end(&mut self) -> Option<usize> {
+        let mut at = self.scanned.max(self.start + 3);
+        while at < self.buffer.len() {
+            let Some(found) = find_newline(&self.buffer[at..]) else { break };
+            let newline = at + found;
+            if &self.buffer[newline - 3..=newline] == b"\r\n\r\n" {
+                return Some(newline - 3);
+            }
+            at = newline + 1;
+        }
+        self.scanned = self.buffer.len();
+        None
+    }
+
+    /// The next request, or why there is none. Never inlined: its locals would otherwise stay
+    /// in `serve_connection`'s frame, which is on the stack for the connection's whole life.
+    #[inline(never)]
+    fn read_request(&mut self) -> Result<Request, ReadError> {
+        self.compact();
+        // Idle for at most a minute; then the whole request within 30 seconds of the first
+        // wait for more of it. No clock is read unless the connection has to wait.
+        let mut deadline = None;
         let header_end = loop {
-            if let Some(at) = find(&self.buffer, b"\r\n\r\n") {
+            if let Some(at) = self.find_head_end() {
                 break at;
             }
             if self.buffer.len() > MAX_HEADER {
                 return Err(ReadError::Status(431, "Request Header Fields Too Large"));
             }
             let idle = self.buffer.is_empty();
-            self.fill(idle, started)?;
+            self.fill(idle, &mut deadline)?;
         };
-        let head =
-            std::str::from_utf8(&self.buffer[..header_end]).map_err(|_| ReadError::Status(400, "Bad Request"))?;
-        let mut lines = head.split("\r\n");
-        let request_line = lines.next().unwrap_or_default();
+        let head = std::str::from_utf8(&self.buffer[self.start..header_end])
+            .map_err(|_| ReadError::Status(400, "Bad Request"))?;
+        let base = self.start;
+        let span_of = |part: &str| {
+            let at = part.as_ptr() as usize - head.as_ptr() as usize + base;
+            Span::new(at, at + part.len())
+        };
+        let (request_line, header_text) = head.split_once("\r\n").unwrap_or((head, ""));
         let mut parts = request_line.split(' ');
         let (Some(method), Some(target), Some(version), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
@@ -616,25 +863,46 @@ impl Connection {
             "HTTP/1.0" => true,
             _ => return Err(ReadError::Status(505, "HTTP Version Not Supported")),
         };
-        let mut headers = Vec::new();
-        for line in lines {
+        let mut headers = [Header::default(); INLINE_HEADERS];
+        let mut more_headers = Vec::new();
+        let mut header_count = 0;
+        let (mut connection, mut transfer_encoding, mut content_length, mut expect) = (None, None, None, None);
+        for line in header_text.split("\r\n").filter(|_| !header_text.is_empty()) {
             let Some((name, value)) = line.split_once(':') else {
                 return Err(ReadError::Status(400, "Bad Request"));
             };
             if name.is_empty() || name.ends_with(' ') || name.ends_with('\t') {
                 return Err(ReadError::Status(400, "Bad Request"));
             }
-            headers.push((name.to_ascii_lowercase(), value.trim().to_string()));
+            let value = value.trim();
+            // The first of each, as a lookup by name would find.
+            let slot = match name.len() {
+                10 if name.eq_ignore_ascii_case("connection") => Some(&mut connection),
+                17 if name.eq_ignore_ascii_case("transfer-encoding") => Some(&mut transfer_encoding),
+                14 if name.eq_ignore_ascii_case("content-length") => Some(&mut content_length),
+                6 if name.eq_ignore_ascii_case("expect") => Some(&mut expect),
+                _ => None,
+            };
+            if let Some(slot) = slot
+                && slot.is_none()
+            {
+                *slot = Some(value);
+            }
+            let header = Header { name: span_of(name), value: span_of(value) };
+            if header_count < INLINE_HEADERS {
+                headers[header_count] = header;
+            } else {
+                more_headers.push(header);
+            }
+            header_count += 1;
         }
-        let header = |name: &str| headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str());
-        let connection = header("connection").map(str::to_ascii_lowercase);
-        let keep_alive = match connection.as_deref() {
-            Some(c) if c.contains("close") => false,
-            Some(c) if c.contains("keep-alive") => true,
+        let keep_alive = match connection {
+            Some(c) if contains_ignore_case(c, "close") => false,
+            Some(c) if contains_ignore_case(c, "keep-alive") => true,
             _ => !http10,
         };
-        let chunked = header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
-        let length = match header("content-length") {
+        let chunked = transfer_encoding.is_some_and(|v| contains_ignore_case(v, "chunked"));
+        let length = match content_length {
             Some(text) if !chunked => Some(text.parse::<usize>().map_err(|_| ReadError::Status(400, "Bad Request"))?),
             _ => None,
         };
@@ -642,82 +910,100 @@ impl Connection {
         if length.is_some_and(|n| n > max_body) {
             return Err(ReadError::Status(413, "Content Too Large"));
         }
-        let expects_continue = header("expect").is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
-        let (method, target) = (method.to_string(), target.to_string());
-        self.buffer.drain(..header_end + 4);
+        let expects_continue = expect.is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
+        let method = match METHODS.iter().find(|m| **m == method) {
+            Some(known) => Method::Known(known),
+            None => Method::Other(span_of(method)),
+        };
+        let (raw_path, query) = target.split_once('?').unwrap_or((target, ""));
+        let path = if raw_path.contains('%') {
+            Path::Decoded(percent_decode(raw_path, false).unwrap_or_else(|| raw_path.to_string()))
+        } else {
+            Path::Raw(span_of(raw_path))
+        };
+        let query = if query.is_empty() { Span::default() } else { span_of(query) };
+        let body_start = header_end + 4;
         if expects_continue && (chunked || length.is_some_and(|n| n > 0)) {
+            if !self.flush() {
+                return Err(ReadError::Closed);
+            }
             let _ = self.socket.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
         }
-        let body = if chunked {
-            self.read_chunked(max_body, started)?
+        // Reading the body may grow (and so move) the buffer; the spans above are offsets.
+        let (body, end) = if chunked {
+            let (body, end) = self.read_chunked(body_start, max_body, &mut deadline)?;
+            (Body::Owned(body), end)
         } else {
             let length = length.unwrap_or(0);
-            while self.buffer.len() < length {
-                self.fill(false, started)?;
+            while self.buffer.len() < body_start + length {
+                self.fill(false, &mut deadline)?;
             }
-            self.buffer.drain(..length).collect()
+            (Body::InBuffer(Span::new(body_start, body_start + length)), body_start + length)
         };
-        let (raw_path, query) = target.split_once('?').unwrap_or((&target, ""));
-        let path = percent_decode(raw_path, false).unwrap_or_else(|| raw_path.to_string());
-        let request = Request {
-            head: method == "HEAD",
+        Ok(Request {
+            head: matches!(method, Method::Known("HEAD")),
             method,
             path,
-            query: query.to_string(),
+            query,
             headers,
+            header_count,
+            more_headers,
             body,
-            remote: remote.to_string(),
-            response: None,
-            keep_alive: false,
-            connection: std::ptr::null_mut(),
+            responded: false,
+            out_start: self.out.len(),
+            end,
+            keep_alive,
+            connection: self,
             upgraded: None,
-        };
-        Ok((request, keep_alive))
+        })
     }
 
-    fn read_chunked(&mut self, max_body: usize, started: Instant) -> Result<Vec<u8>, ReadError> {
+    /// The line ending at the next `\r\n` from `at`, waiting for it; returns its end.
+    fn line_end(&mut self, at: usize, deadline: &mut Option<u64>) -> Result<usize, ReadError> {
+        loop {
+            if let Some(found) = self.buffer.get(at..).and_then(|rest| rest.windows(2).position(|w| w == b"\r\n")) {
+                return Ok(at + found);
+            }
+            self.fill(false, deadline)?;
+        }
+    }
+
+    /// A chunked body starting at `at`: the decoded bytes, and where the request ends.
+    fn read_chunked(
+        &mut self,
+        mut at: usize,
+        max_body: usize,
+        deadline: &mut Option<u64>,
+    ) -> Result<(Vec<u8>, usize), ReadError> {
         let mut body = Vec::new();
         loop {
-            let line_end = loop {
-                if let Some(at) = find(&self.buffer, b"\r\n") {
-                    break at;
-                }
-                self.fill(false, started)?;
-            };
+            let line_end = self.line_end(at, deadline)?;
             let size_text =
-                std::str::from_utf8(&self.buffer[..line_end]).map_err(|_| ReadError::Status(400, "Bad Request"))?;
+                std::str::from_utf8(&self.buffer[at..line_end]).map_err(|_| ReadError::Status(400, "Bad Request"))?;
             let size_text = size_text.split(';').next().unwrap_or_default().trim();
             let size = usize::from_str_radix(size_text, 16).map_err(|_| ReadError::Status(400, "Bad Request"))?;
-            self.buffer.drain(..line_end + 2);
+            at = line_end + 2;
             if size == 0 {
                 // Trailers, ending with an empty line.
                 loop {
-                    let end = loop {
-                        if let Some(at) = find(&self.buffer, b"\r\n") {
-                            break at;
-                        }
-                        self.fill(false, started)?;
-                    };
-                    self.buffer.drain(..end + 2);
-                    if end == 0 {
-                        return Ok(body);
+                    let end = self.line_end(at, deadline)?;
+                    let empty = end == at;
+                    at = end + 2;
+                    if empty {
+                        return Ok((body, at));
                     }
                 }
             }
             if body.len() + size > max_body {
                 return Err(ReadError::Status(413, "Content Too Large"));
             }
-            while self.buffer.len() < size + 2 {
-                self.fill(false, started)?;
+            while self.buffer.len() < at + size + 2 {
+                self.fill(false, deadline)?;
             }
-            body.extend_from_slice(&self.buffer[..size]);
-            self.buffer.drain(..size + 2);
+            body.extend_from_slice(&self.buffer[at..at + size]);
+            at += size + 2;
         }
     }
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 fn hex(b: u8) -> Option<u8> {
@@ -784,16 +1070,19 @@ fn reason(status: i64) -> &'static str {
     }
 }
 
-/// An HTTP date, `Wed, 18 Nov 2026 12:00:00 GMT`, cached for the current second.
-fn http_date() -> String {
-    static CACHE: Mutex<(u64, String)> = Mutex::new((0, String::new()));
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
-    if cache.0 != now || cache.1.is_empty() {
-        cache.0 = now;
-        cache.1 = format_http_date(now);
+/// Append an HTTP date, `Wed, 18 Nov 2026 12:00:00 GMT`, formatted once a second per thread.
+fn push_http_date(out: &mut Vec<u8>) {
+    thread_local! {
+        static CACHE: std::cell::Cell<(u64, [u8; 29])> = const { std::cell::Cell::new((u64::MAX, [0; 29])) };
     }
-    cache.1.clone()
+    let now = poll::coarse_unix_seconds();
+    // Read and written within this call: a task can move to another thread only when it parks.
+    let (second, mut text) = CACHE.get();
+    if second != now {
+        text.copy_from_slice(format_http_date(now).as_bytes());
+        CACHE.set((now, text));
+    }
+    out.extend_from_slice(&text);
 }
 
 /// Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
@@ -836,61 +1125,75 @@ fn write_simple(socket: &Socket, status: u16, text: &str) {
     let _ = socket.write_all(response.as_bytes());
 }
 
+/// A server TLS session for a new connection, if the listener serves HTTPS. Never inlined:
+/// with LTO, rustls's set-up was inlined into `serve_connection`, whose frame stays on every
+/// connection's stack, and made it 5.9 KiB instead of 3.3 (docs/08, D88).
+#[inline(never)]
+fn start_tls(tls: Option<Arc<rustls::ServerConfig>>) -> Result<Option<Session>, ()> {
+    tls.map(|config| Session::server(&config)).transpose().map_err(|_| ())
+}
+
 fn serve_connection(
     stream: TcpStream,
     tls: Option<Arc<rustls::ServerConfig>>,
-    remote: String,
+    peer: std::net::SocketAddr,
     entry: Entry,
     roots: *mut *mut u8,
 ) {
     // The TLS handshake happens as the first request is read.
-    let session = match tls.map(|config| Session::server(&config)).transpose() {
-        Ok(session) => session,
-        Err(_) => return,
+    let Ok(session) = start_tls(tls) else { return };
+    let mut connection = Connection {
+        socket: Arc::new(Socket::with_tls(stream, session)),
+        peer,
+        buffer: Vec::new(),
+        start: 0,
+        scanned: 0,
+        out: Vec::new(),
     };
-    let mut connection = Connection { socket: Arc::new(Socket::with_tls(stream, session)), buffer: Vec::new() };
     loop {
-        let (mut request, keep_alive) = match connection.read_request(&remote) {
+        let mut request = match connection.read_request() {
             Ok(request) => request,
             Err(ReadError::Closed) => break,
             Err(ReadError::Status(status, text)) => {
-                write_simple(&connection.socket, status, text);
+                if connection.flush() {
+                    write_simple(&connection.socket, status, text);
+                }
                 break;
             }
         };
         // SAFETY: `roots` holds the function value for the server's lifetime.
         let (code, env) = unsafe { (roots.read(), roots.add(1).read()) };
-        request.connection = &mut connection;
-        request.keep_alive = keep_alive && !SHUTDOWN.load(Ordering::SeqCst);
+        request.keep_alive = request.keep_alive && !SHUTDOWN.load(Ordering::SeqCst);
         let handle = &mut request as *mut Request as i64;
         // A panicking handler ends only this request, with a 500; the panic was reported
         // where it happened. Mutexes it held are released.
         let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(code, env, handle)));
-        request.connection = std::ptr::null_mut();
-        let panicked = handled.is_err();
-        if panicked {
+        if handled.is_err() {
             if let Some(me) = fiber::current() {
                 fiber::release_held(me);
             }
-            request.response = None;
+            request.responded = false;
         }
         if let Some(id) = request.upgraded {
             // The handler has run the WebSocket to its end; the connection is finished.
             crate::ws::forget(id);
             break;
         }
-        let (out, keep_alive) = match request.response.take() {
-            Some(out) => (out, request.keep_alive),
-            None => {
-                let body = b"internal server error\n";
-                (response_bytes(500, "text/plain; charset=utf-8", "", body, false, request.head), false)
-            }
-        };
-        if connection.socket.write_all(&out).is_err() || !keep_alive {
+        if !request.responded {
+            connection.out.truncate(request.out_start);
+            let body = b"internal server error\n";
+            write_response(&mut connection.out, 500, "text/plain; charset=utf-8", "", body, false, request.head);
+            request.keep_alive = false;
+        }
+        connection.start = request.end;
+        let keep_alive = request.keep_alive;
+        drop(request);
+        if !keep_alive {
+            connection.flush();
             break;
         }
-        if connection.buffer.is_empty() && connection.buffer.capacity() > 64 * 1024 {
-            connection.buffer = Vec::new();
+        if connection.out.len() >= FLUSH_AT && !connection.flush() {
+            break;
         }
     }
     connection.socket.shutdown();
@@ -915,21 +1218,25 @@ pub(crate) fn optional(value: Option<&str>) -> Str {
 /// `handle` is a live request.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_http_req_method(handle: i64) -> Str {
-    Str::from_bytes(unsafe { request(handle) }.method.as_bytes())
+    match unsafe { request(handle) }.method {
+        // A static string, like the program's own string constants: nothing to copy.
+        Method::Known(name) => Str { ptr: name.as_ptr(), len: name.len() as i64 },
+        Method::Other(_) => Str::from_bytes(unsafe { request(handle) }.method().as_bytes()),
+    }
 }
 
 /// # Safety
 /// `handle` is a live request.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_http_req_path(handle: i64) -> Str {
-    Str::from_bytes(unsafe { request(handle) }.path.as_bytes())
+    Str::from_bytes(unsafe { request(handle) }.path().as_bytes())
 }
 
 /// # Safety
 /// `handle` is a live request.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_http_req_remote(handle: i64) -> Str {
-    Str::from_bytes(unsafe { request(handle) }.remote.as_bytes())
+    Str::from_bytes(unsafe { request(handle) }.remote().as_bytes())
 }
 
 /// The first query parameter with this name, decoded, or `None`.
@@ -939,7 +1246,7 @@ pub unsafe extern "C-unwind" fn lrt_http_req_remote(handle: i64) -> Str {
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_http_req_query(handle: i64, ptr: *const u8, len: i64) -> Str {
     let wanted = unsafe { Str::from_raw(ptr, len) };
-    optional(query_value(&unsafe { request(handle) }.query, wanted).as_deref())
+    optional(query_value(unsafe { request(handle) }.query(), wanted).as_deref())
 }
 
 /// The first parameter called `wanted` in a query string, decoded.
@@ -959,9 +1266,8 @@ pub(crate) fn query_value(query: &str, wanted: &str) -> Option<String> {
 /// `handle` is a live request; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_http_req_header(handle: i64, ptr: *const u8, len: i64) -> Str {
-    let wanted = unsafe { Str::from_raw(ptr, len) }.to_ascii_lowercase();
-    let request = unsafe { request(handle) };
-    optional(request.headers.iter().find(|(n, _)| *n == wanted).map(|(_, v)| v.as_str()))
+    let wanted = unsafe { Str::from_raw(ptr, len) };
+    optional(unsafe { request(handle) }.header(wanted))
 }
 
 /// The body as text; `None` if it is not valid UTF-8.
@@ -970,11 +1276,12 @@ pub unsafe extern "C-unwind" fn lrt_http_req_header(handle: i64, ptr: *const u8,
 /// `handle` is a live request.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_http_req_body(handle: i64) -> Str {
-    optional(std::str::from_utf8(&unsafe { request(handle) }.body).ok())
+    optional(std::str::from_utf8(unsafe { request(handle) }.body()).ok())
 }
 
 /// Leave the response: its status, content type (none if empty), other header lines
-/// (`Name: value\r\n` each) and body.
+/// (`Name: value\r\n` each) and body. It is written into the connection's output at once,
+/// while the body is reachable, so the body is copied once. A second call replaces the first.
 ///
 /// # Safety
 /// `handle` is a live request; the strings are UTF-8.
@@ -994,40 +1301,69 @@ pub unsafe extern "C-unwind" fn lrt_http_respond(
     let headers = unsafe { Str::from_raw(headers, headers_len) };
     let body = unsafe { Str::from_raw(body, body_len) }.as_bytes();
     let request = unsafe { request(handle) };
-    // The response is serialised here, while the body is still reachable, so the body is
-    // copied once, straight into what is written.
-    request.response = Some(response_bytes(status, content_type, headers, body, request.keep_alive, request.head));
+    // SAFETY: the connection outlives the handler call.
+    let out = unsafe { &mut (*request.connection).out };
+    out.truncate(request.out_start);
+    write_response(out, status, content_type, headers, body, request.keep_alive, request.head);
+    request.responded = true;
 }
 
-/// A complete HTTP/1.1 response: status line, `Content-Type`, the handler's header lines, the
-/// automatic headers, and the body (left out for `HEAD`, 204 and 304).
-fn response_bytes(
+/// Append a decimal number.
+fn push_decimal(out: &mut Vec<u8>, mut value: u64) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&digits[at..]);
+}
+
+/// Append a complete HTTP/1.1 response: status line, `Content-Type`, the handler's header
+/// lines, the automatic headers, and the body (left out for `HEAD`, 204 and 304).
+fn write_response(
+    out: &mut Vec<u8>,
     status: i64,
     content_type: &str,
     headers: &str,
     body: &[u8],
     keep_alive: bool,
     head: bool,
-) -> Vec<u8> {
-    use std::io::Write as _;
+) {
     let has_body = status != 204 && status != 304;
-    let mut out = Vec::with_capacity(192 + content_type.len() + headers.len() + if head { 0 } else { body.len() });
-    let _ = write!(out, "HTTP/1.1 {status} {}\r\n", reason(status));
+    out.reserve(192 + content_type.len() + headers.len() + if head { 0 } else { body.len() });
+    out.extend_from_slice(b"HTTP/1.1 ");
+    if status < 0 {
+        out.push(b'-');
+    }
+    push_decimal(out, status.unsigned_abs());
+    out.push(b' ');
+    out.extend_from_slice(reason(status).as_bytes());
+    out.extend_from_slice(b"\r\n");
     if !content_type.is_empty() {
         out.extend_from_slice(b"Content-Type: ");
         out.extend_from_slice(content_type.as_bytes());
         out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(headers.as_bytes());
-    let _ = write!(out, "Date: {}\r\nServer: {}\r\n", http_date(), lang_names::CLI_NAME);
+    out.extend_from_slice(b"Date: ");
+    push_http_date(out);
+    out.extend_from_slice(b"\r\nServer: ");
+    out.extend_from_slice(lang_names::CLI_NAME.as_bytes());
+    out.extend_from_slice(b"\r\n");
     if has_body {
-        let _ = write!(out, "Content-Length: {}\r\n", body.len());
+        out.extend_from_slice(b"Content-Length: ");
+        push_decimal(out, body.len() as u64);
+        out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(if keep_alive { b"Connection: keep-alive\r\n\r\n" } else { b"Connection: close\r\n\r\n" });
     if !head && has_body {
         out.extend_from_slice(body);
     }
-    out
 }
 
 // ---- logging ----------------------------------------------------------------------------

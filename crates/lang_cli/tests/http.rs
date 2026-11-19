@@ -98,6 +98,51 @@ fn run_script(program: &str) {
     assert_eq!(read_response(&mut reader, false).body, "ok");
     assert_eq!(read_response(&mut reader, false).status, 200);
 
+    // The connection path of docs/10, milestone 2: requests parsed in place, responses held
+    // until the connection next waits, and one read per request.
+    // A head and a body that arrive in pieces, with pauses between them.
+    stream.write_all(b"GET /health HTTP/1.1\r\nHo").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    stream.write_all(b"st: t\r\n\r\n").unwrap();
+    assert_eq!(read_response(&mut reader, false).body, "ok", "{program}: split head");
+    stream.write_all(b"POST /api/todos HTTP/1.1\r\nHost: t\r\nContent-Length: 18\r\n\r\n{\"titl").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    stream.write_all(b"e\": \"split\"}").unwrap();
+    assert_eq!(read_response(&mut reader, false).status, 201, "{program}: split body");
+    // Header names in any case, more headers than the request keeps inline, and an escaped path.
+    let mut many = String::from("GET /echo/a%20b/c HTTP/1.1\r\nHost: t\r\n");
+    for i in 0..40 {
+        many.push_str(&format!("X-Filler-{i}: {i}\r\n"));
+    }
+    many.push_str("uSeR-aGeNt: late\r\n\r\n");
+    stream.write_all(many.as_bytes()).unwrap();
+    assert_eq!(read_response(&mut reader, false).body, "GET a b/c from late", "{program}: many headers");
+    // Enough pipelined requests that their responses are written in more than one batch, all
+    // in order.
+    let mut burst = String::new();
+    for i in 0..300 {
+        burst.push_str(&format!("GET /echo/{i} HTTP/1.1\r\nHost: t\r\nUser-Agent: u\r\n\r\n"));
+    }
+    stream.write_all(burst.as_bytes()).unwrap();
+    for i in 0..300 {
+        assert_eq!(read_response(&mut reader, false).body, format!("GET {i} from u"), "{program}: burst {i}");
+    }
+    // A panic in the second of two pipelined requests: the first is answered, then the 500,
+    // and the connection closes. (A third request left unread would make the close a reset.)
+    let (mut piped, mut piped_reader) = connect(server.port);
+    piped.write_all(b"GET /health HTTP/1.1\r\nHost: t\r\n\r\nGET /boom HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+    assert_eq!(read_response(&mut piped_reader, false).body, "ok", "{program}: before the panic");
+    let failed = read_response(&mut piped_reader, false);
+    assert_eq!((failed.status, failed.header("connection")), (500, Some("close")), "{program}: piped panic");
+    let mut rest = Vec::new();
+    std::io::Read::read_to_end(&mut piped_reader, &mut rest).unwrap();
+    assert!(rest.is_empty(), "{program}: nothing after the 500");
+    // A client that sends a request and closes its side at once still gets the answer.
+    let (mut brief, mut brief_reader) = connect(server.port);
+    brief.write_all(b"GET /health HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+    brief.shutdown(std::net::Shutdown::Write).unwrap();
+    assert_eq!(read_response(&mut brief_reader, false).body, "ok", "{program}: half-closed client");
+
     // `Connection: close` is honoured, and malformed requests get a 400.
     stream.write_all(b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n").unwrap();
     let closing = read_response(&mut reader, false);

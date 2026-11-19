@@ -308,6 +308,8 @@ Record as D87.
 
 ## Milestone 2: The HTTP connection path
 
+**Done 2026-11-19 (D88).** One `recv` per request (none failing), two coarse clock reads, half a Rust allocation; on one CPU `/plaintext` +26%, `/users/42` +25%, `POST /orders` +17%. Not met: browser headers run at 85% of the bare rate, not 90%. Idle WebSockets: LTO (milestone 1) added a stack page per connection, 14.8 to 18.8 KiB; the frame responsible was not found within the time allowed.
+
 ### 2.1 One `recv` per request
 
 **Now.** `Direction::ready()` (`poll.rs:142`) sets the `ready` flag *and* wakes the waiter. The woken task returns from `IoSource::wait` (`poll.rs:218`) with the flag still set. The sequence for each request is then:

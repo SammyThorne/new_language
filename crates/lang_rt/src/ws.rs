@@ -461,8 +461,8 @@ pub unsafe extern "C-unwind" fn lrt_ws_accept(handle: i64) -> i64 {
             deadline: None,
         }),
         query: request.query().to_string(),
-        headers: request.headers().to_vec(),
-        remote: request.remote().to_string(),
+        headers: request.headers_owned(),
+        remote: request.remote(),
     };
     lock(&SOCKETS).insert(id, Arc::new(socket));
     request.set_upgraded(id);

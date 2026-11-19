@@ -726,6 +726,48 @@ In each row the ranges of the two sides do not overlap, except the last. Of the 
 - **Matching fields from the expected position** (plan item 1.5.6). The comparison chain did not show in the profile of `POST /orders`, whose target was met without it.
 - **`binary_trees` reads 3% to 5% slower** in A/B. It does not use any code this milestone changed, and its generated IR is identical. LTO is not the cause either: with and without it, from the same source, the difference was 0.4%. The program's `make` and `check` functions moved 16 bytes, from offset 32 to offset 48 within a 64-byte cache line, because the runtime linked before them changed size. This is the layout effect the handoff describes, not a change in work. Aligning hot generated functions is noted for milestone 4.
 
+### D88. One read, two coarse clock reads, and no copies per request (final plan, milestone 2)
+
+Milestone 2 of the [final optimisation plan](10-final-optimization-plan.md): the HTTP connection path.
+
+**What was done.**
+- **The readiness protocol** (`poll.rs`). An edge used to both set a source's `ready` flag and wake its waiter, so the woken task's next wait returned at once, and every request cost a `recv` that found nothing. Now an edge wakes the waiter if there is one and otherwise sets the flag, decided under the waiter's mutex on both sides. Timeouts are reported by the deadline sweep through a `timed_out` flag, so a wait reads no clock.
+- **No read of a drained socket** (`Socket::read`). After a read returns less than it asked for, the socket was empty, and with edge-triggered polling any later bytes produce a new edge; the next read waits for it first. Plain sockets only (not TLS), and never after the end of the stream or a full buffer.
+- **The clock.** I/O deadlines are on `CLOCK_MONOTONIC_COARSE` (2 ns against 20 ns), computed only when a task is about to wait. The `Date` header is formatted once a second per thread, from the coarse real-time clock, instead of being cloned under a global mutex.
+- **Requests parsed in place.** The request is offsets into the connection's buffer: a read cursor instead of `drain`, the end of the head found with `memchr` and resumed where the last search stopped, headers kept as ranges (32 inline), the four the server needs recognised in the same pass, the method a static string, the path decoded only if it has a `%`, the remote address formatted only when asked for, and the body a range. The accessors copy once, straight into collected memory; `lrt_http_req_method` copies nothing.
+- **Responses into a reused buffer.** `lrt_http_respond` writes the status line (from a table), headers and body into the connection's output buffer, which is sent when the connection is about to wait for more input or holds 16 KiB. Pipelined requests' responses share a `send`.
+- **Tests** (`lang_cli/tests/http.rs`): a head and a body arriving in pieces, 40 headers in mixed case, an escaped path, 300 pipelined requests answered in order across several writes, a panic in the second of two pipelined requests, and a client that closes its side after sending.
+
+**Counts per request** (`bench/http/counts.py`, 256 connections):
+
+| | Before | After |
+|---|---|---|
+| `recv` (of which found nothing) | 3.0 (2.0) | 1.0 (0) |
+| `clock_gettime` | 5.0, precise | 2.0, coarse |
+| Rust `malloc`, `/plaintext` | 9.4 | 0.5 |
+| Rust `malloc`, `/plaintext` with a dozen browser headers | 36.1 | 0.6 |
+| Rust `malloc`, `POST /orders` | 14.1 | 0.2 |
+
+**Timings**, interleaved A/B on one CPU with 64 connections, against milestone 1:
+
+| Endpoint | Before | After | Change |
+|---|---|---|---|
+| `/plaintext` | 417,600 req/s (2.39 µs) | 526,400 req/s (1.90 µs) | +26% |
+| `/json` | 414,700 | 525,700 | +27% |
+| `/users/42` | 337,000 | 419,800 | +25% |
+| `POST /orders` | 294,900 | 343,700 | +17% |
+| `/items` | 173,800 | 186,400 | +7% |
+| `/plaintext`, browser headers | 306,100 | 445,500 | +46% |
+| `/users/42`, browser headers | 267,400 | 359,700 | +35% |
+
+**On six CPUs with 256 connections** (`bench/ab.py --server`), `POST /orders` gained 16% (845,000 to 977,000 requests a second) and `/users/42` 6%, while `/plaintext`, `/json` and `/items` stayed level (1.10 million, 1.08 million, 340,000). The server is not the limit there: it kept 4.8 to 5.1 of its six CPUs busy before and after, and its CPU time per request fell 5% to 7% (`/plaintext`: 4.66 to 4.41 µs, kernel time included). The load generator and the kernel's loopback work on the other six CPUs set those rates. The one-CPU figures above are the measure of the server.
+
+**Not met: browser headers within 10% of the bare rate.** With a dozen headers (about 600 bytes), `/plaintext` runs at 85% of its bare rate (445,500 against 526,400). The parser no longer allocates per header, so what is left is the kernel copying the larger request and one pass over its bytes (UTF-8 check, line search, header split). Before this milestone it was 73%.
+
+**Idle WebSockets** (`bench/ws_idle/`, 50,000 connections): 19.6 KiB each with milestone 1's runtime, 18.8 KiB now. The handoff's 15.5 KiB was measured before milestone 1. **LTO is what added the 4 KiB:** the same source built without LTO measures 14.8 KiB, one stack page less per parked connection. Two frames on that stack were found inflated by inlining and are now kept out of line, which shrank the serving closure's frame from 5.9 to 3.3 KiB: rustls's session set-up (`start_tls`) and `read_request`. Neither moved the measurement, so the extra page is deeper, between the handler and the park; the plan's half-day bound for this item ran out there. LTO stays: it is worth 2% to 6% of speed, against 4 KiB per idle WebSocket (about 1 GB more for 250,000 idle connections). Finding the frame is noted for milestone 4.
+
+**Not done.** `writev` for large bodies (optional in the plan): no benchmark needs it. A single atomic state word in place of the waiter's mutex: `IoSource::wait` no longer shows in profiles.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |
