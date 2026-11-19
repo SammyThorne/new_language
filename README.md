@@ -292,6 +292,7 @@ The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real socke
 | [docs/09-performance-plan.md](docs/09-performance-plan.md) | Where the time goes today, and the phased plan to close the gaps to Go |
 | [bench/README.md](bench/README.md) | Benchmarks against Go and CPython |
 | [docs/web-performance.md](docs/web-performance.md) | What a web service can do: throughput, latency, CPU per request, memory |
+| [docs/optimization-handoff.md](docs/optimization-handoff.md) | State of the performance work and open leads, for planning the next round |
 | [editors/README.md](editors/README.md) | Editor support and the language server |
 
 The name "Weby" and the `.wb` extension may still change. The name is kept out of crate names and runtime symbols and lives in one small crate of constants, so it can be changed later with a short checklist ([docs/03-compiler-architecture.md](docs/03-compiler-architecture.md#renaming-the-language)).
