@@ -1,0 +1,96 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Weby",
+  "scopeName": "source.weby",
+  "fileTypes": ["wb"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#docstring" },
+    { "include": "#fstring" },
+    { "include": "#string" },
+    { "include": "#annotation" },
+    { "include": "#declaration" },
+    { "include": "#keyword" },
+    { "include": "#constant" },
+    { "include": "#number" },
+    { "include": "#type" },
+    { "include": "#call" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": { "match": "#.*$", "name": "comment.line.number-sign.weby" },
+    "docstring": {
+      "begin": "(\"\"\"|''')",
+      "end": "\\1",
+      "name": "string.quoted.docstring.weby",
+      "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.weby" }]
+    },
+    "fstring": {
+      "begin": "\\b[fF](\"|')",
+      "end": "\\1",
+      "name": "string.interpolated.weby",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.weby" },
+        { "match": "\\{\\{|\\}\\}", "name": "constant.character.escape.weby" },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "name": "meta.interpolation.weby",
+          "patterns": [{ "include": "$self" }]
+        }
+      ]
+    },
+    "string": {
+      "begin": "(\"|')",
+      "end": "\\1",
+      "name": "string.quoted.weby",
+      "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.weby" }]
+    },
+    "annotation": {
+      "match": "^\\s*(@[A-Za-z_][A-Za-z0-9_.]*)",
+      "captures": { "1": { "name": "entity.name.function.decorator.weby" } }
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "match": "\\b(def)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "storage.type.function.weby" }, "2": { "name": "entity.name.function.weby" } }
+        },
+        {
+          "match": "\\b(struct|enum|trait|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "storage.type.weby" }, "2": { "name": "entity.name.type.weby" } }
+        },
+        {
+          "match": "\\b(impl)\\b",
+          "name": "storage.type.weby"
+        }
+      ]
+    },
+    "keyword": {
+      "patterns": [
+        { "match": "\\b(if|elif|else|for|while|break|continue|return|match|case|with|pass|assert|spawn|lambda)\\b", "name": "keyword.control.weby" },
+        { "match": "\\b(import|from|as)\\b", "name": "keyword.control.import.weby" },
+        { "match": "\\b(and|or|not|in|is)\\b", "name": "keyword.operator.logical.weby" },
+        { "match": "\\b(pub|priv|const)\\b", "name": "storage.modifier.weby" },
+        { "match": "\\bself\\b", "name": "variable.language.self.weby" }
+      ]
+    },
+    "constant": { "match": "\\b(True|False|None)\\b", "name": "constant.language.weby" },
+    "number": {
+      "match": "\\b(0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*(\\.[0-9_]+)?([eE][+-]?[0-9_]+)?)\\b",
+      "name": "constant.numeric.weby"
+    },
+    "type": {
+      "patterns": [
+        { "match": "\\b(int|float|bool|str|bytes|list|dict|tuple|frozendict|Result|Task|Channel|Mutex|Atomic|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64)\\b", "name": "support.type.weby" },
+        { "match": "\\b(Some|Ok|Err)\\b", "name": "support.function.builtin.weby" },
+        { "match": "\\b[A-Z][A-Za-z0-9_]*\\b", "name": "entity.name.type.weby" }
+      ]
+    },
+    "call": {
+      "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": { "1": { "name": "entity.name.function.call.weby" } }
+    },
+    "operator": { "match": "->|\\*\\*|//|==|!=|<=|>=|<<|>>|[-+*/%&|^~<>=?]", "name": "keyword.operator.weby" }
+  }
+}

@@ -39,6 +39,7 @@ pub enum TokenKind {
     // Keywords.
     And,
     As,
+    Assert,
     Break,
     Case,
     Const,
@@ -118,6 +119,7 @@ pub fn keyword(word: &str) -> Option<TokenKind> {
     use TokenKind::*;
     Some(match word {
         "and" => And,
+        "assert" => Assert,
         "as" => As,
         "break" => Break,
         "case" => Case,
@@ -163,6 +165,7 @@ impl TokenKind {
         Some(match self {
             Name(_) | Int(_) | Float(_) | Str(_) | FString(_) | Newline | Indent | Dedent | Eof => return None,
             And => "and",
+            Assert => "assert",
             As => "as",
             Break => "break",
             Case => "case",

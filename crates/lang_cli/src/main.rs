@@ -1,7 +1,10 @@
 //! The compiler's command-line driver: runs the pipeline in docs/03-compiler-architecture.md
 //! and links the result with the runtime library.
 
+mod fmt;
 mod loader;
+mod lsp;
+mod manifest;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use lang_codegen::OptLevel;
@@ -65,6 +68,35 @@ enum Cmd {
         /// The source file to check
         file: PathBuf,
     },
+    /// Run the `@test` functions in source files
+    Test {
+        /// Files or directories (searched recursively); the current directory if none
+        paths: Vec<PathBuf>,
+        /// Only run tests whose name contains this text
+        #[arg(long)]
+        filter: Option<String>,
+        /// Optimise the generated code
+        #[arg(long)]
+        release: bool,
+    },
+    /// Fetch the project's git dependencies and record their commits
+    Fetch {
+        /// A file of the project (the manifest is found from it); the current directory if none
+        file: Option<PathBuf>,
+        /// Move each dependency to its `rev` (or newest commit) and rewrite the lock file
+        #[arg(long)]
+        update: bool,
+    },
+    /// Run the language server, speaking the Language Server Protocol on standard input and output
+    Lsp,
+    /// Rewrite source files in the standard layout
+    Fmt {
+        /// Files or directories (searched recursively); the current directory if none
+        paths: Vec<PathBuf>,
+        /// Change nothing; list the files that are not formatted and fail if there are any
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -90,6 +122,27 @@ fn main() -> ExitCode {
         Cmd::Build { file, output, release, emit } => build(&file, output, opt_level(release), emit),
         Cmd::Run { file, release, args } => run(&file, opt_level(release), &args),
         Cmd::Check { file } => frontend(&file, None).map(|_| ExitCode::SUCCESS),
+        Cmd::Fmt { paths, check } => format_files(&paths, check),
+        Cmd::Fetch { file, update } => {
+            let file = file.unwrap_or_else(|| PathBuf::from(".").join("main"));
+            match manifest::dependencies_for(&file, true, update) {
+                Ok(dependencies) => {
+                    for (name, dir) in dependencies {
+                        println!("{name}: {}", dir.display());
+                    }
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(message) => {
+                    eprintln!("error: {message}");
+                    Err(Failure(EXIT_COMPILE_ERROR))
+                }
+            }
+        }
+        Cmd::Lsp => {
+            let status = lsp::serve(&mut std::io::stdin().lock(), &mut std::io::stdout().lock());
+            Ok(ExitCode::from(status))
+        }
+        Cmd::Test { paths, filter, release } => run_tests(&paths, filter.as_deref(), opt_level(release)),
     };
     result.unwrap_or_else(|Failure(code)| ExitCode::from(code))
 }
@@ -111,6 +164,16 @@ fn plural(n: usize, word: &str) -> String {
 /// diagnostics. Returns the program, or `None` when `emit` asked for an earlier stage, which has
 /// then been printed.
 fn frontend(file: &Path, emit: Option<Emit>) -> Result<Option<(hir::Program, SourceMap)>, Failure> {
+    frontend_with(file, emit, None)
+}
+
+/// [`frontend`], optionally for testing: with `test`, the generated test runner is appended to
+/// the file's text and the program starts there instead of at `main`.
+fn frontend_with(
+    file: &Path,
+    emit: Option<Emit>,
+    test: Option<&str>,
+) -> Result<Option<(hir::Program, SourceMap)>, Failure> {
     if file.extension().is_none_or(|ext| ext != SOURCE_EXTENSION) {
         eprintln!(
             "error: `{}` is not a {LANGUAGE_NAME} source file; expected a `.{SOURCE_EXTENSION}` file",
@@ -122,6 +185,10 @@ fn frontend(file: &Path, emit: Option<Emit>) -> Result<Option<(hir::Program, Sou
         eprintln!("error: cannot read `{}`: {error}", file.display());
         Failure(EXIT_COMPILE_ERROR)
     })?;
+    let text = match test {
+        Some(runner) => format!("{text}\n{runner}"),
+        None => text,
+    };
     let display = file.display().to_string();
     let mut sources = SourceMap::default();
     let mut diags = Diagnostics::default();
@@ -145,7 +212,11 @@ fn frontend(file: &Path, emit: Option<Emit>) -> Result<Option<(hir::Program, Sou
 
     let module_name = file.file_stem().map_or("main".into(), |stem| stem.to_string_lossy().into_owned());
     let root = file.parent().map(Path::to_path_buf).unwrap_or_default();
-    let modules = loader::load(&root, module_name, module, &mut sources, &mut diags);
+    let dependencies = manifest::dependencies_for(file, true, false).map_err(|message| {
+        eprintln!("error: {message}");
+        Failure(EXIT_COMPILE_ERROR)
+    })?;
+    let modules = loader::load(&root, &dependencies, module_name, module, &mut sources, &mut diags);
 
     // Type errors in a file that did not parse are mostly noise (a function whose header failed
     // to parse is "unknown" at every call), so checking waits for a clean parse.
@@ -156,7 +227,7 @@ fn frontend(file: &Path, emit: Option<Emit>) -> Result<Option<(hir::Program, Sou
             .iter()
             .map(|m| lang_sema::ModuleInput { name: m.name.clone(), ast: &m.ast, stdlib: m.stdlib })
             .collect();
-        lang_sema::check_modules(&inputs, &mut sources, &mut diags)
+        lang_sema::check_program(&inputs, &mut sources, &mut diags, if test.is_some() { TEST_ENTRY } else { "main" })
     };
     report(&display, &sources, &diags)?;
     let program = program.ok_or_else(|| internal_error("type checking failed without reporting an error".into()))?;
@@ -224,6 +295,184 @@ fn run(file: &Path, opt: OptLevel, args: &[String]) -> Result<ExitCode, Failure>
     use std::os::unix::process::ExitStatusExt;
     let code = status.code().or_else(|| status.signal().map(|signal| 128 + signal)).unwrap_or(1);
     Ok(ExitCode::from(code as u8))
+}
+
+/// The function the generated test runner starts at.
+const TEST_ENTRY: &str = "__test_main";
+
+/// The `@test` functions of a file, with whether each returns a `Result`; `None` if the file
+/// does not parse (the build reports why).
+fn find_tests(file: &Path) -> Option<Vec<(String, bool)>> {
+    let text = fs::read_to_string(file).ok()?;
+    let mut sources = SourceMap::default();
+    let mut diags = Diagnostics::default();
+    let id = sources.add(file.display().to_string(), text);
+    let tokens = lang_syntax::lex(id, &sources.get(id).text, &mut diags);
+    let module = lang_syntax::parse(&tokens, &mut diags);
+    Some(
+        module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                lang_syntax::ast::Item::Function(f) if f.annotations.iter().any(|a| a.name.name == "test") => {
+                    let returns = matches!(&f.ret, Some(t) if !matches!(t.kind, lang_syntax::ast::TypeExprKind::None));
+                    Some((f.name.name.clone(), returns))
+                }
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// Source for the test runner: run each test in its own task, so that a failing `assert` (a
+/// panic) ends only that test, and print a line per test for [`run_tests`] to read.
+fn test_runner(tests: &[(String, bool)]) -> String {
+    let mut wrappers = String::new();
+    let mut text = format!("def {TEST_ENTRY}():\n");
+    for (index, (name, returns_result)) in tests.iter().enumerate() {
+        // A test that returns `Err` fails: a wrapper turns that into a panic.
+        let target = if *returns_result {
+            wrappers.push_str(&format!(
+                "def __test_{index}():\n    match {name}():\n        case Ok(_):\n            pass\n        case Err(__error):\n            panic(f\"the test returned an error: {{__error.message()}}\")\n\n"
+            ));
+            format!("__test_{index}")
+        } else {
+            name.clone()
+        };
+        text.push_str(&format!(
+            "    if (spawn {target}()).__panicked():\n        print(\"test {name} ... FAILED\")\n    else:\n        print(\"test {name} ... ok\")\n"
+        ));
+    }
+    if tests.is_empty() {
+        text.push_str("    pass\n");
+    }
+    wrappers + &text
+}
+
+/// `test`: build each file that has `@test` functions with a generated runner, run it, and
+/// report. Fails if a file does not compile or any test fails.
+fn run_tests(paths: &[PathBuf], filter: Option<&str>, opt: OptLevel) -> Result<ExitCode, Failure> {
+    let (mut passed, mut failed, mut broken) = (0, 0, 0);
+    for file in source_files(paths) {
+        let Some(tests) = find_tests(&file) else { continue };
+        let tests: Vec<(String, bool)> =
+            tests.into_iter().filter(|(name, _)| filter.is_none_or(|f| name.contains(f))).collect();
+        if tests.is_empty() {
+            continue;
+        }
+        println!("running {} in {}", plural(tests.len(), "test"), file.display());
+        let runner = test_runner(&tests);
+        let Ok(Some((program, sources))) = frontend_with(&file, None, Some(&runner)) else {
+            broken += 1;
+            continue;
+        };
+        let temp = TempDir::new()?;
+        let executable = temp.path().join(&program.module);
+        link_executable(&program, &sources, opt, &executable)?;
+        let output = Command::new(&executable).output().map_err(|error| {
+            eprintln!("error: could not start `{}`: {error}", executable.display());
+            Failure(EXIT_COMPILE_ERROR)
+        })?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut file_passed = 0;
+        let mut file_failed = 0;
+        for line in stdout.lines() {
+            if line.starts_with("test ") && line.ends_with(" ... ok") {
+                file_passed += 1;
+            } else if line.starts_with("test ") && line.ends_with(" ... FAILED") {
+                file_failed += 1;
+            }
+            println!("{line}");
+        }
+        if !output.status.success() || file_failed > 0 {
+            eprint!("{stderr}");
+        }
+        if !output.status.success() {
+            eprintln!("error: the tests in `{}` stopped early: {}", file.display(), output.status);
+            broken += 1;
+        }
+        passed += file_passed;
+        failed += file_failed;
+    }
+    let ok = failed == 0 && broken == 0;
+    println!(
+        "\ntest result: {}. {passed} passed; {failed} failed{}",
+        if ok { "ok" } else { "FAILED" },
+        if broken > 0 { format!("; {} could not run", plural(broken, "file")) } else { String::new() }
+    );
+    if ok { Ok(ExitCode::SUCCESS) } else { Err(Failure(EXIT_COMPILE_ERROR)) }
+}
+
+/// Source files under `paths` (files as given, directories searched), skipping hidden
+/// directories and build output.
+fn source_files(paths: &[PathBuf]) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        let mut entries: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if path.is_dir() {
+                if !name.starts_with('.') && name != "target" {
+                    walk(&path, out);
+                }
+            } else if path.extension().is_some_and(|e| e == SOURCE_EXTENSION) {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    let defaults = [PathBuf::from(".")];
+    for path in if paths.is_empty() { &defaults[..] } else { paths } {
+        if path.is_dir() {
+            walk(path, &mut files);
+        } else {
+            files.push(path.clone());
+        }
+    }
+    files
+}
+
+/// `fmt`: format files in place, or with `check`, only report the ones that would change.
+fn format_files(paths: &[PathBuf], check: bool) -> Result<ExitCode, Failure> {
+    let mut unformatted = 0;
+    let mut failed = false;
+    for path in source_files(paths) {
+        let text = fs::read_to_string(&path).map_err(|error| {
+            eprintln!("error: cannot read `{}`: {error}", path.display());
+            Failure(EXIT_COMPILE_ERROR)
+        })?;
+        let Some(before) = fmt::token_fingerprint(&text) else {
+            eprintln!("error: `{}` has syntax errors; run `{CLI_NAME} check` on it", path.display());
+            failed = true;
+            continue;
+        };
+        let formatted = match fmt::format(&text) {
+            Some(formatted) if fmt::token_fingerprint(&formatted).as_ref() == Some(&before) => formatted,
+            _ => {
+                eprintln!(
+                    "internal error: formatting `{}` would change its meaning; it was left alone",
+                    path.display()
+                );
+                failed = true;
+                continue;
+            }
+        };
+        if formatted == text {
+            continue;
+        }
+        unformatted += 1;
+        if check {
+            println!("{}", path.display());
+        } else {
+            write_file(&path, &formatted)?;
+        }
+    }
+    if failed || (check && unformatted > 0) {
+        return Err(Failure(EXIT_COMPILE_ERROR));
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn write_file(path: &Path, contents: &str) -> Result<(), Failure> {

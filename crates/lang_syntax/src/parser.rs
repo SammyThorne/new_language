@@ -945,6 +945,30 @@ impl Parser<'_> {
         Ok(stmts)
     }
 
+    /// `assert cond` or `assert cond, message`, which mean
+    /// `if not cond: panic(message)`; the panic reports the `assert`'s location.
+    fn assert_stmt(&mut self) -> PResult<Stmt> {
+        let start = self.span();
+        self.bump();
+        let cond = self.expr()?;
+        let message = if self.peek() == &TokenKind::Comma {
+            self.bump();
+            self.expr()?
+        } else {
+            Expr { kind: ExprKind::Str("assertion failed".to_string()), span: cond.span }
+        };
+        let span = start.to(self.prev_span());
+        self.end_of_statement()?;
+        let not = Expr { kind: ExprKind::Unary { op: UnaryOp::Not, operand: Box::new(cond) }, span };
+        let callee = Expr { kind: ExprKind::Name("panic".to_string()), span: start };
+        let call = Expr {
+            kind: ExprKind::Call { callee: Box::new(callee), args: vec![Arg { name: None, value: message }] },
+            span,
+        };
+        let fail = Stmt { kind: StmtKind::Expr(call), span };
+        Ok(Stmt { kind: StmtKind::If { branches: vec![(not, vec![fail])], otherwise: None }, span })
+    }
+
     fn statement(&mut self) -> PResult<Stmt> {
         let start = self.span();
         let kind = match self.peek().clone() {
@@ -986,6 +1010,7 @@ impl Parser<'_> {
                 self.bump();
                 StmtKind::Pass
             }
+            TokenKind::Assert => return self.assert_stmt(),
             kind @ (TokenKind::Elif | TokenKind::Else) => {
                 return Err(self.error(
                     format!("{} without a matching `if`", kind.describe()),

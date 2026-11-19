@@ -22,6 +22,15 @@ pub const ENV_PREFIX: &str = "WEBY_";
 /// Name of the directory, under the system temporary directory, used for build intermediates.
 pub const CACHE_DIR_NAME: &str = "weby-cache";
 
+/// The project manifest: the project's name and its dependencies.
+pub const MANIFEST_FILE: &str = "weby.toml";
+
+/// Where the exact commits of git dependencies are recorded.
+pub const LOCK_FILE: &str = "weby.lock";
+
+/// Where git dependencies are checked out, inside the project.
+pub const DEPS_DIR: &str = ".weby/deps";
+
 /// The full name of an environment variable, for example `env_var("RUNTIME")`.
 pub fn env_var(suffix: &str) -> String {
     format!("{ENV_PREFIX}{suffix}")

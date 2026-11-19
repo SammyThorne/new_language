@@ -461,6 +461,8 @@ impl Checker<'_, '_> {
                 Some((Op::TaskJoinTimeout, vec![Ty::FLOAT], ret))
             }
             (TyKind::Task(_), "is_done") => Some((Op::TaskIsDone, vec![], Ty::BOOL)),
+            // For the test runner: wait for the task, and say whether it panicked.
+            (TyKind::Task(_), "__panicked") => Some((Op::TaskPanicked, vec![], Ty::BOOL)),
             (TyKind::Channel(t), "send") => Some((Op::ChannelSend, vec![*t], Ty::NONE)),
             (TyKind::Channel(t), "recv") => Some((Op::ChannelRecv, vec![], self.types.option(*t))),
             (TyKind::Channel(t), "try_recv") => Some((Op::ChannelTryRecv, vec![], self.types.option(*t))),

@@ -456,6 +456,30 @@ A connection's socket is non-blocking and registered once with one epoll instanc
 - **Clean stack overflow.** Overflowing a fiber's stack hits its guard page and kills the process with a segmentation fault. Turning that into a panic needs a signal handler on an alternate stack.
 - **Per-worker timers and aarch64.** One timer thread serves all workers; the context switch exists only for x86-64.
 
+### D67. Debug information is line tables, frame pointers are always on, and panics print a backtrace
+
+Every compiled function gets a DWARF subprogram and every expression a source location; locals and types are not described yet, because describing the language's value layouts (strings, optionals, results, closures) to a debugger is its own project. That is enough for breakpoints by line, stepping, `perf report` with source lines, and backtraces. Functions keep frame pointers in release builds too, as Go's do, so `perf record -g` works without DWARF unwinding; it costs about 10% on `fib`, which is nothing but calls, and nothing measurable elsewhere. A panic prints the chain of calls in the program's own source (`Point.scaled at app.wb:6:22`), symbolised by the Rust standard library's backtrace support from the same DWARF; `WEBY_BACKTRACE=0` turns it off.
+
+### D68. `fmt` keeps line breaks and comments, and checks itself with the lexer
+
+The formatter scans the text itself, since the lexer drops comments, and normalises spacing, indentation and blank lines without moving code between lines: what is on one line stays on one line, and a multi-line call stays multi-line with its continuation lines indented one level. Choosing line breaks (fitting to a width) is the larger half of a formatter like Black's and was left out. The output must lex to exactly the tokens of the input, or the file is left alone and the problem reported; the repository's own test files pass that check and are stable under reformatting. The rules match the style the repository was already written in, so it changed only three files, all in aligned trailing comments.
+
+### D69. Tests run as tasks, and `assert` is a statement
+
+A test is a `@test` function; `weby test` appends a generated runner to the file's source (so source positions stay correct) that spawns each test as a task and asks whether it panicked, through a task method meant for the runner. This is milestone 10's task-scoped panics put to use: a failed test reports its panic and the others still run. `assert cond, message` became a statement, parsed into `if not cond: panic(message)`; `assert` is now a keyword. Tests in imported modules are not collected: tests live with the code in the file being tested.
+
+### D70. The language server re-checks the whole program on each change
+
+`weby lsp` reads full-document updates, runs the same front end as `check` with an index switched on (each expression's type, and where each variable, function, method, field and type it names is defined), and answers hover and go-to-definition from that index. Each change re-checks everything, which takes milliseconds for programs of the sizes in this repository; incremental checking waits until programs are large enough to need it. A missing `main` is not reported, since the file may be a module. The JSON-RPC layer and JSON parser are written by hand (about 250 lines), since adding `serde` is a download.
+
+### D71. Dependencies: a small manifest, git or path sources, and a lock file
+
+`weby.toml` names dependencies as `{ git = "url", rev = "tag or branch or commit" }` or `{ path = "dir" }`. A git dependency is cloned into `.weby/deps/<name>` inside the project when first needed, and the commit used is written to `weby.lock`; later builds check out that commit, so a build does not change because a branch moved. `weby fetch --update` moves each dependency to its `rev` and rewrites the lock file. `import dep.module` loads from the dependency; `import dep` loads its `lib` file; a dependency's own files import each other with its name first, like Go's import paths. There is no version solving, no registry, and no handling of two dependencies wanting different versions of a third; those wait for a real package ecosystem. The manifest format is a subset of TOML, parsed by hand.
+
+### D72. Editor support is a grammar plus the language server
+
+A TextMate grammar (`editors/vscode/`) covers VS Code and the many editors that read that format, and a Vim syntax file covers Vim and Neovim; both are maintained by hand against the keyword list. Neovim and Helix can start `weby lsp` with a few lines of configuration (`editors/README.md`). A VS Code extension that starts the language server needs `vscode-languageclient` from npm, a download, and is not included.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

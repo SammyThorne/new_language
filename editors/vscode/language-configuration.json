@@ -1,0 +1,20 @@
+{
+  "comments": { "lineComment": "#" },
+  "brackets": [["(", ")"], ["[", "]"], ["{", "}"]],
+  "autoClosingPairs": [
+    { "open": "(", "close": ")" },
+    { "open": "[", "close": "]" },
+    { "open": "{", "close": "}" },
+    { "open": "\"", "close": "\"", "notIn": ["string", "comment"] },
+    { "open": "'", "close": "'", "notIn": ["string", "comment"] }
+  ],
+  "surroundingPairs": [["(", ")"], ["[", "]"], ["{", "}"], ["\"", "\""], ["'", "'"]],
+  "onEnterRules": [
+    { "beforeText": ":\\s*(#.*)?$", "action": { "indent": "indent" } }
+  ],
+  "indentationRules": {
+    "increaseIndentPattern": "^\\s*(def|struct|enum|trait|impl|if|elif|else|for|while|with|match|case)\\b.*:\\s*(#.*)?$",
+    "decreaseIndentPattern": "^\\s*(elif|else|case)\\b.*:\\s*$"
+  },
+  "folding": { "offSide": true }
+}

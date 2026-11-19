@@ -51,6 +51,23 @@ python3 bench/ws_idle/run.py --connections 50000
 
 ## Results
 
+### 2026-11-18, end of milestone 11: frame pointers and debug information
+
+Generated code now keeps frame pointers and carries DWARF line tables (docs/08, D67). Best of 3 runs, the machine as busy as for milestone 10:
+
+| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython |
+|---|---|---|---|---|---|
+| binary_trees | 1.150 s | 0.936 s | 23.303 s | 1.23x the time | 20.3x faster |
+| dispatch | 0.054 s | 0.035 s | 0.600 s | 1.55x the time | 11.1x faster |
+| fib | 0.022 s | 0.036 s | 0.720 s | 1.68x faster | 33.4x faster |
+| json_orders | 0.614 s | 0.708 s | 3.581 s | 1.15x faster | 5.8x faster |
+| sieve | 0.088 s | 0.067 s | 2.225 s | 1.31x the time | 25.2x faster |
+| sort | 0.829 s | 1.249 s | 2.224 s | 1.51x faster | 2.7x faster |
+| spawn | 0.172 s | 0.056 s | 1.393 s | 3.09x the time | 8.1x faster |
+| word_count | 1.244 s | 0.845 s | 2.402 s | 1.47x the time | 1.9x faster |
+
+Only `fib`, which is nothing but calls, moved: 0.020 s to 0.022 s, the cost of the frame pointer in each call. `spawn` is unchanged for Weby; Go's time varied between runs (0.056 to 0.065 s).
+
 ### 2026-11-18, end of milestone 10: fibers
 
 Tasks and connections now run on fibers: one worker thread per core (12 here), an epoll poller, and parking instead of blocked threads.

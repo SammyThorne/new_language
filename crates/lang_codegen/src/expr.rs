@@ -14,6 +14,7 @@ impl<'ctx> Codegen<'ctx, '_> {
     }
 
     pub(crate) fn expr(&mut self, expr: &Expr) -> Option<BasicValueEnum<'ctx>> {
+        self.set_location(expr.span);
         Some(match &expr.kind {
             ExprKind::Int(value) => match self.kind(expr.ty) {
                 TyKind::Sized(kind) => self.int_type(kind.bits()).const_int(*value as u64, false).into(),

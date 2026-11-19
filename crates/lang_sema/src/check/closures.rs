@@ -273,6 +273,7 @@ impl Checker<'_, '_> {
                 generic,
                 closure: true,
                 extern_symbol: None,
+                span: Some(span),
             },
         ));
         let ty = self.types.func(param_tys, ret);

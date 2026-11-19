@@ -423,6 +423,7 @@ impl<'m> Checker<'_, 'm> {
             generic: false,
             closure: false,
             extern_symbol: Some(symbol),
+            span: None,
         }
     }
 

@@ -4,7 +4,7 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 
 ## Status
 
-The prototype is complete, and milestones 0 to 10 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
+The prototype is complete, and milestones 0 to 11 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
 
 ```python
 trait Shape(Display):
@@ -44,7 +44,7 @@ def main():
 
 | Works now | Not yet |
 |---|---|
-| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | Tooling: debugger support, formatter, test runner, language server (milestone 11) |
+| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | Variables in the debugger (line tables and function names only); a VS Code client extension for the language server |
 | An HTTP/1.1 server: `@http.get("/todos/{id}")` route annotations with typed path, query and JSON-body parameters checked at compile time, or call-style routes, middleware, groups, graceful shutdown; the `log` module | TLS, HTTP/2, an HTTP client |
 | WebSockets: `@http.ws("/chat")` endpoints or `server.ws(...)`, `for msg in ws`, sends from any task, pings, fragmentation and the closing handshake handled by the runtime; a `bytes` type | WebSocket compression (`permessage-deflate`) |
 | JSON: `@derive(Json)` with generated encoders and decoders, `@json(name=...)`, error paths, and dynamic `json.Value` | |
@@ -87,6 +87,25 @@ cargo build --workspace
 | `weby build file.wb [-o out] [--release]` | Compile to an executable |
 | `weby check file.wb` | Report errors without generating code |
 | `weby build --emit=tokens\|ast\|hir\|llvm-ir\|obj file.wb` | Print or write an intermediate form |
+| `weby test [paths] [--filter text]` | Run the `@test` functions, each in its own task |
+| `weby fmt [paths] [--check]` | Rewrite files in the standard layout, or list the ones that are not |
+| `weby fetch [--update]` | Fetch the git dependencies in `weby.toml` and record their commits in `weby.lock` |
+| `weby lsp` | The language server, for editors ([editors/README.md](editors/README.md)) |
+
+Programs are built with DWARF line information and frame pointers, so `gdb`, `perf` and panic backtraces show function names and source lines. Set `WEBY_BACKTRACE=0` to leave backtraces out of panic messages.
+
+A project can have a `weby.toml` next to its main file (or above it) naming dependencies, from git or a local path:
+
+```toml
+[package]
+name = "chat"
+
+[dependencies]
+textutil = { git = "https://example.com/textutil.git", rev = "v1.2" }
+shared = { path = "../shared" }
+```
+
+`import textutil.strings` then loads `strings.wb` from the dependency, and `import textutil` its `lib.wb`.
 
 Tests:
 

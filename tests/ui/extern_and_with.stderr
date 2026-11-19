@@ -26,7 +26,7 @@ error[E0330]: unknown annotation `@cache` on a function
 7 | @cache
   |  ^^^^^ not a known annotation
   |
-  = help: functions can have `@extern("c_name")`
+  = help: functions can have `@test`, `@extern("c_name")` and the `@http` route annotations
 
 error[E0337]: a value of type `int` cannot be used with `with`
   --> tests/ui/extern_and_with.wb:15:10

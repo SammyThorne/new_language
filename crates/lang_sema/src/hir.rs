@@ -154,6 +154,8 @@ pub struct Function {
     /// Bound to a C function with `@extern("symbol")`; it has no body. Code generation emits a
     /// wrapper that converts the arguments to the C calling convention.
     pub extern_symbol: Option<String>,
+    /// Where the function is declared (its name), for debug information.
+    pub span: Option<Span>,
 }
 
 #[derive(Debug, Clone)]
@@ -586,6 +588,7 @@ pub enum Builtin {
     /// `task.join_timeout(seconds)`: the result, or `None` if the task is still running.
     TaskJoinTimeout,
     TaskIsDone,
+    TaskPanicked,
     /// `Channel[T](capacity)`.
     ChannelNew,
     ChannelSend,

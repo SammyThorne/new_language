@@ -26,6 +26,8 @@ enum State {
 
 struct Loader<'a> {
     root: PathBuf,
+    /// Dependencies from the project manifest: name to directory.
+    dependencies: &'a std::collections::BTreeMap<String, PathBuf>,
     sources: &'a mut SourceMap,
     diags: &'a mut Diagnostics,
     states: HashMap<String, State>,
@@ -39,6 +41,7 @@ struct Loader<'a> {
 /// first and `main` last.
 pub fn load(
     root: &Path,
+    dependencies: &std::collections::BTreeMap<String, PathBuf>,
     main_name: String,
     main: ast::Module,
     sources: &mut SourceMap,
@@ -46,6 +49,7 @@ pub fn load(
 ) -> Vec<LoadedModule> {
     let mut loader = Loader {
         root: root.to_path_buf(),
+        dependencies,
         sources,
         diags,
         states: HashMap::new(),
@@ -104,8 +108,18 @@ impl Loader<'_> {
             }
             None => {}
         }
-        let relative: PathBuf = import.path.iter().map(|p| p.name.as_str()).collect::<PathBuf>();
-        let path = self.root.join(relative).with_extension(SOURCE_EXTENSION);
+        // `import dep.module` is a file in a dependency's directory; `import dep`, its `lib`.
+        let path = match self.dependencies.get(&import.path[0].name) {
+            Some(dir) if import.path.len() == 1 => dir.join("lib").with_extension(SOURCE_EXTENSION),
+            Some(dir) => {
+                let relative: PathBuf = import.path[1..].iter().map(|p| p.name.as_str()).collect();
+                dir.join(relative).with_extension(SOURCE_EXTENSION)
+            }
+            None => {
+                let relative: PathBuf = import.path.iter().map(|p| p.name.as_str()).collect();
+                self.root.join(relative).with_extension(SOURCE_EXTENSION)
+            }
+        };
         let mut stdlib = false;
         let (display, text) = if path.is_file() {
             match fs::read_to_string(&path) {

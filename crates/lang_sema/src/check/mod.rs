@@ -147,6 +147,33 @@ pub fn check(
 /// Check a program made of several modules. The last module is the entry point, with `main`;
 /// the loader has already found every module the others import, and rejected import cycles.
 pub fn check_modules(inputs: &[ModuleInput], sources: &mut SourceMap, diags: &mut Diagnostics) -> Option<hir::Program> {
+    check_program(inputs, sources, diags, "main")
+}
+
+/// [`check_modules`], with the program starting at the function called `entry` (the test runner
+/// starts at the one it generates).
+pub fn check_program(
+    inputs: &[ModuleInput],
+    sources: &mut SourceMap,
+    diags: &mut Diagnostics,
+    entry: &str,
+) -> Option<hir::Program> {
+    run(inputs, sources, diags, entry, false).0
+}
+
+/// Check a program for the language server: report diagnostics, and return the types and
+/// definitions of what the code refers to (even when there are errors).
+pub fn analyze(inputs: &[ModuleInput], sources: &mut SourceMap, diags: &mut Diagnostics) -> Vec<IndexEntry> {
+    run(inputs, sources, diags, "main", true).1
+}
+
+fn run(
+    inputs: &[ModuleInput],
+    sources: &mut SourceMap,
+    diags: &mut Diagnostics,
+    entry: &str,
+    indexed: bool,
+) -> (Option<hir::Program>, Vec<IndexEntry>) {
     let prelude_file = sources.add(PRELUDE_NAME, PRELUDE);
     let mut prelude_diags = Diagnostics::default();
     let tokens = lang_syntax::lex(prelude_file, PRELUDE, &mut prelude_diags);
@@ -155,6 +182,9 @@ pub fn check_modules(inputs: &[ModuleInput], sources: &mut SourceMap, diags: &mu
 
     let errors_before = diags.error_count();
     let mut checker = Checker::new(diags, prelude_file, sources);
+    if indexed {
+        checker.index = Some(Vec::new());
+    }
     checker.stdlib_modules = std::iter::once(true).chain(inputs.iter().map(|m| m.stdlib)).collect();
     let modules: Vec<(String, &ast::Module)> = std::iter::once((PRELUDE_NAME.to_string(), &prelude))
         .chain(inputs.iter().map(|m| (m.name.clone(), m.ast)))
@@ -182,7 +212,7 @@ pub fn check_modules(inputs: &[ModuleInput], sources: &mut SourceMap, diags: &mu
     checker.check_derives();
     checker.check_pending_hashable();
     checker.check_field_defaults();
-    let entry = checker.check_main(module);
+    let entry = checker.check_main(module, entry);
     // Checking bodies can instantiate generic functions and types, adding more bodies.
     let mut functions: Vec<Option<hir::Function>> = Vec::new();
     let mut index = 0;
@@ -208,10 +238,14 @@ pub fn check_modules(inputs: &[ModuleInput], sources: &mut SourceMap, diags: &mu
             "this error is in generic code or a trait's default method, for the types used at one of its uses",
         ));
     }
+    let index = checker.index.take().unwrap_or_default();
     if checker.diags.error_count() > errors_before {
-        return None;
+        return (None, index);
     }
-    Some(checker.into_program(&module_name, functions, entry?))
+    match entry {
+        Some(entry) => (Some(checker.into_program(&module_name, functions, entry)), index),
+        None => (None, index),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -388,7 +422,18 @@ impl Sink<'_> {
     }
 }
 
+/// What the language server needs to know about a span of source: the type of the expression
+/// there, and where the name it uses is defined.
+#[derive(Clone, Debug)]
+pub struct IndexEntry {
+    pub span: Span,
+    pub ty: Option<String>,
+    pub definition: Option<Span>,
+}
+
 struct Checker<'a, 'm> {
+    /// Filled in for the language server; `None` when compiling.
+    index: Option<Vec<IndexEntry>>,
     diags: Sink<'a>,
     types: Types,
     prelude_file: FileId,
@@ -648,6 +693,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 impl<'a, 'm> Checker<'a, 'm> {
     fn new(diags: &'a mut Diagnostics, prelude_file: FileId, sources: &'a mut SourceMap) -> Self {
         Checker {
+            index: None,
             diags: Sink { out: diags, quiet: false, speculative: false, suppressed: None },
             types: Types::new(),
             prelude_file,
@@ -784,6 +830,17 @@ impl<'a, 'm> Checker<'a, 'm> {
 
     fn error(&mut self, diagnostic: Diagnostic) {
         self.diags.push(diagnostic);
+    }
+
+    /// Add to the language server's index, when there is one.
+    fn record(&mut self, span: Span, ty: Option<Ty>, definition: Option<Span>) {
+        if self.index.is_none() || self.diags.speculative {
+            return;
+        }
+        let ty = ty.filter(|t| *t != Ty::ERROR).map(|t| self.display(t));
+        if let Some(index) = self.index.as_mut() {
+            index.push(IndexEntry { span, ty, definition });
+        }
     }
 
     fn display(&self, ty: Ty) -> String {
@@ -969,11 +1026,15 @@ impl<'a, 'm> Checker<'a, 'm> {
             other => match self.type_global(other, span) {
                 Some(Global::Struct(id)) => {
                     self.no_type_args(other, args, span);
-                    self.structs[id.0].ty
+                    let (ty, definition) = (self.structs[id.0].ty, self.structs[id.0].span);
+                    self.record(span, Some(ty), Some(definition));
+                    ty
                 }
                 Some(Global::Enum(id)) => {
                     self.no_type_args(other, args, span);
-                    self.enums[id.0].ty
+                    let (ty, definition) = (self.enums[id.0].ty, self.enums[id.0].span);
+                    self.record(span, Some(ty), Some(definition));
+                    ty
                 }
                 Some(Global::TypeAlias(index)) => {
                     self.no_type_args(other, args, span);
@@ -1320,6 +1381,7 @@ impl<'a, 'm> Checker<'a, 'm> {
                 generic: true,
                 closure: false,
                 extern_symbol: None,
+                span: Some(ast.name.span),
             });
         }
         let saved_mode = std::mem::replace(&mut self.mode, mode);
@@ -1359,6 +1421,7 @@ impl<'a, 'm> Checker<'a, 'm> {
             generic: false,
             closure: false,
             extern_symbol: None,
+            span: Some(function.name.span),
         }
     }
 

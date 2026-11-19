@@ -433,6 +433,27 @@ Details:
 - A single-file program never needs either keyword.
 - Using a private name from another file is a compile error that says where the name is defined and that it is not `pub`.
 
+## Assertions and tests (M11)
+
+`assert condition` and `assert condition, message` panic when the condition is false, with the message (default "assertion failed") and the `assert`'s location. They are always checked, in release builds too.
+
+```python
+def mean(values: list[float]) -> float:
+    assert len(values) > 0, "mean of nothing"
+    return sum(values) / float(len(values))
+
+@test
+def mean_of_two():
+    assert mean([1.0, 3.0]) == 2.0
+
+@test
+def parses() -> Result[None]:
+    n = int.parse("12")?             # an `Err` fails the test
+    assert n == 12
+```
+
+`weby test [paths]` finds the files with `@test` functions, builds each with a generated runner instead of its `main`, and runs every test in its own task, so a failing test does not stop the others. `--filter text` runs the tests whose names contain `text`. A file with tests is still an ordinary program: `weby run` ignores them.
+
 ## Annotations (M3 onward)
 
 `@name(...)` before a declaration is a fixed, compiler-known annotation. Users cannot define their own; this is what keeps them cheap to compile.
@@ -445,7 +466,7 @@ Details:
 | `@http.get(path)`, `@http.post`, `@http.put`, `@http.patch`, `@http.delete` on a function or method | Declare an HTTP route. Parameters are bound from the request and checked at compile time ([05](05-standard-library.md#http)) | M8 |
 | `@http.ws(path)` | Declare a WebSocket endpoint | M9 |
 | `@extern("c_symbol")` on a bodiless `def` | Bind a C function | M5 |
-| `@test` | Mark a test function | post-prototype |
+| `@test` on a top-level `def` that takes nothing and returns nothing or `Result[None]` | A test, run by `weby test` in its own task. It fails if it panics (a failed `assert`) or returns `Err` | M11 |
 
 ## Deliberately left out
 

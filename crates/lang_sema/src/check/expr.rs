@@ -115,6 +115,24 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn expr(&mut self, cx: &mut FnCx, expr: &ast::Expr, expected: Option<Ty>) -> hir::Expr {
+        let value = self.expr_unindexed(cx, expr, expected);
+        if self.index.is_some() {
+            let definition = match &value.kind {
+                K::Local(local) => Some(cx.info[local.0].decl_span),
+                K::Field { object, index } => {
+                    self.struct_of(object.ty).map(|id| self.structs[id.0].fields[*index].span)
+                }
+                K::Call { func, .. } | K::FuncRef(func) => {
+                    Some(self.signatures[func.0].name_span).filter(|s| s.file != self.prelude_file)
+                }
+                _ => None,
+            };
+            self.record(expr.span, Some(value.ty), definition);
+        }
+        value
+    }
+
+    fn expr_unindexed(&mut self, cx: &mut FnCx, expr: &ast::Expr, expected: Option<Ty>) -> hir::Expr {
         let span = expr.span;
         if let Some(value) = self.json_literal(cx, expr, expected) {
             return value;

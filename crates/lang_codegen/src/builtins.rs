@@ -519,6 +519,10 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let done = self.call_rt("lrt_task_is_done", &[values[0]]).unwrap();
                 int_to_bool(self, done)
             }
+            Builtin::TaskPanicked => {
+                let panicked = self.call_rt("lrt_task_panicked", &[values[0]]).unwrap();
+                int_to_bool(self, panicked)
+            }
             Builtin::ChannelNew => {
                 let TyKind::Channel(elem) = *self.kind(expr.ty) else { unreachable!() };
                 let size = self.llty(elem).map_or(0, |t| self.td.get_abi_size(&t));

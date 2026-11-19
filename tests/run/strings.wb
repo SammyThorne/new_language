@@ -17,7 +17,7 @@ lines""")
     print()
     print(
         "a",
-        "b",    # newlines and comments inside brackets are ignored
+        "b",  # newlines and comments inside brackets are ignored
         "c",
     )
     message = "same text, emitted once"

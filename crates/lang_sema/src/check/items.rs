@@ -605,6 +605,10 @@ impl<'m> Checker<'_, 'm> {
     fn function_annotations(&mut self, function: &ast::Function, signature: &Signature) -> Option<String> {
         for annotation in &function.annotations {
             // Routes are checked once every signature is known.
+            if annotation.name.name == "test" {
+                self.check_test_signature(function, signature);
+                continue;
+            }
             if annotation.name.name != "extern" && !annotation.name.name.starts_with("http.") {
                 self.error(
                     Diagnostic::error(
@@ -613,11 +617,32 @@ impl<'m> Checker<'_, 'm> {
                         annotation.name.span,
                         "not a known annotation",
                     )
-                    .with_help("functions can have `@extern(\"c_name\")`"),
+                    .with_help("functions can have `@test`, `@extern(\"c_name\")` and the `@http` route annotations"),
                 );
             }
         }
         self.extern_symbol(function, signature)
+    }
+
+    /// A `@test` function takes nothing and returns nothing or `Result[None]`; `test` runs it.
+    fn check_test_signature(&mut self, function: &ast::Function, signature: &Signature) {
+        let returns_ok =
+            signature.ret == Ty::NONE || self.types.result_parts(signature.ret).is_some_and(|(ok, _)| ok == Ty::NONE);
+        if !signature.params.is_empty() || function.self_param.is_some() || !function.generics.is_empty() || !returns_ok
+        {
+            self.error(
+                Diagnostic::error(
+                    codes::BAD_ANNOTATION,
+                    format!(
+                        "test `{}` must take no parameters and return nothing or `Result[None]`",
+                        function.name.name
+                    ),
+                    function.name.span,
+                    "not a test function's signature",
+                )
+                .with_help("a test is `@test def name():`; it fails if it panics (as `assert` does) or returns `Err`"),
+            );
+        }
     }
 
     /// What a name in `impl Name for ...` refers to: a trait in scope, or else a prelude trait
@@ -1179,9 +1204,9 @@ impl<'m> Checker<'_, 'm> {
         }
     }
 
-    pub(super) fn check_main(&mut self, module: &ast::Module) -> Option<FuncId> {
+    pub(super) fn check_main(&mut self, module: &ast::Module, entry: &str) -> Option<FuncId> {
         self.enter_module(self.module_names.len() - 1);
-        let Some(&(Global::Function(id), _)) = self.globals.get("main") else {
+        let Some(&(Global::Function(id), _)) = self.globals.get(entry) else {
             self.error(
                 Diagnostic::error(codes::NO_MAIN, "the program has no `main` function", module.start, "")
                     .with_help("add `def main():`; the program starts running there"),

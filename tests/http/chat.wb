@@ -16,7 +16,7 @@ impl Hub:
             clients[ws.id] = ws
         self.broadcast(f"[{room}] {name} joined")
 
-        for msg in ws:                          # ends when the peer closes
+        for msg in ws:  # ends when the peer closes
             match msg:
                 case Text(body):
                     self.broadcast(f"[{room}] {name}: {body}")
@@ -30,7 +30,7 @@ impl Hub:
     def broadcast(self, body: str):
         with self.clients.lock() as clients:
             for client in clients.values():
-                _ = client.send(body)           # ignore peers that have gone away
+                _ = client.send(body)  # ignore peers that have gone away
 
 def echo(ws: http.WebSocket):
     """Send every message back as it came."""

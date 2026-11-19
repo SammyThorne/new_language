@@ -50,6 +50,11 @@ use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
+use inkwell::debug_info::{
+    AsDIScope, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DIScope, DISubprogram, DWARFEmissionKind,
+    DWARFSourceLanguage, DebugInfoBuilder,
+};
+use inkwell::module::FlagBehavior;
 use inkwell::module::{Linkage, Module};
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine};
@@ -114,7 +119,32 @@ fn with_module<R>(
     module.set_triple(&triple);
     module.set_data_layout(&target_data.get_data_layout());
 
-    Codegen::new(&context, &module, &target_data, program, sources).emit();
+    let main_file = sources.get(lang_diag::FileId(0)).name.clone();
+    let directory = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
+    let (builder, unit) = module.create_debug_info_builder(
+        true,
+        DWARFSourceLanguage::C,
+        &main_file,
+        &directory,
+        lang_names::LANGUAGE_NAME,
+        opt == OptLevel::Release,
+        "",
+        0,
+        "",
+        DWARFEmissionKind::Full,
+        0,
+        false,
+        false,
+        "",
+        "",
+    );
+    let debug = DebugInfo { builder, unit, files: HashMap::new(), subprograms: Vec::new() };
+    let i32_type = context.i32_type();
+    module.add_basic_value_flag("Debug Info Version", FlagBehavior::Warning, i32_type.const_int(3, false));
+    module.add_basic_value_flag("Dwarf Version", FlagBehavior::Warning, i32_type.const_int(4, false));
+    let codegen = Codegen::new(&context, &module, &target_data, program, sources, debug);
+    let debug = codegen.emit();
+    debug.builder.finalize();
     module.verify().map_err(|e| format!("generated LLVM IR is invalid: {}", e.to_string()))?;
 
     let passes = match opt {
@@ -156,6 +186,7 @@ const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_task_join", "v", "p"),
     ("lrt_task_join_timeout", "i", "pf"),
     ("lrt_task_is_done", "i", "p"),
+    ("lrt_task_panicked", "i", "p"),
     ("lrt_channel_new", "p", "ii"),
     ("lrt_channel_send", "v", "pppi"),
     ("lrt_channel_recv", "i", "ppi"),
@@ -299,6 +330,19 @@ struct FnState<'ctx> {
     cleanups: Vec<(lang_sema::hir::LocalId, lang_sema::hir::WithExit, Ty)>,
     /// The function's return type, for `?`.
     ret: Ty,
+    /// The function's debug-information scope, when it has one: expressions then get source
+    /// locations.
+    scope: Option<DIScope<'ctx>>,
+}
+
+/// DWARF debug information: a line table and a subprogram per function, so debuggers, `perf`
+/// and panic backtraces can name functions and source lines. Variables are not described yet.
+struct DebugInfo<'ctx> {
+    builder: DebugInfoBuilder<'ctx>,
+    unit: DICompileUnit<'ctx>,
+    files: HashMap<lang_diag::FileId, DIFile<'ctx>>,
+    /// Indexed by [`FuncId`].
+    subprograms: Vec<Option<DISubprogram<'ctx>>>,
 }
 
 struct Codegen<'ctx, 'a> {
@@ -334,7 +378,9 @@ struct Codegen<'ctx, 'a> {
     descs: HashMap<Ty, PointerValue<'ctx>>,
     helpers: HashMap<(Helper, Ty), FunctionValue<'ctx>>,
     unwind_table: Attribute,
+    frame_pointer: Attribute,
     state: Option<FnState<'ctx>>,
+    debug: DebugInfo<'ctx>,
 }
 
 impl<'ctx, 'a> Codegen<'ctx, 'a> {
@@ -344,6 +390,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         td: &'a TargetData,
         program: &'a Program,
         sources: &'a SourceMap,
+        debug: DebugInfo<'ctx>,
     ) -> Self {
         let ptr = cx.ptr_type(AddressSpace::default());
         let i64_type = cx.i64_type();
@@ -391,7 +438,9 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             descs: HashMap::new(),
             helpers: HashMap::new(),
             unwind_table: cx.create_enum_attribute(Attribute::get_named_enum_kind_id("uwtable"), 2),
+            frame_pointer: cx.create_string_attribute("frame-pointer", "all"),
             state: None,
+            debug,
         };
         // Struct bodies can refer to each other, so they are filled in after all are declared.
         for (index, def) in program.structs.iter().enumerate() {
@@ -747,6 +796,9 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
     fn in_function<R>(&mut self, function: FunctionValue<'ctx>, body: impl FnOnce(&mut Self) -> R) -> R {
         let saved_block = self.b.get_insert_block();
         let saved_state = self.state.take();
+        // Code in another function must not carry this function's source locations.
+        let saved_location = self.b.get_current_debug_location();
+        self.b.unset_current_debug_location();
         let entry = self.cx.append_basic_block(function, "entry");
         self.b.position_at_end(entry);
         self.state = Some(FnState {
@@ -757,9 +809,14 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             loops: Vec::new(),
             cleanups: Vec::new(),
             ret: Ty::NONE,
+            scope: None,
         });
         let result = body(self);
         self.state = saved_state;
+        match saved_location {
+            Some(location) => self.b.set_current_debug_location(location),
+            None => self.b.unset_current_debug_location(),
+        }
         if let Some(block) = saved_block {
             self.b.position_at_end(block);
         }
@@ -786,10 +843,11 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
 
     // ---- emission -----------------------------------------------------------------------
 
-    fn emit(mut self) {
+    fn emit(mut self) -> DebugInfo<'ctx> {
         for (index, function) in self.program.functions.iter().enumerate() {
             if function.generic {
                 self.functions.push(None);
+                self.debug.subprograms.push(None);
                 continue;
             }
             let mut params: Vec<BasicMetadataTypeEnum> = Vec::new();
@@ -818,10 +876,16 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
                 value
             };
             value.add_attribute(AttributeLoc::Function, self.unwind_table);
+            value.add_attribute(AttributeLoc::Function, self.frame_pointer);
             let skip = usize::from(function.closure);
             for (param, local) in value.get_param_iter().skip(skip).zip(&function.params) {
                 param.set_name(&function.locals[local.0].name);
             }
+            let subprogram = match (function.span, &function.extern_symbol) {
+                (Some(span), None) => Some(self.subprogram(&function.name, value, span)),
+                _ => None,
+            };
+            self.debug.subprograms.push(subprogram);
             self.functions.push(Some(value));
         }
         for index in 0..self.program.functions.len() {
@@ -829,6 +893,56 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
                 self.define(FuncId(index));
             }
         }
+        self.debug
+    }
+
+    fn debug_file(&mut self, file: lang_diag::FileId) -> DIFile<'ctx> {
+        if let Some(&di_file) = self.debug.files.get(&file) {
+            return di_file;
+        }
+        let name = &self.sources.get(file).name;
+        let path = Path::new(name);
+        let (directory, base) = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(base)) if !parent.as_os_str().is_empty() => {
+                (parent.display().to_string(), base.to_string_lossy().into_owned())
+            }
+            _ => (".".to_string(), name.clone()),
+        };
+        let di_file = self.debug.builder.create_file(&base, &directory);
+        self.debug.files.insert(file, di_file);
+        di_file
+    }
+
+    /// The debug-information record for a function declared at `span`.
+    fn subprogram(&mut self, name: &str, value: FunctionValue<'ctx>, span: Span) -> DISubprogram<'ctx> {
+        let file = self.debug_file(span.file);
+        let (line, _) = self.sources.get(span.file).line_col(span.lo as usize);
+        let ty = self.debug.builder.create_subroutine_type(file, None, &[], DIFlags::ZERO);
+        let linkage = value.get_name().to_string_lossy().into_owned();
+        let subprogram = self.debug.builder.create_function(
+            self.debug.unit.as_debug_info_scope(),
+            name,
+            Some(&linkage),
+            file,
+            line as u32,
+            ty,
+            true,
+            true,
+            line as u32,
+            DIFlags::ZERO,
+            false,
+        );
+        value.set_subprogram(subprogram);
+        subprogram
+    }
+
+    /// Attach `span`'s line and column to the instructions generated next, in a function with
+    /// debug information.
+    pub(crate) fn set_location(&mut self, span: Span) {
+        let Some(scope) = self.state.as_ref().and_then(|s| s.scope) else { return };
+        let (line, col) = self.sources.get(span.file).line_col(span.lo as usize);
+        let location = self.debug.builder.create_debug_location(self.cx, line as u32, col as u32, scope, None);
+        self.b.set_current_debug_location(location);
     }
 
     /// The LLVM function for a HIR function, which must not be generic.
@@ -843,7 +957,12 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             self.define_extern(value, function, symbol);
             return;
         }
+        let subprogram = self.debug.subprograms[id.0];
         self.in_function(value, |this| {
+            if let (Some(subprogram), Some(span)) = (subprogram, function.span) {
+                this.state.as_mut().unwrap().scope = Some(subprogram.as_debug_info_scope());
+                this.set_location(span);
+            }
             let ptr = this.ptr_type();
             let slots: Vec<Option<PointerValue>> = function
                 .locals

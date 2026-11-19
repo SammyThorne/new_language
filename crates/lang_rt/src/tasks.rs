@@ -177,6 +177,17 @@ pub unsafe extern "C-unwind" fn lrt_task_join_timeout(task: *mut Task, seconds: 
     i64::from(wait_for(task, Some(deadline)))
 }
 
+/// Wait until the task has finished; 1 if it panicked. For the test runner.
+///
+/// # Safety
+/// `task` comes from `lrt_task_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_task_panicked(task: *mut Task) -> i64 {
+    let task = unsafe { &*task };
+    wait_for(task, None);
+    i64::from(fiber::lock(&task.state).panicked)
+}
+
 /// # Safety
 /// `task` comes from `lrt_task_new`.
 #[unsafe(no_mangle)]

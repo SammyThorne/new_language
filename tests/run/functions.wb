@@ -18,8 +18,8 @@ def main():
     answer = add(40, 2)
     print(answer, True, not True, None)
     largest: int = 9223372036854775807
-    print(largest + 1)          # wraps around, as in Go
-    print(area(2, 3))           # functions may be defined after their use
+    print(largest + 1)  # wraps around, as in Go
+    print(area(2, 3))  # functions may be defined after their use
     lowest = -9223372036854775808
     print(-5 - -3, lowest)
 
