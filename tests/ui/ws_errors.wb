@@ -1,0 +1,24 @@
+import http
+
+@http.ws("/a")
+def no_socket(name: str):
+    pass
+
+@http.ws("/b")
+def returns_text(ws: http.WebSocket) -> str:
+    return "x"
+
+@http.get("/c")
+def socket_on_get(ws: http.WebSocket) -> str:
+    return "x"
+
+@http.ws("/d", status=101)
+def with_status(ws: http.WebSocket):
+    pass
+
+@http.ws("/e")
+def two_sockets(a: http.WebSocket, b: http.WebSocket):
+    pass
+
+def main():
+    pass

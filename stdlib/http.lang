@@ -31,7 +31,7 @@ def port_raw(listener: int) -> int
 def shutdown_raw()
 
 @extern("lrt_http_set_max_body")
-def set_max_body_raw(bytes: int)
+def set_max_body_raw(limit: int)
 
 @extern("lrt_http_req_method")
 def req_method(handle: int) -> str
@@ -56,6 +56,36 @@ def respond_raw(handle: int, status: int, headers: str, body: str)
 
 @extern("lrt_io_error")
 def last_error() -> str
+
+@extern("lrt_ws_accept")
+def ws_accept(handle: int) -> int
+
+@extern("lrt_ws_recv")
+def ws_recv(id: int) -> int
+
+@extern("lrt_ws_payload")
+def ws_payload() -> str
+
+@extern("lrt_ws_send")
+def ws_send(id: int, binary: int, data: str) -> int
+
+@extern("lrt_ws_close")
+def ws_close(id: int, code: int, reason: str)
+
+@extern("lrt_ws_finish")
+def ws_finish(id: int)
+
+@extern("lrt_ws_query")
+def ws_query(id: int, name: str) -> str?
+
+@extern("lrt_ws_header")
+def ws_header(id: int, name: str) -> str?
+
+@extern("lrt_ws_remote")
+def ws_remote(id: int) -> str
+
+@extern("lrt_ws_set_limits")
+def ws_set_limits(max_message: int, ping_seconds: int)
 
 # ---- errors -------------------------------------------------------------------------------
 
@@ -313,6 +343,8 @@ pub struct Server:
     concurrently, one task per connection, so handlers and mounted values must be shareable.
     """
     max_body: int = 8388608
+    max_message: int = 16777216
+    ping_interval: int = 30
     priv routes: list[Route] = []
     priv middleware: list[Middleware] = []
     priv error_handler: (def(Request, HttpError) -> Response)? = None
@@ -350,6 +382,10 @@ impl Server:
         """Add middleware, which runs around every route, first added outermost."""
         self.middleware.append(middleware)
         self.chain = None
+
+    def ws(self, path: str, handler: WsHandler):
+        """A WebSocket endpoint. `handler` runs in its own task for the life of each connection."""
+        self.route("GET", path, lambda req: upgrade(req, handler))
 
     def group(self, prefix: str) -> Group:
         """Routes under a common path prefix, with their own middleware."""
@@ -415,6 +451,7 @@ impl Server:
             return Err(HttpError(500, last_error()))
         self.listener = listener
         set_max_body_raw(self.max_body)
+        ws_set_limits(self.max_message, self.ping_interval)
         return port_raw(listener)
 
     def serve(self):
@@ -468,6 +505,9 @@ impl Group:
     def delete(self, path: str, handler: Handler):
         self.route("DELETE", path, handler)
 
+    def ws(self, path: str, handler: WsHandler):
+        self.route("GET", path, lambda req: upgrade(req, handler))
+
     def use(self, middleware: Middleware):
         """Middleware for the routes registered on this group after this call."""
         self.middleware.append(middleware)
@@ -477,6 +517,97 @@ impl Group:
         for middleware in self.middleware:
             nested.middleware.append(middleware)
         return nested
+
+# ---- WebSockets ---------------------------------------------------------------------------
+
+pub enum WsMessage:
+    """A message from the peer: text, or binary data."""
+    Text(body: str)
+    Binary(data: bytes)
+
+@derive(Display)
+pub struct WsClosed:
+    """The error from sending on a WebSocket that has closed."""
+    id: int
+
+impl Error for WsClosed:
+    def message(self) -> str:
+        return "the WebSocket is closed"
+
+@frozen
+pub struct WebSocket:
+    """
+    One WebSocket connection. Its handler receives with `recv()` or `for msg in ws`; any task may
+    `send`, since sends are serialised per connection. A `WebSocket` can be shared between tasks,
+    so a hub can keep connections in a `Mutex[dict[int, http.WebSocket]]`.
+    """
+    id: int
+    path: str
+    priv params: frozendict[str, str]
+
+impl WebSocket:
+    def recv(self) -> WsMessage?:
+        """Wait for the next message; `None` once the connection has closed."""
+        kind = ws_recv(self.id)
+        if kind == 1:
+            return Text(ws_payload())
+        if kind == 2:
+            return Binary(__bytes(ws_payload()))
+        return None
+
+    def next(self) -> WsMessage?:
+        """`for msg in ws` receives until the connection closes."""
+        return self.recv()
+
+    def send(self, text: str) -> Result[None, WsClosed]:
+        """Send a text message."""
+        if ws_send(self.id, 0, text) < 0:
+            return Err(WsClosed(self.id))
+        return Ok(None)
+
+    def send_bytes(self, data: bytes) -> Result[None, WsClosed]:
+        """Send a binary message."""
+        if ws_send(self.id, 1, __bytes_data(data)) < 0:
+            return Err(WsClosed(self.id))
+        return Ok(None)
+
+    def close(self, code: int = 1000, reason: str = ""):
+        """Start the closing handshake; `recv` then returns `None` once the peer agrees."""
+        ws_close(self.id, code, reason)
+
+    def param(self, name: str) -> str:
+        """A `{name}` segment of the endpoint's path, or `""`."""
+        return self.params.get_or(name, "")
+
+    def query(self, name: str) -> str?:
+        """A query parameter of the upgrade request."""
+        return ws_query(self.id, name)
+
+    def header(self, name: str) -> str?:
+        """A header of the upgrade request."""
+        return ws_header(self.id, name)
+
+    def remote_addr(self) -> str:
+        return ws_remote(self.id)
+
+pub def send_json[T: ToJson](ws: WebSocket, value: T) -> Result[None, WsClosed]:
+    """Send a value as a JSON text message."""
+    return ws.send(jsonlib.encode(value))
+
+pub type WsHandler = def(WebSocket)
+"""A WebSocket endpoint's handler, which runs for the life of the connection."""
+
+pub def upgrade(req: Request, handler: WsHandler) -> Result[Response]:
+    """Answer a WebSocket handshake and run `handler` on the connection until it returns."""
+    id = ws_accept(req.handle)
+    if id == -2:
+        return Ok(error(426, last_error()).with_header("Sec-WebSocket-Version", "13"))
+    if id < 0:
+        return Err(HttpError(400, last_error()))
+    ws = WebSocket(id, req.path, frozendict(req.params))
+    handler(ws)
+    ws_finish(id)
+    return Ok(Response(101, "", ""))
 
 # ---- adapters for annotated routes --------------------------------------------------------
 

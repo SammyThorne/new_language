@@ -179,6 +179,51 @@ pub struct Request {
     head: bool,
     /// Status, header lines, and body.
     response: Option<(i64, String, Vec<u8>)>,
+    /// The connection the request came on, while the handler runs.
+    connection: *mut Connection,
+    /// The WebSocket id, once the handler has upgraded the connection.
+    upgraded: Option<i64>,
+}
+
+impl Request {
+    pub(crate) fn method(&self) -> &str {
+        &self.method
+    }
+
+    pub(crate) fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub(crate) fn remote(&self) -> &str {
+        &self.remote
+    }
+
+    pub(crate) fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// A header's value; `name` is lower-case.
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
+
+    /// For a WebSocket upgrade: the connection's stream and the bytes already read past the
+    /// request.
+    pub(crate) fn take_connection(&mut self) -> Option<(TcpStream, Vec<u8>)> {
+        // SAFETY: `connection` points at the connection serving this request, which outlives
+        // the handler call.
+        let connection = unsafe { self.connection.as_mut()? };
+        let stream = connection.stream.try_clone().ok()?;
+        Some((stream, std::mem::take(&mut connection.buffer)))
+    }
+
+    pub(crate) fn set_upgraded(&mut self, id: i64) {
+        self.upgraded = Some(id);
+    }
+}
+
+pub(crate) fn shutting_down() -> bool {
+    SHUTDOWN.load(Ordering::SeqCst)
 }
 
 /// Why a request could not be read.
@@ -306,6 +351,8 @@ impl Connection {
             body,
             remote: remote.to_string(),
             response: None,
+            connection: std::ptr::null_mut(),
+            upgraded: None,
         };
         Ok((request, keep_alive))
     }
@@ -486,7 +533,14 @@ fn serve_connection(stream: TcpStream, remote: String, entry: Entry, roots: *mut
         };
         // SAFETY: `roots` holds the function value for the server's lifetime.
         let (code, env) = unsafe { (roots.read(), roots.add(1).read()) };
+        request.connection = &mut connection;
         entry(code, env, &mut request as *mut Request as i64);
+        request.connection = std::ptr::null_mut();
+        if let Some(id) = request.upgraded {
+            // The handler has run the WebSocket to its end; the connection is finished.
+            crate::ws::forget(id);
+            break;
+        }
         let keep_alive = keep_alive && !SHUTDOWN.load(Ordering::SeqCst);
         let (status, header_lines, body) = request.response.take().unwrap_or_else(|| {
             (500, "Content-Type: text/plain; charset=utf-8\r\n".to_string(), b"internal server error\n".to_vec())
@@ -518,11 +572,11 @@ fn serve_connection(stream: TcpStream, remote: String, entry: Entry, roots: *mut
 
 /// # Safety
 /// `handle` is a request passed to the entry function, which is still running.
-unsafe fn request<'a>(handle: i64) -> &'a mut Request {
+pub(crate) unsafe fn request<'a>(handle: i64) -> &'a mut Request {
     unsafe { &mut *(handle as *mut Request) }
 }
 
-fn optional(value: Option<&str>) -> Str {
+pub(crate) fn optional(value: Option<&str>) -> Str {
     match value {
         Some(text) => Str::from_bytes(text.as_bytes()),
         None => Str { ptr: std::ptr::null(), len: 0 },
@@ -557,14 +611,18 @@ pub unsafe extern "C" fn lrt_http_req_remote(handle: i64) -> Str {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrt_http_req_query(handle: i64, ptr: *const u8, len: i64) -> Str {
     let wanted = unsafe { Str::from_raw(ptr, len) };
-    let request = unsafe { request(handle) };
-    for pair in request.query.split('&').filter(|p| !p.is_empty()) {
+    optional(query_value(&unsafe { request(handle) }.query, wanted).as_deref())
+}
+
+/// The first parameter called `wanted` in a query string, decoded.
+pub(crate) fn query_value(query: &str, wanted: &str) -> Option<String> {
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         if percent_decode(name, true).as_deref() == Some(wanted) {
-            return optional(percent_decode(value, true).as_deref().or(Some(value)));
+            return Some(percent_decode(value, true).unwrap_or_else(|| value.to_string()));
         }
     }
-    optional(None)
+    None
 }
 
 /// A header's value (names are case-insensitive), or `None`.

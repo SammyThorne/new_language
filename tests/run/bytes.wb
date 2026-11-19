@@ -1,0 +1,27 @@
+# The prelude's `bytes` type: binary data that need not be text.
+
+def main():
+    data = "héllo".encode()
+    print(len(data))
+    print(data[0], data[1], data[-1])
+    print(data)
+    print(data.hex())
+    print(data.slice(0, 1) + data.slice(3, 7))
+    print(data.decode().unwrap())
+    print(data.slice(1, 2).decode() is None)
+    print(data == "héllo".encode(), data == "hello".encode())
+    counts: dict[bytes, int] = {}
+    counts[data] = 1
+    print(counts.get_or("héllo".encode(), 0))
+    print("it's".encode())
+
+# expect: 6
+# expect: 104 195 111
+# expect: b'h\xc3\xa9llo'
+# expect: 68c3a96c6c6f
+# expect: b'hllo'
+# expect: héllo
+# expect: True
+# expect: True False
+# expect: 1
+# expect: b"it's"

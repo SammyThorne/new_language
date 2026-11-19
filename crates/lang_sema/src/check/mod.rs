@@ -85,7 +85,6 @@ const BUILTIN_TYPES: &[&str] = &[
     "dict",
     "tuple",
     "set",
-    "bytes",
     "None",
     "Result",
     "Self",
@@ -97,7 +96,7 @@ const BUILTIN_TYPES: &[&str] = &[
 ];
 
 /// Type names that exist in the language design but are not implemented yet.
-const PLANNED_TYPES: &[&str] = &["set", "bytes", "bytearray", "frozenset", "range"];
+const PLANNED_TYPES: &[&str] = &["set", "bytearray", "frozenset", "range"];
 
 const KNOWN_TYPES: &[&str] = &[
     "int",

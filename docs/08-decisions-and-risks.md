@@ -413,6 +413,22 @@ A variable such as `sum` or `text` in a function body may now have the name of a
 
 docs/07 compares against a Python framework. None is installed, and installing one is a download, so the baseline is `http.server.ThreadingHTTPServer` with Nagle's algorithm turned off. A framework such as FastAPI under uvicorn would be faster than this baseline but still well behind Weby; the comparison should be rerun with one when downloads are approved.
 
+### D57. `bytes` is a prelude struct over a string's representation
+
+WebSocket binary messages need a type for data that is not text. `bytes` is a `@frozen` struct in the prelude holding a private (pointer, length) string whose contents need not be UTF-8; only the prelude's own methods, backed by runtime functions that never treat the data as text, look inside it. That made it a few dozen lines instead of a new built-in type through the checker and code generator: `text.encode()`, `len`, indexing (through `get_index`, D48), `slice`, `+` (through `AddNumber`), `==`, hashing, `decode() -> str?`, `hex()` and `b'...'` printing. `len(x)` now calls a `len(self) -> int` method on any struct or enum that has one. Indexing gives an `int`, not a `u8`, since sized numbers are for data layout and C (D41). Slicing syntax (`b[1:3]`) and `bytearray` are not there; a `bytes` built-in type can replace the struct later without changing programs.
+
+### D58. WebSockets run on the connection's task; a `WebSocket` is shareable
+
+A WebSocket endpoint is a `GET` route whose handler calls `http.upgrade`: the runtime checks the handshake, writes the 101 response, hands the connection's stream (and any bytes already read past the request) to a socket registered under an id, and the endpoint's handler then runs on the connection's own task until it returns. `WebSocket` is a `@frozen` struct of the id, the path and the path parameters, so it can be stored in a `Mutex[dict[int, http.WebSocket]]` and sent to from any task; the runtime serialises writes with a lock per socket. Reads happen on the handler's task. The upgrade request's query and headers are copied into the socket and read through `ws.query` and `ws.header`, because `http.Request` is mutable and would make `WebSocket` unshareable. A handler that returns makes the runtime send a close frame (1000), wait up to two seconds for the peer's, and close the connection; at shutdown, open sockets are closed with 1001. Close codes accepted from a peer are 1000 to 1003, 1007 to 1011 and 3000 to 4999, as Autobahn expects.
+
+### D59. WebSocket conformance is checked by a hand-written client
+
+The roadmap's bar is Autobahn's fuzzing client with no failures in the non-extension cases. Fetching it is a download, so `crates/lang_cli/tests/websocket.rs` sends the same kinds of frames by hand: payload lengths at the header boundaries, pings and pongs, reserved bits and opcodes, fragmentation with interleaved control frames, invalid UTF-8 in messages and close reasons, valid and invalid close codes, and messages over the size limit, each checked for the echoed data or the close code Autobahn expects. It does not cover Autobahn's timing-dependent cases (frames split into one-byte writes, slow peers) beyond what the buffering already handles, nor the performance cases. Running the real suite remains a follow-up once downloads are approved.
+
+### D60. `@http.ws` handlers return nothing
+
+An `@http.ws` handler takes one `http.WebSocket` and may also take the upgrade `http.Request`, path parameters and query parameters, bound by the same rules as other routes; a body parameter or `status=` is an error. It must return nothing: there is no response to make once the connection is upgraded, and errors on the connection show up as `recv` returning `None`.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

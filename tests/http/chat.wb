@@ -1,0 +1,67 @@
+# Milestone 9 exit program: the chat hub from docs/05, declared with `@http.ws`, plus an echo
+# endpoint in the call style. crates/lang_cli/tests/websocket.rs drives it with a hand-written
+# WebSocket client that checks the protocol cases the Autobahn suite covers.
+
+import http
+import io
+
+@frozen
+struct Hub:
+    clients: Mutex[dict[int, http.WebSocket]]
+
+impl Hub:
+    @http.ws("/chat/{room}")
+    def handle(self, ws: http.WebSocket, room: str, name: str = "anon"):
+        with self.clients.lock() as clients:
+            clients[ws.id] = ws
+        self.broadcast(f"[{room}] {name} joined")
+
+        for msg in ws:                          # ends when the peer closes
+            match msg:
+                case Text(body):
+                    self.broadcast(f"[{room}] {name}: {body}")
+                case Binary(_):
+                    ws.close(1003, "text only")
+
+        with self.clients.lock() as clients:
+            clients.pop(ws.id)
+        self.broadcast(f"[{room}] {name} left")
+
+    def broadcast(self, body: str):
+        with self.clients.lock() as clients:
+            for client in clients.values():
+                _ = client.send(body)           # ignore peers that have gone away
+
+def echo(ws: http.WebSocket):
+    """Send every message back as it came."""
+    for msg in ws:
+        match msg:
+            case Text(body):
+                _ = ws.send(body)
+            case Binary(data):
+                _ = ws.send_bytes(data)
+
+def whoami(ws: http.WebSocket):
+    """Answer once with what the upgrade request said, then close."""
+    agent = ws.header("User-Agent").unwrap_or("?")
+    _ = ws.send(f"{ws.path} {ws.query('x').unwrap_or('-')} {agent}")
+    ws.close(4000, "done")
+    for _ in ws:
+        pass
+
+@http.get("/health")
+def health() -> str:
+    return "ok"
+
+def main():
+    hub = Hub(clients=Mutex({}))
+    server = http.Server()
+    server.max_message = 1048576
+    server.mount(hub)
+    server.mount(health)
+    server.ws("/echo", echo)
+    server.ws("/whoami", whoami)
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()
+    io.eprint("stopped")

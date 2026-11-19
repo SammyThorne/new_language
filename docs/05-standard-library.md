@@ -55,7 +55,7 @@ Method lists are indicative; the prototype implements what the demo programs nee
 | `set[T]` | Literal `{a, b}`, `add`, `remove`, `in`, `len`, union and intersection |
 | `T?` | `unwrap`, `unwrap_or`, `is_some`, `is_none`, `map` |
 | `Result[T, E]` | `unwrap`, `unwrap_or`, `is_ok`, `is_err`, `map_err` |
-| `bytes`, `bytearray` | Indexing yields `u8`; slicing; `decode() -> Result[str]` |
+| `bytes`, `bytearray` | As built (M9, D57): `bytes` is defined in the prelude. `text.encode()` makes one; `len(b)`, `b[i]` (an `int` from 0 to 255), `b.slice(start, end)`, `+`, `==`, hashing, `decode() -> str?`, `hex()`, and printing as `b'...'`. `bytearray` is not implemented |
 
 ## HTTP
 
@@ -285,11 +285,14 @@ def main():
 | `server.ws(path, handler)` | The call-style form; `handler` has type `def(http.WebSocket)` |
 | `ws.recv() -> http.WsMessage?` | Waits for the next message; `None` after close. `for msg in ws` is the same thing |
 | `http.WsMessage` | `enum`: `Text(body: str)`, `Binary(data: bytes)` |
-| `ws.send(text) -> Result[None]`, `ws.send_bytes(data)`, `ws.send_json(value)` | Safe to call from any task; sends are serialised per connection |
-| `ws.close(code, reason)` | Starts the closing handshake |
-| `ws.id`, `ws.request` | Connection id and the upgrade request (headers, path parameters, query) |
+| `ws.send(text) -> Result[None, http.WsClosed]`, `ws.send_bytes(data)`, `http.send_json(ws, value)` | Safe to call from any task; sends are serialised per connection. `send_json` is a function rather than a method because methods cannot have type parameters yet (D33) |
+| `ws.close(code=1000, reason="")` | Starts the closing handshake |
+| `ws.id`, `ws.path`, `ws.param(name)`, `ws.query(name)`, `ws.header(name)`, `ws.remote_addr()` | Connection id and the upgrade request. As built, these replace a `ws.request` field, so that a `WebSocket` stays shareable (D58) |
+| `server.max_message`, `server.ping_interval` | The largest message accepted (16 MiB by default) and the keep-alive ping interval (30 seconds) |
 
-Implementation:
+Implementation, as built in M9 (D58): the handshake, framing and control frames are in the runtime (`crates/lang_rt/src/ws.rs`); `WebSocket`, `WsMessage` and `upgrade` are in `stdlib/http.lang`. A WebSocket endpoint is an ordinary `GET` route whose handler calls `http.upgrade(req, handler)`, so middleware runs around it. The planned `authorize=` hook is not there: middleware or a check before calling `upgrade` does the same job in the call style.
+
+The plan:
 
 - The upgrade handshake (header validation, `Sec-WebSocket-Accept`) happens in the HTTP layer; an optional `server.ws(path, handler, authorize=fn)` hook can reject before upgrading.
 - Framing follows RFC 6455: masking, fragmentation and reassembly, control frames interleaved with data frames, UTF-8 validation of text messages, size limits.

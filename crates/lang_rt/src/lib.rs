@@ -12,6 +12,7 @@
 //!   stack during a call or inside other collected objects.
 
 pub mod builder;
+pub mod bytes;
 pub mod dict;
 pub mod gc;
 pub mod http;
@@ -23,6 +24,7 @@ pub mod panic;
 pub mod strings;
 pub mod sys;
 pub mod tasks;
+pub mod ws;
 
 /// Program entry. The C runtime calls this; it runs the compiled program's `main`.
 #[cfg(not(test))]

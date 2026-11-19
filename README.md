@@ -4,7 +4,7 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 
 ## Status
 
-Milestones 0 to 8 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
+The prototype is complete: milestones 0 to 9 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
 
 ```python
 trait Shape(Display):
@@ -44,8 +44,9 @@ def main():
 
 | Works now | Not yet |
 |---|---|
-| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | WebSockets (milestone 9) |
+| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | Fibers and an event loop instead of a thread per connection (milestone 10) |
 | An HTTP/1.1 server: `@http.get("/todos/{id}")` route annotations with typed path, query and JSON-body parameters checked at compile time, or call-style routes, middleware, groups, graceful shutdown; the `log` module | TLS, HTTP/2, an HTTP client |
+| WebSockets: `@http.ws("/chat")` endpoints or `server.ws(...)`, `for msg in ws`, sends from any task, pings, fragmentation and the closing handshake handled by the runtime; a `bytes` type | WebSocket compression (`permessage-deflate`) |
 | JSON: `@derive(Json)` with generated encoders and decoders, `@json(name=...)`, error paths, and dynamic `json.Value` | |
 | `spawn`, `Task`, `Channel`, `Mutex`, `Atomic`, `time.sleep`; the compiler rejects sharing mutable data between tasks | |
 | Immutable collections `tuple[T, ...]` and `frozendict[K, V]` | |

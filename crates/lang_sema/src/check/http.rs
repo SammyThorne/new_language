@@ -38,6 +38,7 @@ pub(super) struct HttpTypes {
     group: Ty,
     request: Ty,
     response: Ty,
+    websocket: Ty,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +73,8 @@ impl Scalar {
 #[derive(Clone, Debug)]
 enum Binding {
     Request,
+    /// The connection, in a WebSocket handler.
+    Socket,
     Path {
         name: String,
         kind: Scalar,
@@ -104,12 +107,15 @@ pub(super) struct Route {
     params: Vec<Binding>,
     reply: Reply,
     fallible: bool,
+    /// An `@http.ws` endpoint.
+    ws: bool,
     span: Span,
 }
 
 const ROUTE_METHODS: &[&str] = &["get", "post", "put", "patch", "delete"];
 /// The `Server` and `Group` methods that register handlers, which must be shareable.
-const REGISTRATION: &[&str] = &["route", "get", "post", "put", "patch", "delete", "head", "options", "use", "on_error"];
+const REGISTRATION: &[&str] =
+    &["route", "get", "post", "put", "patch", "delete", "head", "options", "use", "on_error", "ws"];
 
 impl<'m> Checker<'_, 'm> {
     /// Find the `http` module's types if the program imports it.
@@ -119,15 +125,16 @@ impl<'m> Checker<'_, 'm> {
             Some((Global::Struct(id), _, _)) => Some(this.structs[id.0].ty),
             _ => None,
         };
-        let (Some(server), Some(group), Some(request), Some(response)) = (
+        let (Some(server), Some(group), Some(request), Some(response), Some(websocket)) = (
             struct_ty(self, "Server"),
             struct_ty(self, "Group"),
             struct_ty(self, "Request"),
             struct_ty(self, "Response"),
+            struct_ty(self, "WebSocket"),
         ) else {
             return;
         };
-        self.http = Some(HttpTypes { module, server, group, request, response });
+        self.http = Some(HttpTypes { module, server, group, request, response, websocket });
     }
 
     pub(super) fn in_http_module(&self) -> bool {
@@ -210,35 +217,41 @@ impl<'m> Checker<'_, 'm> {
             return None;
         }
         let verb = annotation.name.name.trim_start_matches("http.");
-        if !ROUTE_METHODS.contains(&verb) {
-            let help = if verb == "ws" {
-                "WebSocket endpoints arrive in milestone 9"
-            } else {
-                "the route annotations are `@http.get`, `@http.post`, `@http.put`, `@http.patch` and `@http.delete`"
-            };
+        let ws = verb == "ws";
+        if !ROUTE_METHODS.contains(&verb) && !ws {
             self.route_error(
                 format!("unknown annotation `@{}`", annotation.name.name),
                 annotation.name.span,
                 "not a route annotation",
-                Some(help),
+                Some("the route annotations are `@http.get`, `@http.post`, `@http.put`, `@http.patch`, `@http.delete` and `@http.ws`"),
             );
             return None;
         }
-        let method = verb.to_ascii_uppercase();
+        let method = if ws { "GET".to_string() } else { verb.to_ascii_uppercase() };
         let mut path = None;
         let mut status = None;
         for arg in &annotation.args {
             match (&arg.keyword, &arg.value) {
                 (None, ast::AnnotationValue::Str(text)) if path.is_none() => path = Some(text.clone()),
-                (Some(k), ast::AnnotationValue::Int(code)) if k.name == "status" && (100..600).contains(code) => {
+                (Some(k), ast::AnnotationValue::Int(code))
+                    if k.name == "status" && (100..600).contains(code) && !ws =>
+                {
                     status = Some(*code)
                 }
                 _ => {
                     self.route_error(
-                        "a route annotation takes a path and, optionally, `status=`",
+                        if ws {
+                            "`@http.ws` takes a path"
+                        } else {
+                            "a route annotation takes a path and, optionally, `status=`"
+                        },
                         arg.span,
                         "not expected here",
-                        Some("for example `@http.post(\"/todos\", status=201)`"),
+                        Some(if ws {
+                            "for example `@http.ws(\"/chat\")`"
+                        } else {
+                            "for example `@http.post(\"/todos\", status=201)`"
+                        }),
                     );
                     return None;
                 }
@@ -266,6 +279,26 @@ impl<'m> Checker<'_, 'm> {
             let ast_param = &function.params[index];
             let binding = if Some(param.ty) == self.http.map(|h| h.request) {
                 Binding::Request
+            } else if Some(param.ty) == self.http.map(|h| h.websocket) {
+                if !ws {
+                    self.route_error(
+                        format!("parameter `{}` is a WebSocket, but this is not a WebSocket endpoint", param.name),
+                        param.hint_span,
+                        "only under `@http.ws`",
+                        Some("declare WebSocket endpoints with `@http.ws(\"/path\")`"),
+                    );
+                    return None;
+                }
+                if params.iter().any(|b| matches!(b, Binding::Socket)) {
+                    self.route_error(
+                        "a WebSocket handler takes one `http.WebSocket`",
+                        param.hint_span,
+                        "second one",
+                        None,
+                    );
+                    return None;
+                }
+                Binding::Socket
             } else if names.contains(&param.name) {
                 used_names.push(param.name.clone());
                 match Scalar::of(param.ty) {
@@ -350,6 +383,27 @@ impl<'m> Checker<'_, 'm> {
                 return None;
             }
         }
+        if ws {
+            if !params.iter().any(|b| matches!(b, Binding::Socket)) {
+                self.route_error(
+                    format!("WebSocket handler `{}` has no `http.WebSocket` parameter", function.name.name),
+                    function.name.span,
+                    "no connection to talk on",
+                    Some("add a parameter such as `ws: http.WebSocket`"),
+                );
+                return None;
+            }
+            if signature.ret != Ty::NONE {
+                let shown = self.display(signature.ret);
+                self.route_error(
+                    format!("a WebSocket handler returns nothing, but `{}` returns `{shown}`", function.name.name),
+                    signature.ret_span.unwrap_or(function.name.span),
+                    "remove the return type",
+                    Some("the handler talks to the peer through its `http.WebSocket`; the connection closes when it returns"),
+                );
+                return None;
+            }
+        }
         let (fallible, ok) = match self.types.result_parts(signature.ret) {
             Some((ok, _)) => (true, ok),
             None => (false, signature.ret),
@@ -373,7 +427,7 @@ impl<'m> Checker<'_, 'm> {
             return None;
         };
         let handler = if is_method { Ok(function.name.name.clone()) } else { Err(func) };
-        Some(Route { method, path, status, handler, params, reply, fallible, span })
+        Some(Route { method, path, status, handler, params, reply, fallible, ws, span })
     }
 
     /// The `{name}` segments of a route path, after checking its syntax.
@@ -508,6 +562,8 @@ impl<'m> Checker<'_, 'm> {
         let server_name = self.alias_type(server.ty, &mut aliases);
         let request_name = self.alias_type(http.request, &mut aliases);
         let response_name = self.alias_type(http.response, &mut aliases);
+        let socket_name =
+            if routes.iter().any(|r| r.ws) { self.alias_type(http.websocket, &mut aliases) } else { String::new() };
         self.generated += 1;
         let mount_name = format!("__mount_{}", self.generated);
         let mut text = String::new();
@@ -530,6 +586,10 @@ impl<'m> Checker<'_, 'm> {
                 let line = match binding {
                     Binding::Request => {
                         args.push("__req".to_string());
+                        continue;
+                    }
+                    Binding::Socket => {
+                        args.push("__ws".to_string());
                         continue;
                     }
                     Binding::Path { name, kind: Scalar::Str } => format!("__req.param({name:?})"),
@@ -555,6 +615,13 @@ impl<'m> Checker<'_, 'm> {
                 Ok(method) => format!("__value.{method}({})", args.join(", ")),
                 Err(_) => format!("__f0({})", args.join(", ")),
             };
+            if route.ws {
+                text.push_str(&format!("        def __ws_{index}(__ws: {socket_name}):\n"));
+                text.push_str(&format!("            {call}\n"));
+                text.push_str(&format!("        return __http.upgrade(__req, __ws_{index})\n"));
+                text.push_str(&format!("    __server.route(\"GET\", __prefix + {:?}, __route_{index})\n", route.path));
+                continue;
+            }
             let try_mark = if route.fallible { "?" } else { "" };
             let status = route.status.unwrap_or(if matches!(route.reply, Reply::Empty) { 204 } else { 200 });
             match route.reply {

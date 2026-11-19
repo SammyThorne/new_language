@@ -61,6 +61,70 @@ trait Shareable:
     """
     pass
 
+@extern("lrt_bytes_at")
+def __bytes_at(data: str, index: int) -> int
+
+@extern("lrt_bytes_slice")
+def __bytes_slice(data: str, start: int, end: int) -> str
+
+@extern("lrt_bytes_is_utf8")
+def __bytes_is_utf8(data: str) -> int
+
+@extern("lrt_bytes_repr")
+def __bytes_repr(data: str) -> str
+
+@extern("lrt_bytes_hex")
+def __bytes_hex(data: str) -> str
+
+@derive(Eq, Hash)
+@frozen
+struct bytes:
+    """
+    Binary data: an immutable sequence of bytes, such as a WebSocket binary message.
+    `text.encode()` gives a string's UTF-8 bytes and `data.decode()` the text back; `data[i]` is
+    one byte as an `int`, and `len(data)` the number of bytes.
+    """
+    priv data: str
+
+impl bytes:
+    def len(self) -> int:
+        return len(self.data)
+
+    def get_index(self, index: int) -> int:
+        value = __bytes_at(self.data, index)
+        if value < 0:
+            panic(f"index {index} is out of range for {len(self.data)} bytes")
+        return value
+
+    def slice(self, start: int, end: int) -> bytes:
+        """Bytes `start` up to `end`; negative indices count from the end, as in slicing."""
+        return bytes(__bytes_slice(self.data, start, end))
+
+    def decode(self) -> str?:
+        """The bytes as text, or `None` if they are not valid UTF-8."""
+        if __bytes_is_utf8(self.data) == 1:
+            return self.data
+        return None
+
+    def hex(self) -> str:
+        return __bytes_hex(self.data)
+
+impl Display for bytes:
+    def to_str(self) -> str:
+        return __bytes_repr(self.data)
+
+impl AddNumber for bytes:
+    def add(self, other: bytes) -> bytes:
+        return bytes(self.data + other.data)
+
+def __bytes(data: str) -> bytes:
+    """`text.encode()`; also how the standard library wraps data that is not text."""
+    return bytes(data)
+
+def __bytes_data(value: bytes) -> str:
+    """The data of a `bytes`, for the standard library to hand to the runtime. Not text."""
+    return value.data
+
 trait ToJson:
     """Types that `json.encode` can write. `@derive(Json)` implements it with generated code."""
     pass

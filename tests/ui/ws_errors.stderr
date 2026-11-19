@@ -1,0 +1,39 @@
+error[E0340]: WebSocket handler `no_socket` has no `http.WebSocket` parameter
+ --> tests/ui/ws_errors.wb:4:5
+  |
+4 | def no_socket(name: str):
+  |     ^^^^^^^^^ no connection to talk on
+  |
+  = help: add a parameter such as `ws: http.WebSocket`
+
+error[E0340]: a WebSocket handler returns nothing, but `returns_text` returns `str`
+ --> tests/ui/ws_errors.wb:8:41
+  |
+8 | def returns_text(ws: http.WebSocket) -> str:
+  |                                         ^^^ remove the return type
+  |
+  = help: the handler talks to the peer through its `http.WebSocket`; the connection closes when it returns
+
+error[E0340]: parameter `ws` is a WebSocket, but this is not a WebSocket endpoint
+  --> tests/ui/ws_errors.wb:12:23
+   |
+12 | def socket_on_get(ws: http.WebSocket) -> str:
+   |                       ^^^^^^^^^^^^^^ only under `@http.ws`
+   |
+   = help: declare WebSocket endpoints with `@http.ws("/path")`
+
+error[E0340]: `@http.ws` takes a path
+  --> tests/ui/ws_errors.wb:15:16
+   |
+15 | @http.ws("/d", status=101)
+   |                ^^^^^^^^^^ not expected here
+   |
+   = help: for example `@http.ws("/chat")`
+
+error[E0340]: a WebSocket handler takes one `http.WebSocket`
+  --> tests/ui/ws_errors.wb:20:39
+   |
+20 | def two_sockets(a: http.WebSocket, b: http.WebSocket):
+   |                                       ^^^^^^^^^^^^^^ second one
+
+error: could not compile `tests/ui/ws_errors.wb` due to 5 errors

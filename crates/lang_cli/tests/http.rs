@@ -3,121 +3,11 @@
 //! way. Each program is compiled, started, sent the script over raw TCP, then stopped with SIGTERM,
 //! which must shut it down cleanly.
 
-use lang_names::{CLI_NAME, SOURCE_EXTENSION, env_var};
-use std::io::{BufRead, BufReader, Read, Write};
+mod common;
+
+use common::{Response, build_runtime, connect, read_response, start};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
-}
-
-fn compiler() -> PathBuf {
-    let variable = format!("CARGO_BIN_EXE_{CLI_NAME}");
-    PathBuf::from(std::env::var_os(&variable).unwrap_or_else(|| panic!("cargo did not set {variable}")))
-}
-
-fn build_runtime() {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status =
-        Command::new(cargo).args(["build", "--quiet", "-p", "lang_rt"]).current_dir(repo_root()).status().unwrap();
-    assert!(status.success(), "building the runtime library failed");
-}
-
-/// A response: status, lower-cased headers, and body.
-struct Response {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: String,
-}
-
-impl Response {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
-    }
-}
-
-/// Read one response from a keep-alive connection.
-fn read_response(reader: &mut BufReader<TcpStream>, head_request: bool) -> Response {
-    let mut status_line = String::new();
-    reader.read_line(&mut status_line).unwrap();
-    let status: u16 =
-        status_line.split(' ').nth(1).unwrap_or_else(|| panic!("bad status line {status_line:?}")).parse().unwrap();
-    let mut headers = Vec::new();
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        let line = line.trim_end();
-        if line.is_empty() {
-            break;
-        }
-        let (name, value) = line.split_once(':').unwrap();
-        headers.push((name.to_ascii_lowercase(), value.trim().to_string()));
-    }
-    let length: usize = headers.iter().find(|(n, _)| n == "content-length").map_or(0, |(_, v)| v.parse().unwrap());
-    let mut body = vec![0u8; if head_request { 0 } else { length }];
-    reader.read_exact(&mut body).unwrap();
-    Response { status, headers, body: String::from_utf8(body).unwrap() }
-}
-
-struct Server {
-    child: Child,
-    port: u16,
-    executable: PathBuf,
-}
-
-impl Drop for Server {
-    /// Stop the server (if a failed assertion left it running) and remove its executable.
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_file(&self.executable);
-    }
-}
-
-fn start(program: &str) -> Server {
-    let root = repo_root();
-    let executable = std::env::temp_dir().join(format!("{CLI_NAME}-http-test-{program}-{}", std::process::id()));
-    let output = Command::new(compiler())
-        .args(["build", &format!("tests/http/{program}.{SOURCE_EXTENSION}"), "-o"])
-        .arg(&executable)
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{program} did not compile:\n{}", String::from_utf8_lossy(&output.stderr));
-    let mut child = Command::new(&executable)
-        .env(env_var("LOG"), "warn")
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    stderr.read_line(&mut line).unwrap();
-    let port = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap_or_else(|| panic!("unexpected output {line:?}"))
-        .parse()
-        .unwrap();
-    // Keep reading standard error so the server never blocks on it; it is checked at the end.
-    let child_stderr = std::thread::spawn(move || {
-        let mut rest = String::new();
-        stderr.read_to_string(&mut rest).unwrap();
-        rest
-    });
-    std::mem::forget(child_stderr);
-    Server { child, port, executable }
-}
-
-fn connect(port: u16) -> (TcpStream, BufReader<TcpStream>) {
-    let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    let reader = BufReader::new(stream.try_clone().unwrap());
-    (stream, reader)
-}
 
 fn request(
     stream: &mut TcpStream,
@@ -232,10 +122,7 @@ fn run_script(program: &str) {
         client.join().unwrap();
     }
 
-    let status = Command::new("kill").args(["-TERM", &server.child.id().to_string()]).status().unwrap();
-    assert!(status.success());
-    let exit = server.child.wait().unwrap();
-    assert!(exit.success(), "{program} did not shut down cleanly: {exit}");
+    server.stop(program);
 }
 
 #[test]

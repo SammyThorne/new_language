@@ -21,6 +21,7 @@ const STR_METHODS: &[&str] = &[
     "starts_with",
     "ends_with",
     "contains",
+    "encode",
 ];
 const LIST_METHODS: &[&str] =
     &["append", "extend", "insert", "pop", "remove", "clear", "sort", "reverse", "index", "copy"];
@@ -151,6 +152,14 @@ impl Checker<'_, '_> {
         {
             let ty = if name == "int" { Ty::INT } else { Ty::FLOAT };
             return builtin(Op::NumConvert, vec![value], ty);
+        }
+        // `len(x)` on a type with a `len(self) -> int` method calls it, as `bytes` has.
+        if name == "len"
+            && matches!(kind, TyKind::Struct(_) | TyKind::Enum(_))
+            && let Some(func) = self.method_of(value.ty, "len")
+            && self.signatures[func.0].ret == Ty::INT
+        {
+            return hir::Expr { kind: hir::ExprKind::Call { func, args: vec![value] }, ty: Ty::INT, span };
         }
         let result = match (name, &kind) {
             (
@@ -502,6 +511,15 @@ impl Checker<'_, '_> {
         let kind = self.types.kind(ty).clone();
         let n = args.len();
         let list_str = self.types.list(Ty::STR);
+        // `text.encode()`: the string's UTF-8 bytes, made by the prelude.
+        if kind == TyKind::Str
+            && name.name == "encode"
+            && args.is_empty()
+            && let Some(&(super::Global::Function(func), _)) = self.globals.get("__bytes")
+        {
+            let ret = self.signatures[func.0].ret;
+            return hir::Expr { kind: hir::ExprKind::Call { func, args: vec![receiver] }, ty: ret, span };
+        }
         // (operation, parameter types, result type)
         let signature: Option<(Op, Vec<Ty>, Ty)> = match (&kind, name.name.as_str()) {
             (TyKind::Str, "upper") => Some((Op::StrUpper, vec![], Ty::STR)),
