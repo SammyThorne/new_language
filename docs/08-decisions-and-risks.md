@@ -807,6 +807,40 @@ Milestone 3 of the [final optimisation plan](10-final-optimization-plan.md): all
 
 **Not met: `binary_trees` at 0.55 s.** It reached 0.577 s. The plan's 20% came from the earlier measurement with all of the machine's CPUs marking; capped at four, and only from 32 MiB, it gains 14.5%, and more markers or an earlier start did not help.
 
+### D90. Typed dict entry points, short-key hashing, inline builder pushes, one-compare indexing (final plan, milestone 4)
+
+Milestone 4 of the [final optimisation plan](10-final-optimization-plan.md): generated code.
+
+**What was done.**
+- **Dict entry points by key type.** For `str` keys, `lrt_dict_find_str` and `lrt_dict_slot_str` take the key as pointer and length; for `int` keys, `lrt_dict_find_int` and `lrt_dict_slot_int` take it by value. Each has its hash and comparison inline: no spill to the stack, no check of the descriptor on every call and every probe. The compiler picks the entry point at every site (`Codegen::dict_entry`); other key types, and whole-dict operations (copy, equality, removal), keep the generic functions, which compute the same tags.
+- **Hashing.** `str` keys use the string hash directly, without a second SplitMix pass over a hash that is already mixed; `int` keys keep it. Strings of up to 16 bytes are hashed from at most two overlapping loads, with no loop and no copy into a zeroed buffer.
+- **Builder pushes inline.** `lang.builder.push`, an always-inline function in each module, compares the length with the capacity, copies and bumps the length, and calls `lrt_builder_push` only to grow. With a constant length, as for every literal piece of an f-string or a JSON encoding, the copy becomes a few stores.
+- **List indexing** takes one unsigned compare on the common path, `0 <= i < len`; negative indexes and the panic are out of line.
+- `tests/run/dict_keys.wb` checks the typed paths against a linear list of pairs and against the generic paths: `str` keys of every length from 0 to 40, ASCII and not, keys sharing bytes with other strings, removals, copies and equality; and negative, consecutive and extreme `int` keys. Its expected output came from the compiler before this change.
+
+**Timings**, interleaved A/B against milestone 3:
+
+| Measure | Before | After | Change |
+|---|---|---|---|
+| `word_count` | 0.582 s | 0.348 s | -40% |
+| `sieve` | 0.053 s | 0.049 s | -7.8% |
+| `json_orders` | 0.209 s | 0.195 s | -6.4% |
+| `/items`, one CPU | 246,800 req/s | 292,800 req/s | +18.6% |
+| `/items`, six CPUs | 546,700 | 608,500 | +11.3% |
+| `/users/42`, one CPU | 434,100 | 443,500 | +2.2% |
+| Other HTTP rows, `sort`, `binary_trees` | | | within 1.5% |
+
+Dict work fell from 49% of `word_count` to 31%: `lrt_dict_slot_str` (with the probe inlined) 23.8%, hashing 7.3%.
+
+**Tried and not kept.**
+- **Aligning generated functions to 64 bytes** (D87 found `binary_trees` sensitive to where its functions fall in a cache line). `binary_trees` gained 4.9% and `word_count` lost 5.4%, the rest within 2%: alignment moves the luck around rather than removing it.
+- **A `--cpu` flag** (`native` uses the host's CPU name and features). On this machine it made `word_count` 6.3% and `sieve` 4.3% slower and nothing faster, so the default generic x86-64 stays and the flag was not added.
+
+**Not done.**
+- Hash bits in the index slots (optional in the plan): `word_count` beat its target four times over without it.
+- Merging neighbouring literal pieces in the JSON encoder at compile time: with pushes inline, each piece is already a few stores.
+- `bool` list elements as `i8`: `sieve` got its gain from the index path, and its IR showed no blocked vectorisation worth the change.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

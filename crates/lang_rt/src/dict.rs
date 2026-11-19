@@ -76,16 +76,14 @@ impl Dict {
     }
 
     fn hash(&self, key: *const u8) -> i64 {
-        let hash = if self.str_keys() {
+        if self.str_keys() {
             // SAFETY: the keys are `str`.
             let key = unsafe { *(key as *const Str) };
-            crate::strings::hash_str(unsafe { std::slice::from_raw_parts(key.ptr, key.len as usize) })
-        } else {
-            let hash = self.desc().hash.expect("dict descriptor has a hash function");
-            // SAFETY: `key` points to a key of this dict's key type.
-            unsafe { hash(key) as u64 }
-        };
-        (mix(hash) | 1) as i64
+            return str_tag(unsafe { key_bytes(key.ptr, key.len) });
+        }
+        let hash = self.desc().hash.expect("dict descriptor has a hash function");
+        // SAFETY: `key` points to a key of this dict's key type.
+        (mix(unsafe { hash(key) as u64 }) | 1) as i64
     }
 
     fn keys_equal(&self, a: *const u8, b: *const u8) -> bool {
@@ -107,6 +105,12 @@ impl Dict {
     /// The index slot for `key`, and the entry number if the key is present. When absent, the
     /// slot is where the key should go (the first removed slot seen, or the empty one).
     unsafe fn probe(&self, key: *const u8, hash: i64) -> (usize, Option<usize>) {
+        unsafe { self.probe_by(hash, |stored| self.keys_equal(key, stored)) }
+    }
+
+    /// `probe`, comparing keys with `same`, which gets a pointer to a stored key.
+    #[inline(always)]
+    unsafe fn probe_by(&self, hash: i64, same: impl Fn(*const u8) -> bool) -> (usize, Option<usize>) {
         let mask = self.index_cap as usize - 1;
         let mut i = hash as usize & mask;
         let mut first_removed = None;
@@ -119,7 +123,7 @@ impl Dict {
                 first_removed.get_or_insert(i);
             } else {
                 let entry = unsafe { self.entry(found as usize) };
-                if unsafe { Dict::tag(entry) } == hash && self.keys_equal(key, unsafe { entry.add(8) }) {
+                if unsafe { Dict::tag(entry) } == hash && same(unsafe { entry.add(8) }) {
                     return (i, Some(found as usize));
                 }
             }
@@ -173,6 +177,148 @@ unsafe fn dict<'a>(d: *mut Dict) -> &'a mut Dict {
     unsafe { &mut *d }
 }
 
+unsafe fn key_bytes<'a>(ptr: *const u8, len: i64) -> &'a [u8] {
+    if len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(ptr, len as usize) } }
+}
+
+/// The tag stored with a `str` key: its hash, odd so that 0 can mark a removed entry. The
+/// string hash is already well mixed, so it is not mixed again (docs/08, D90).
+#[inline(always)]
+fn str_tag(bytes: &[u8]) -> i64 {
+    (crate::strings::hash_str(bytes) | 1) as i64
+}
+
+/// The tag stored with an `int` key: as the generic path computes it (the generated hash of an
+/// `int` is the value itself).
+#[inline(always)]
+fn int_tag(key: i64) -> i64 {
+    (mix(key as u64) | 1) as i64
+}
+
+impl Dict {
+    /// The entry for a `str` key, if present, and the slot where it is or would go.
+    #[inline(always)]
+    unsafe fn probe_str(&self, bytes: &[u8], hash: i64) -> (usize, Option<usize>) {
+        unsafe {
+            self.probe_by(hash, |stored| {
+                let stored = *(stored as *const Str);
+                stored.len as usize == bytes.len()
+                    && (stored.ptr == bytes.as_ptr() || key_bytes(stored.ptr, stored.len) == bytes)
+            })
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn probe_int(&self, key: i64, hash: i64) -> (usize, Option<usize>) {
+        unsafe { self.probe_by(hash, |stored| *(stored as *const i64) == key) }
+    }
+
+    /// Insert a key known to be absent at `slot` (from a probe with `hash`), growing first if
+    /// needed, and return the new entry's value pointer. `key` points to the key to copy.
+    unsafe fn insert(
+        &mut self,
+        mut slot: usize,
+        hash: i64,
+        key: *const u8,
+        reprobe: impl Fn(&Self) -> usize,
+    ) -> *mut u8 {
+        unsafe {
+            if self.used == self.cap {
+                self.rebuild();
+                slot = reprobe(self);
+            }
+            let i = self.used as usize;
+            let entry = self.entry(i);
+            *(entry as *mut i64) = hash;
+            std::ptr::copy_nonoverlapping(key, entry.add(8), self.key_size());
+            *self.index.add(slot) = i as i64;
+            self.used += 1;
+            self.len += 1;
+            entry.add(self.value_offset())
+        }
+    }
+}
+
+/// `lrt_dict_find` for a `str` key, passed as pointer and length: no spill, no check of the
+/// key type, and the hash and comparison inlined (docs/10, milestone 4).
+///
+/// # Safety
+/// `d` must be a dict with `str` keys; `ptr` and `len` describe a string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_dict_find_str(d: *mut Dict, ptr: *const u8, len: i64) -> *mut u8 {
+    unsafe {
+        let d = dict(d);
+        if d.index_cap == 0 {
+            return std::ptr::null_mut();
+        }
+        let bytes = key_bytes(ptr, len);
+        match d.probe_str(bytes, str_tag(bytes)).1 {
+            Some(i) => d.entry(i).add(d.value_offset()),
+            None => std::ptr::null_mut(),
+        }
+    }
+}
+
+/// `lrt_dict_slot` for a `str` key, passed as pointer and length.
+///
+/// # Safety
+/// As `lrt_dict_find_str`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_dict_slot_str(d: *mut Dict, ptr: *const u8, len: i64) -> *mut u8 {
+    unsafe {
+        let d = dict(d);
+        if d.index_cap == 0 {
+            d.rebuild();
+        }
+        let bytes = key_bytes(ptr, len);
+        let hash = str_tag(bytes);
+        let (slot, found) = d.probe_str(bytes, hash);
+        if let Some(i) = found {
+            return d.entry(i).add(d.value_offset());
+        }
+        let key = Str { ptr, len };
+        d.insert(slot, hash, &key as *const Str as *const u8, |d| d.probe_str(bytes, hash).0)
+    }
+}
+
+/// `lrt_dict_find` for an `int` key, passed by value.
+///
+/// # Safety
+/// `d` must be a dict with `int` keys.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_dict_find_int(d: *mut Dict, key: i64) -> *mut u8 {
+    unsafe {
+        let d = dict(d);
+        if d.index_cap == 0 {
+            return std::ptr::null_mut();
+        }
+        match d.probe_int(key, int_tag(key)).1 {
+            Some(i) => d.entry(i).add(d.value_offset()),
+            None => std::ptr::null_mut(),
+        }
+    }
+}
+
+/// `lrt_dict_slot` for an `int` key, passed by value.
+///
+/// # Safety
+/// `d` must be a dict with `int` keys.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_dict_slot_int(d: *mut Dict, key: i64) -> *mut u8 {
+    unsafe {
+        let d = dict(d);
+        if d.index_cap == 0 {
+            d.rebuild();
+        }
+        let hash = int_tag(key);
+        let (slot, found) = d.probe_int(key, hash);
+        if let Some(i) = found {
+            return d.entry(i).add(d.value_offset());
+        }
+        d.insert(slot, hash, &key as *const i64 as *const u8, |d| d.probe_int(key, hash).0)
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_dict_new(desc: *const TypeDesc) -> *mut Dict {
     let d = gc::alloc(std::mem::size_of::<Dict>()) as *mut Dict;
@@ -208,22 +354,11 @@ pub unsafe extern "C-unwind" fn lrt_dict_slot(d: *mut Dict, key: *const u8) -> *
             d.rebuild();
         }
         let hash = d.hash(key);
-        let (mut slot, found) = d.probe(key, hash);
+        let (slot, found) = d.probe(key, hash);
         if let Some(i) = found {
             return d.entry(i).add(d.value_offset());
         }
-        if d.used == d.cap {
-            d.rebuild();
-            slot = d.probe(key, hash).0;
-        }
-        let i = d.used as usize;
-        let entry = d.entry(i);
-        *(entry as *mut i64) = hash;
-        std::ptr::copy_nonoverlapping(key, entry.add(8), d.key_size());
-        *d.index.add(slot) = i as i64;
-        d.used += 1;
-        d.len += 1;
-        entry.add(d.value_offset())
+        d.insert(slot, hash, key, |d| d.probe(key, hash).0)
     }
 }
 

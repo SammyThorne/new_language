@@ -130,12 +130,10 @@ impl<'ctx> Codegen<'ctx, '_> {
             ExprKind::Dict(pairs) => {
                 let desc = self.desc(expr.ty);
                 let dict = self.call_rt("lrt_dict_new", &[desc.into()]).unwrap().into_pointer_value();
-                for (key, value) in pairs {
-                    let key = self.value(key);
+                for (key_expr, value) in pairs {
+                    let key = self.value(key_expr);
                     let value = self.value(value);
-                    let key_ptr = self.spill(key);
-                    let slot =
-                        self.call_rt("lrt_dict_slot", &[dict.into(), key_ptr.into()]).unwrap().into_pointer_value();
+                    let slot = self.dict_entry(dict.into(), key, key_expr.ty, true);
                     self.b.build_store(slot, value).must();
                 }
                 dict.into()
@@ -546,15 +544,28 @@ impl<'ctx> Codegen<'ctx, '_> {
         span: Span,
     ) -> PointerValue<'ctx> {
         let len = self.list_len(list);
-        let negative = self.b.build_int_compare(IntPredicate::SLT, index, self.i64(0), "").must();
+        // One unsigned compare on the common path: `0 <= index < len`. A negative index, or the
+        // panic, is handled out of line (docs/10, milestone 4).
+        let in_range = self.b.build_int_compare(IntPredicate::ULT, index, len, "").must();
+        let (direct, other, join) = (self.block("index.direct"), self.block("index.other"), self.block("index.join"));
+        self.b.build_conditional_branch(in_range, direct, other).must();
+        self.b.position_at_end(other);
+        // From the end: in range if `-len <= index < 0`, which `index + len < len` (unsigned)
+        // also checks, since a non-negative index here is already `>= len`.
         let wrapped = self.b.build_int_add(index, len, "").must();
-        let adjusted = self.b.build_select(negative, wrapped, index, "").must().into_int_value();
-        // Unsigned comparison also catches indexes still negative after adjustment.
-        let out_of_range = self.b.build_int_compare(IntPredicate::UGE, adjusted, len, "").must();
+        let out_of_range = self.b.build_int_compare(IntPredicate::UGE, wrapped, len, "").must();
         self.check(out_of_range, |this| {
             let (loc, loc_len) = this.location(span);
             this.call_rt("lrt_panic_index", &[index.into(), len.into(), loc.into(), loc_len.into()]);
         });
+        let other_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(join).must();
+        self.b.position_at_end(direct);
+        self.b.build_unconditional_branch(join).must();
+        self.b.position_at_end(join);
+        let adjusted = self.b.build_phi(self.cx.i64_type(), "index").must();
+        adjusted.add_incoming(&[(&index as &dyn BasicValue, direct), (&wrapped, other_end)]);
+        let adjusted = adjusted.as_basic_value().into_int_value();
         let data = self.list_data(list);
         // SAFETY (LLVM): `adjusted` was checked against the length above.
         unsafe { self.b.build_in_bounds_gep(self.value_type(elem), data, &[adjusted], "").must() }
@@ -593,6 +604,32 @@ impl<'ctx> Codegen<'ctx, '_> {
     }
 
     /// Address of the value for `key`; panics, showing the key, if it is absent.
+    /// The value pointer for `key` in `dict`, through the runtime entry point for the key's
+    /// type: `str` keys as pointer and length, `int` keys by value, others spilled to the stack
+    /// for the generic functions (docs/10, milestone 4). With `insert`, an absent key is added
+    /// with a zeroed value (`lrt_dict_slot`); otherwise null means absent (`lrt_dict_find`).
+    pub(crate) fn dict_entry(
+        &mut self,
+        dict: BasicValueEnum<'ctx>,
+        key: BasicValueEnum<'ctx>,
+        key_ty: Ty,
+        insert: bool,
+    ) -> PointerValue<'ctx> {
+        let verb = if insert { "slot" } else { "find" };
+        let found = match self.kind(key_ty) {
+            TyKind::Str => {
+                let [ptr, len] = self.str_parts(key);
+                self.call_rt(&format!("lrt_dict_{verb}_str"), &[dict, ptr, len])
+            }
+            TyKind::Int => self.call_rt(&format!("lrt_dict_{verb}_int"), &[dict, key]),
+            _ => {
+                let key_ptr = self.spill(key);
+                self.call_rt(&format!("lrt_dict_{verb}"), &[dict, key_ptr.into()])
+            }
+        };
+        found.unwrap().into_pointer_value()
+    }
+
     pub(crate) fn dict_lookup(
         &mut self,
         dict: PointerValue<'ctx>,
@@ -600,8 +637,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         key_ty: Ty,
         span: Span,
     ) -> PointerValue<'ctx> {
-        let key_ptr = self.spill(key);
-        let found = self.call_rt("lrt_dict_find", &[dict.into(), key_ptr.into()]).unwrap().into_pointer_value();
+        let found = self.dict_entry(dict.into(), key, key_ty, false);
         let missing = self.b.build_is_null(found, "").must();
         self.check(missing, |this| {
             let builder = this.builder_new();
@@ -912,8 +948,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.build_int_compare(IntPredicate::SGE, at, self.i64(0), "").must()
             }
             TyKind::Dict(..) => {
-                let ptr = self.spill(needle);
-                let found = self.call_rt("lrt_dict_find", &[container, ptr.into()]).unwrap().into_pointer_value();
+                let found = self.dict_entry(container, needle, needle_ty, false);
                 self.b.build_is_not_null(found, "").must()
             }
             other => unreachable!("`in` on {other:?}"),
@@ -993,7 +1028,66 @@ impl<'ctx> Codegen<'ctx, '_> {
     pub(crate) fn push_text(&mut self, builder: PointerValue<'ctx>, text: &str) {
         let value = self.str_const(text);
         let [ptr, len] = self.str_parts(value.into());
-        self.call_rt("lrt_builder_push", &[builder.into(), ptr, len]);
+        self.builder_push(builder, ptr, len);
+    }
+
+    /// Append bytes to a builder: inline when they fit, which with a constant length becomes a
+    /// few stores; the runtime only to grow (docs/10, milestone 4).
+    pub(crate) fn builder_push(
+        &mut self,
+        builder: PointerValue<'ctx>,
+        ptr: BasicValueEnum<'ctx>,
+        len: BasicValueEnum<'ctx>,
+    ) {
+        let push = self.builder_push_function();
+        self.b.build_call(push, &[builder.into(), ptr.into(), len.into()], "").must();
+    }
+
+    /// `void @lang.builder.push(ptr builder, ptr bytes, i64 len)`, always inlined.
+    fn builder_push_function(&mut self) -> inkwell::values::FunctionValue<'ctx> {
+        const NAME: &str = "lang.builder.push";
+        if let Some(function) = self.module.get_function(NAME) {
+            return function;
+        }
+        let ptr = self.ptr_type();
+        let i64_type = self.cx.i64_type();
+        let ty = self.cx.void_type().fn_type(&[ptr.into(), ptr.into(), i64_type.into()], false);
+        let function = self.module.add_function(NAME, ty, Some(inkwell::module::Linkage::Internal));
+        let attribute =
+            |name: &str| self.cx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id(name), 0);
+        function.add_attribute(inkwell::attributes::AttributeLoc::Function, attribute("alwaysinline"));
+        let grow = self.runtime("lrt_builder_push");
+        // The runtime's `Builder`: data, length, capacity.
+        let builder_type = self.cx.struct_type(&[ptr.into(), i64_type.into(), i64_type.into()], false);
+        let b = self.cx.create_builder();
+        let (entry, fits, full) = (
+            self.cx.append_basic_block(function, "entry"),
+            self.cx.append_basic_block(function, "fits"),
+            self.cx.append_basic_block(function, "full"),
+        );
+        let builder = function.get_nth_param(0).unwrap().into_pointer_value();
+        let bytes = function.get_nth_param(1).unwrap().into_pointer_value();
+        let n = function.get_nth_param(2).unwrap().into_int_value();
+        b.position_at_end(entry);
+        let len_ptr = b.build_struct_gep(builder_type, builder, 1, "len.ptr").must();
+        let cap_ptr = b.build_struct_gep(builder_type, builder, 2, "cap.ptr").must();
+        let len = b.build_load(i64_type, len_ptr, "len").must().into_int_value();
+        let cap = b.build_load(i64_type, cap_ptr, "cap").must().into_int_value();
+        let end = b.build_int_add(len, n, "end").must();
+        let room = b.build_int_compare(IntPredicate::SLE, end, cap, "").must();
+        b.build_conditional_branch(room, fits, full).must();
+        b.position_at_end(fits);
+        let data_ptr = b.build_struct_gep(builder_type, builder, 0, "data.ptr").must();
+        let data = b.build_load(ptr, data_ptr, "data").must().into_pointer_value();
+        // SAFETY (LLVM): `len + n <= cap`, inside the buffer (or 0 bytes at a null one).
+        let at = unsafe { b.build_gep(self.cx.i8_type(), data, &[len], "at") }.must();
+        b.build_memcpy(at, 1, bytes, 1, n).must();
+        b.build_store(len_ptr, end).must();
+        b.build_return(None).must();
+        b.position_at_end(full);
+        b.build_call(grow, &[builder.into(), bytes.into(), n.into()], "").must();
+        b.build_return(None).must();
+        function
     }
 
     /// Append how a value prints. With `repr`, strings are quoted, as inside containers.
@@ -1027,12 +1121,15 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let cond = value.unwrap().into_int_value();
                 let ptr = self.b.build_select(cond, truth, falsehood, "").must();
                 let len = self.b.build_select(cond, self.i64(4), self.i64(5), "").must();
-                self.call_rt("lrt_builder_push", &[builder.into(), ptr, len]);
+                self.builder_push(builder, ptr, len);
             }
             TyKind::Str => {
                 let [ptr, len] = self.str_parts(value.unwrap());
-                let function = if repr { "lrt_builder_push_str_repr" } else { "lrt_builder_push" };
-                self.call_rt(function, &[builder.into(), ptr, len]);
+                if repr {
+                    self.call_rt("lrt_builder_push_str_repr", &[builder.into(), ptr, len]);
+                } else {
+                    self.builder_push(builder, ptr, len);
+                }
             }
             TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Dyn(_) | TyKind::SelfType(_) => {
                 self.push_user_value(builder, ty, value.unwrap(), repr);

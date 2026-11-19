@@ -178,12 +178,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                         self.store_tagged(ptr, value, "list.elem");
                         return;
                     }
-                    TyKind::Dict(..) => {
-                        let key = self.spill(index_value);
-                        self.call_rt("lrt_dict_slot", &[container_value.into(), key.into()])
-                            .unwrap()
-                            .into_pointer_value()
-                    }
+                    TyKind::Dict(..) => self.dict_entry(container_value.into(), index_value, index.ty, true),
                     other => unreachable!("cannot assign into {other:?}"),
                 };
                 self.b.build_store(ptr, value).must();
@@ -228,8 +223,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 // The slot is inserted (zeroed) if absent; the length says whether it was.
                 let len_ptr = self.b.build_struct_gep(self.dict_type, dict, 1, "len").must();
                 let before = self.b.build_load(self.cx.i64_type(), len_ptr, "").must().into_int_value();
-                let key_ptr = self.spill(key);
-                let slot = self.call_rt("lrt_dict_slot", &[dict.into(), key_ptr.into()]).unwrap().into_pointer_value();
+                let slot = self.dict_entry(dict.into(), key, index.ty, true);
                 let after = self.b.build_load(self.cx.i64_type(), len_ptr, "").must().into_int_value();
                 let inserted = self.b.build_int_compare(IntPredicate::NE, before, after, "").must();
                 let default = self.value(default);

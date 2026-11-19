@@ -76,7 +76,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let cond = value.unwrap().into_int_value();
                 let ptr = self.b.build_select(cond, truth, falsehood, "").must();
                 let len = self.b.build_select(cond, self.i64(4), self.i64(5), "").must();
-                self.call_rt("lrt_builder_push", &[builder.into(), ptr, len]);
+                self.builder_push(builder, ptr, len);
             }
             TyKind::Str => {
                 let [ptr, len] = self.str_parts(value.unwrap());
@@ -419,10 +419,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let ok = self.decode_json(reader, value_ty, slot);
                 self.or_fail(ok, fail);
                 self.call_rt("lrt_json_pop", &[r]);
-                let key_ptr = self.spill(key);
-                let _ = key_ty;
-                let target =
-                    self.call_rt("lrt_dict_slot", &[dict.into(), key_ptr.into()]).unwrap().into_pointer_value();
+                let target = self.dict_entry(dict.into(), key, key_ty, true);
                 let item = self.b.build_load(self.value_type(value_ty), slot, "").must();
                 self.b.build_store(target, item).must();
                 self.b.build_unconditional_branch(header).must();

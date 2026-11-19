@@ -82,7 +82,24 @@ fn fold_mul(a: u64, b: u64) -> u64 {
 pub fn hash_bytes(bytes: &[u8], seed: u64) -> u64 {
     const P0: u64 = 0xa076_1d64_78bd_642f;
     const P1: u64 = 0xe703_7ed1_a0b4_28db;
-    let mut h = seed ^ fold_mul(bytes.len() as u64 ^ P0, P1);
+    let len = bytes.len();
+    if len <= 16 {
+        // Short keys, the common case: at most two loads, which overlap for lengths that are not
+        // 4, 8 or 16, and no loop or copy (docs/10, milestone 4). As in wyhash.
+        let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        let half = |at: usize| u64::from(u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()));
+        let (a, b) = if len >= 8 {
+            (word(0), word(len - 8))
+        } else if len >= 4 {
+            (half(0), half(len - 4))
+        } else if len > 0 {
+            (u64::from(bytes[0]) << 16 | u64::from(bytes[len / 2]) << 8 | u64::from(bytes[len - 1]), 0)
+        } else {
+            (0, 0)
+        };
+        return fold_mul(fold_mul(a ^ P0 ^ seed, b ^ P1 ^ len as u64), P1 ^ seed);
+    }
+    let mut h = seed ^ fold_mul(len as u64 ^ P0, P1);
     let mut chunks = bytes.chunks_exact(8);
     for chunk in &mut chunks {
         let word = u64::from_le_bytes(chunk.try_into().unwrap());

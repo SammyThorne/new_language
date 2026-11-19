@@ -506,6 +506,8 @@ Record as D89.
 
 ## Milestone 4: Generated code: builders and dicts
 
+**Done 2026-11-19 (D90).** `word_count` -40% (target 10%), `/items` +18.6% on one CPU, `sieve` -7.8%, `json_orders` -6.4%. Function alignment and a `--cpu` flag were measured and not kept; hash bits in index slots, literal merging and `i8` booleans were not needed.
+
 ### 4.1 Builder pushes inline
 
 **Now:** `push_text` (`lang_codegen/src/expr.rs:979`) emits a call to `lrt_builder_push(b, ptr, len)` for every literal piece of an f-string or of JSON output. The `Builder` record (`data`, `len`, `cap`) is already on the generated function's stack.

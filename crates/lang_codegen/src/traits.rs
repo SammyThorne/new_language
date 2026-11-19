@@ -443,13 +443,13 @@ impl<'ctx> Codegen<'ctx, '_> {
                 };
                 let text = self.dyn_call(value, trait_id, &path, 0, Vec::new()).unwrap();
                 let [ptr, len] = self.str_parts(text);
-                self.call_rt("lrt_builder_push", &[builder.into(), ptr, len]);
+                self.builder_push(builder, ptr, len);
             }
             _ => {
                 if let Some(function) = self.explicit_method(b.display, ty, 0) {
                     let text = self.call_method(function, &[value]).unwrap();
                     let [ptr, len] = self.str_parts(text);
-                    self.call_rt("lrt_builder_push", &[builder.into(), ptr, len]);
+                    self.builder_push(builder, ptr, len);
                 } else if self.program.impl_of(b.display, ty).is_some() {
                     let helper = self.helper(Helper::Push { repr }, ty);
                     let call = self.b.build_call(helper, &[builder.into(), value.into()], "").must();
@@ -457,7 +457,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 } else if let Some(function) = self.explicit_method(b.error, ty, 0) {
                     let text = self.call_method(function, &[value]).unwrap();
                     let [ptr, len] = self.str_parts(text);
-                    self.call_rt("lrt_builder_push", &[builder.into(), ptr, len]);
+                    self.builder_push(builder, ptr, len);
                 } else {
                     let name = self.program.types.display(ty);
                     self.push_text(builder, &name);
@@ -475,7 +475,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 if let Some(path) = self.dyn_path(t, error) {
                     let text = self.dyn_call(value, error, &path, 0, Vec::new()).unwrap();
                     let [ptr, len] = self.str_parts(text);
-                    self.call_rt("lrt_builder_push", &[builder.into(), ptr, len]);
+                    self.builder_push(builder, ptr, len);
                     return;
                 }
             }
@@ -483,7 +483,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 if let Some(function) = self.explicit_method(error, ty, 0) {
                     let text = self.call_method(function, &[value]).unwrap();
                     let [ptr, len] = self.str_parts(text);
-                    self.call_rt("lrt_builder_push", &[builder.into(), ptr, len]);
+                    self.builder_push(builder, ptr, len);
                     return;
                 }
             }

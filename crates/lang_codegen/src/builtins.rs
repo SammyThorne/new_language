@@ -30,7 +30,7 @@ impl<'ctx> Codegen<'ctx, '_> {
             let prompt = self.value(&args[0]);
             let builder = self.builder_new();
             let [ptr, len] = self.str_parts(prompt);
-            self.call_rt("lrt_builder_push", &[builder.into(), ptr, len]);
+            self.builder_push(builder, ptr, len);
             self.call_rt("lrt_builder_print", &[builder.into()]);
             return self.call_rt("lrt_io_read_line", &[]);
         }
@@ -227,9 +227,8 @@ impl<'ctx> Codegen<'ctx, '_> {
 
             // ---- dict ----
             Builtin::DictGet | Builtin::DictGetOr => {
-                let (_, value_ty) = dict_types.unwrap();
-                let key = self.spill(values[1]);
-                let found = self.call_rt("lrt_dict_find", &[values[0], key.into()]).unwrap().into_pointer_value();
+                let (key_ty, value_ty) = dict_types.unwrap();
+                let found = self.dict_entry(values[0], values[1], key_ty, false);
                 let present = self.b.build_is_not_null(found, "").must();
                 let value_type = self.value_type(value_ty);
                 let load = move |this: &mut Self| Some(this.b.build_load(value_type, found, "").must());
