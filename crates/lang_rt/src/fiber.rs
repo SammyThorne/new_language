@@ -12,23 +12,42 @@
 //! - **Context switch**: `lrt_fiber_switch` saves the callee-saved registers and the floating
 //!   point control words on the current stack, stores the stack pointer, and loads another.
 //! - **Stacks**: `mmap`ed reservations with a guard page below, committed as they are touched,
-//!   and pooled when a fiber ends.
-//! - **Scheduler**: each worker has a run queue; an idle worker takes from the global queue, then
-//!   steals from the others, then waits in `epoll_wait` on the shared poller, which also wakes
-//!   it when work arrives from elsewhere.
+//!   and reused once a fiber has ended: each thread keeps a few, and moves them to and from a
+//!   shared pool in batches. The fiber's record ([`Fiber`]) sits at the top of its own stack,
+//!   so starting a fiber allocates nothing; references to it are counted ([`FiberRef`]), and
+//!   the stack is reused when the last one goes.
+//! - **Scheduler**: each worker has a run queue. Fibers made runnable by other threads go to a
+//!   lock-free global queue ([`GlobalQueue`]). An idle worker takes from its own queue, then a
+//!   share of the global one, then steals half of another worker's, then waits in `epoll_wait`
+//!   on the shared poller, which also wakes it when work arrives from elsewhere.
 //! - **Parking**: `park` / `unpark` with a permit, so a wake-up that races with going to sleep is
 //!   never lost. [`WaitList`]s of waiters on the waiting fibers' stacks build the channels,
 //!   mutexes and joins in `tasks.rs` on top.
 //! - **Timers** and I/O deadlines: one timer thread (see `poll.rs`).
 //!
-//! **The collector.** Boehm scans each registered thread's stack from its stack pointer to the
-//! "stack bottom" it was told about. When a worker switches to a fiber, it sets that bottom to
-//! the top of the fiber's stack, and back when the fiber switches out; both happen while holding
-//! the collector's allocation lock, so a collection never sees a half-done switch. Fibers that
-//! are not running (parked, or queued) are reported through Boehm's "push other roots" hook:
-//! the live part of each stack, from its saved stack pointer up, which includes the registers
-//! the switch pushed. The list of fibers is only changed under the allocation lock, which the
-//! collector holds while it marks.
+//! **The collector.** Boehm scans each registered thread's stack from the stack pointer it
+//! recorded when it stopped the thread to the "stack bottom" it was told about. A worker's stack
+//! pointer may be on any fiber's stack, so the runtime scans workers itself, and nothing on the
+//! context switch takes the collector's lock (docs/09, phase 3):
+//!
+//! - Boehm's "sp corrector" is called, once the world is stopped, with each thread's recorded
+//!   stack pointer. For a worker, [`correct_sp`] keeps the pointer and replaces it with the
+//!   worker's stack bottom, so Boehm itself scans an empty range.
+//! - The "push other roots" hook, [`push_fibers`], then works out which stack each stopped
+//!   worker was on from where its stack pointer is: inside the stack of the fiber the worker
+//!   says it is running, or else on the worker's own stack. Each worker sets `running` before
+//!   switching to a fiber and clears it after switching back, so whenever its stack pointer is
+//!   on a fiber's stack, `running` is that fiber.
+//! - For each worker it scans the live part of the stack it was on, and the live part of the
+//!   other one from the stack pointer saved there: the scheduler's (`sched_sp`) while a fiber
+//!   runs, or the fiber's (`Fiber::sp`) when the worker is on its own stack. The switch saves
+//!   the stack pointer before it loads the other one, so whichever instruction a worker stopped
+//!   at, both live parts are covered. The registers a stopped thread was using are pushed by
+//!   Boehm's signal handler onto the stack it was on, below the recorded pointer.
+//! - Every other fiber (parked, or queued) is scanned from its saved stack pointer up, which
+//!   includes the registers the switch pushed. The list of fibers is changed under its own lock
+//!   and read without it while the world is stopped, so it is changed in an order that keeps it
+//!   readable after every store.
 //!
 //! **Panics** in a fiber unwind to the fiber's entry, which records the panic, releases the
 //! mutexes the fiber held, and ends the fiber; the rest of the program carries on.
@@ -36,8 +55,8 @@
 use crate::poll;
 use std::cell::{Cell, UnsafeCell};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 // ---- the context switch ---------------------------------------------------------------
@@ -105,49 +124,167 @@ struct StackBase {
 
 type PushProc = Option<unsafe extern "C" fn()>;
 
+type SpCorrector = Option<unsafe extern "C" fn(sp: *mut *mut u8, thread: usize)>;
+
 #[link(name = "libgc.so.1", kind = "dylib", modifiers = "+verbatim")]
 unsafe extern "C" {
-    fn GC_alloc_lock();
-    fn GC_alloc_unlock();
     fn GC_get_my_stackbottom(base: *mut StackBase) -> *mut u8;
-    fn GC_set_stackbottom(thread: *mut u8, base: *const StackBase);
     fn GC_set_push_other_roots(proc_: PushProc);
     fn GC_get_push_other_roots() -> PushProc;
+    fn GC_set_sp_corrector(proc_: SpCorrector);
+    fn GC_get_sp_corrector() -> SpCorrector;
     fn GC_push_all_eager(bottom: *mut u8, top: *mut u8);
 }
 
-/// The fibers that exist, linked through `Fiber::next`/`prev`. Changed only while holding the
-/// collector's allocation lock.
-struct Registry(UnsafeCell<*const Fiber>);
-// SAFETY: accessed only under the collector's allocation lock (see above).
-unsafe impl Sync for Registry {}
-static REGISTRY: Registry = Registry(UnsafeCell::new(std::ptr::null()));
+unsafe extern "C" {
+    fn pthread_self() -> usize;
+}
+
+/// Every fiber stack the program has mapped, by slot, with the fiber using it (null for a
+/// stack in a pool). A slot is set when a fiber starts and cleared when it ends, with single
+/// stores and no lock; the collector reads the table while the world is stopped. Slots are
+/// handed out in chunks that are never freed, so the table can be read at any moment.
+struct StackTable {
+    chunks: [AtomicPtr<AtomicPtr<Fiber>>; SLOT_CHUNKS],
+    /// Slots handed out so far.
+    count: AtomicUsize,
+    /// Slots of stacks that were unmapped, for reuse.
+    free: Mutex<Vec<usize>>,
+}
+
+const SLOT_CHUNK: usize = 4096;
+const SLOT_CHUNKS: usize = 4096;
+
+static STACKS: StackTable = StackTable {
+    chunks: [const { AtomicPtr::new(std::ptr::null_mut()) }; SLOT_CHUNKS],
+    count: AtomicUsize::new(0),
+    free: Mutex::new(Vec::new()),
+};
+
+impl StackTable {
+    /// The slot at `index`, if its chunk has been made.
+    fn get(&self, index: usize) -> Option<&'static AtomicPtr<Fiber>> {
+        let chunk = self.chunks.get(index / SLOT_CHUNK)?.load(Ordering::Acquire);
+        // SAFETY: a chunk is SLOT_CHUNK slots, never freed.
+        (!chunk.is_null()).then(|| unsafe { &*chunk.add(index % SLOT_CHUNK) })
+    }
+
+    fn slot(&self, index: usize) -> &'static AtomicPtr<Fiber> {
+        self.get(index).expect("a stack's slot exists")
+    }
+
+    /// A slot for a newly mapped stack.
+    fn new_slot(&self) -> usize {
+        if let Some(index) = lock(&self.free).pop() {
+            return index;
+        }
+        let index = self.count.fetch_add(1, Ordering::SeqCst);
+        let Some(chunk) = self.chunks.get(index / SLOT_CHUNK) else {
+            crate::out::flush();
+            eprintln!("fatal: too many task stacks");
+            std::process::abort();
+        };
+        if chunk.load(Ordering::Acquire).is_null() {
+            let fresh: Box<[AtomicPtr<Fiber>]> =
+                (0..SLOT_CHUNK).map(|_| AtomicPtr::new(std::ptr::null_mut())).collect();
+            let fresh = Box::into_raw(fresh) as *mut AtomicPtr<Fiber>;
+            if chunk.compare_exchange(std::ptr::null_mut(), fresh, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                // SAFETY: ours, never shared.
+                drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(fresh, SLOT_CHUNK)) });
+            }
+        }
+        index
+    }
+}
 
 static PREVIOUS_PUSH: OnceLock<usize> = OnceLock::new();
+static PREVIOUS_CORRECTOR: OnceLock<usize> = OnceLock::new();
 
-/// The collector's "push other roots" hook: every fiber's references, and the stacks of the
-/// fibers that are not running on a thread.
+/// Push `[bottom, top)` if it is a range.
+unsafe fn push_range(bottom: *mut u8, top: *mut u8) {
+    if !bottom.is_null() && bottom < top {
+        unsafe { GC_push_all_eager(bottom, top) };
+    }
+}
+
+/// The collector's "sp corrector", called with each stopped thread's stack pointer before its
+/// stack is scanned. For a worker, keep the pointer for [`push_fibers`] and give Boehm an empty
+/// range instead.
+unsafe extern "C" fn correct_sp(sp: *mut *mut u8, thread: usize) {
+    if let Some(&previous) = PREVIOUS_CORRECTOR.get()
+        && previous != 0
+    {
+        // SAFETY: the corrector that was installed before ours.
+        let previous: unsafe extern "C" fn(*mut *mut u8, usize) = unsafe { std::mem::transmute(previous) };
+        unsafe { previous(sp, thread) };
+    }
+    let Some(scheduler) = SCHEDULER.get() else { return };
+    for worker in &scheduler.workers {
+        if worker.thread.load(Ordering::Acquire) == thread {
+            // SAFETY: Boehm passes the stopped thread's recorded stack pointer.
+            unsafe {
+                worker.stopped_sp.store(*sp, Ordering::Relaxed);
+                *sp = worker.native_bottom.load(Ordering::Relaxed);
+            }
+            return;
+        }
+    }
+}
+
+/// The collector's "push other roots" hook: the stacks of the workers and of every fiber, and
+/// every fiber's references.
 unsafe extern "C" fn push_fibers() {
     if let Some(&previous) = PREVIOUS_PUSH.get()
         && previous != 0
     {
-        // SAFETY: the hook that was installed before ours.
+        // SAFETY: the hook that was installed before ours, which scans the threads' stacks and
+        // calls `correct_sp` for each.
         let previous: unsafe extern "C" fn() = unsafe { std::mem::transmute(previous) };
         unsafe { previous() };
     }
-    // SAFETY: the collector holds the allocation lock while it marks, so the list is stable.
-    let mut fiber = unsafe { *REGISTRY.0.get() };
-    while !fiber.is_null() {
-        let f = unsafe { &*fiber };
-        let refs = f.refs.get() as *mut u8;
-        unsafe { GC_push_all_eager(refs, refs.add(std::mem::size_of::<[*mut u8; REFS]>())) };
-        if !unsafe { *f.on_cpu.get() } {
-            let sp = unsafe { *f.sp.get() };
-            if !sp.is_null() {
-                unsafe { GC_push_all_eager(sp, f.stack_hi) };
+    let workers = SCHEDULER.get().map_or(&[][..], |s| &s.workers[..]);
+    for worker in workers {
+        // A worker whose thread is not yet registered with us is still on its own stack, which
+        // Boehm scanned.
+        let sp = worker.stopped_sp.swap(std::ptr::null_mut(), Ordering::Relaxed);
+        if sp.is_null() {
+            continue;
+        }
+        let native_top = worker.native_bottom.load(Ordering::Relaxed);
+        let running = worker.running.load(Ordering::Acquire);
+        // SAFETY: a worker's running fiber is alive: the worker holds a reference to it.
+        let on_fiber = unsafe { running.as_ref() }.filter(|f| f.stack_lo <= sp && sp < f.stack_hi);
+        unsafe {
+            match on_fiber {
+                Some(fiber) => {
+                    push_range(sp, fiber.stack_hi);
+                    push_range(*worker.sched_sp.get(), native_top);
+                }
+                None => {
+                    if !(sp < native_top && native_top as usize - sp as usize <= NATIVE_STACK_LIMIT) {
+                        crate::out::flush();
+                        eprintln!("fatal: a worker thread stopped for collection on an unknown stack");
+                        std::process::abort();
+                    }
+                    push_range(sp, native_top);
+                    if let Some(fiber) = running.as_ref() {
+                        push_range(*fiber.sp.get(), fiber.stack_hi);
+                    }
+                }
             }
         }
-        fiber = unsafe { *f.next.get() };
+    }
+    // The other fibers, from their saved stack pointers to the top of their stacks, which is
+    // where their records (and so their references) are.
+    for index in 0..STACKS.count.load(Ordering::SeqCst) {
+        let Some(slot) = STACKS.get(index) else { continue };
+        let fiber = slot.load(Ordering::Acquire);
+        if fiber.is_null() || workers.iter().any(|w| std::ptr::eq(w.running.load(Ordering::Relaxed), fiber)) {
+            continue;
+        }
+        // SAFETY: a fiber in the table is alive (it leaves the table before it can be freed).
+        let f = unsafe { &*fiber };
+        unsafe { push_range(*f.sp.get(), f.stack_hi) };
     }
 }
 
@@ -156,6 +293,11 @@ fn install_gc_hook() {
     PREVIOUS_PUSH.get_or_init(|| {
         let previous = unsafe { GC_get_push_other_roots() };
         unsafe { GC_set_push_other_roots(Some(push_fibers)) };
+        previous.map_or(0, |p| p as usize)
+    });
+    PREVIOUS_CORRECTOR.get_or_init(|| {
+        let previous = unsafe { GC_get_sp_corrector() };
+        unsafe { GC_set_sp_corrector(Some(correct_sp)) };
         previous.map_or(0, |p| p as usize)
     });
 }
@@ -178,13 +320,23 @@ struct Stack {
     base: *mut u8,
     /// Bytes mapped, including the guard page.
     len: usize,
+    /// The stack's slot in [`STACKS`].
+    slot: usize,
 }
 
 // SAFETY: a stack is plain memory, used by one fiber at a time.
 unsafe impl Send for Stack {}
 
+/// Stacks no fiber uses, shared by all threads; each thread also keeps a few of its own.
 static STACK_POOL: Mutex<Vec<Stack>> = Mutex::new(Vec::new());
 const POOLED_STACKS: usize = 16384;
+const CACHED_STACKS: usize = 64;
+/// How many stacks a thread moves to or from the shared pool at once.
+const STACK_BATCH: usize = 32;
+
+thread_local! {
+    static STACK_CACHE: UnsafeCell<Vec<Stack>> = const { UnsafeCell::new(Vec::new()) };
+}
 
 fn stack_size() -> usize {
     static SIZE: OnceLock<usize> = OnceLock::new();
@@ -195,8 +347,21 @@ fn stack_size() -> usize {
 }
 
 impl Stack {
+    /// A stack from this thread's cache, the shared pool, or a new mapping. Not inlined: a
+    /// thread-local address must not be kept across a wait (see [`current`]).
+    #[inline(never)]
     fn new() -> Stack {
-        if let Some(stack) = lock(&STACK_POOL).pop() {
+        let cached = STACK_CACHE.try_with(|cache| {
+            // SAFETY: only this thread uses its cache, and not re-entrantly.
+            let cache = unsafe { &mut *cache.get() };
+            if cache.is_empty() {
+                let mut pool = lock(&STACK_POOL);
+                let from = pool.len().saturating_sub(STACK_BATCH);
+                cache.extend(pool.drain(from..));
+            }
+            cache.pop()
+        });
+        if let Ok(Some(stack)) = cached {
             return stack;
         }
         let len = stack_size() + PAGE;
@@ -207,7 +372,7 @@ impl Stack {
             eprintln!("fatal: could not allocate a stack for a task");
             std::process::abort();
         }
-        Stack { base, len }
+        Stack { base, len, slot: STACKS.new_slot() }
     }
 
     fn top(&self) -> *mut u8 {
@@ -215,14 +380,37 @@ impl Stack {
         unsafe { self.base.add(self.len) }
     }
 
+    /// Return a stack that no fiber uses any more.
+    #[inline(never)]
     fn release(self) {
+        let mut stack = Some(self);
+        let overflow = STACK_CACHE.try_with(|cache| {
+            // SAFETY: as in `new`.
+            let cache = unsafe { &mut *cache.get() };
+            cache.extend(stack.take());
+            if cache.len() > CACHED_STACKS {
+                let from = cache.len() - STACK_BATCH;
+                return cache.drain(from..).collect();
+            }
+            Vec::new()
+        });
+        // If the thread is exiting, straight to the pool.
+        Stack::pool(overflow.unwrap_or_else(|_| stack.into_iter().collect()));
+    }
+
+    fn pool(stacks: Vec<Stack>) {
+        if stacks.is_empty() {
+            return;
+        }
         let mut pool = lock(&STACK_POOL);
-        if pool.len() < POOLED_STACKS {
-            pool.push(self);
-        } else {
-            drop(pool);
+        let room = POOLED_STACKS.saturating_sub(pool.len());
+        let mut stacks = stacks.into_iter();
+        pool.extend(stacks.by_ref().take(room));
+        drop(pool);
+        for stack in stacks {
             // SAFETY: the mapping made in `new`, no longer used.
-            unsafe { munmap(self.base, self.len) };
+            unsafe { munmap(stack.base, stack.len) };
+            lock(&STACKS.free).push(stack.slot);
         }
     }
 }
@@ -246,35 +434,93 @@ enum Intent {
 const REFS: usize = 2 + MAX_HELD;
 const MAX_HELD: usize = 14;
 
+/// A fiber's record. It lives at the top of the fiber's own stack, so starting a fiber takes no
+/// allocation, and the collector scans it with the stack. It is freed, and the stack reused,
+/// when the last [`FiberRef`] goes.
+#[repr(C)]
 pub(crate) struct Fiber {
+    /// The link in the global run queue; first, so a link is also its fiber.
+    link: QueueLink,
     pub(crate) id: u64,
+    references: AtomicUsize,
     state: AtomicU8,
     permit: AtomicBool,
     pub(crate) panicked: AtomicBool,
     /// The saved stack pointer while not running.
     sp: UnsafeCell<*mut u8>,
+    /// The usable part of the stack, above the guard page.
+    stack_lo: *mut u8,
     stack_hi: *mut u8,
-    stack: UnsafeCell<Option<Stack>>,
-    /// Whether a worker is running it; changed under the allocation lock.
-    on_cpu: UnsafeCell<bool>,
+    stack: Stack,
     intent: Cell<Intent>,
     entry: UnsafeCell<Option<Entry>>,
     /// See [`REFS`]: `refs[0..2]` are for the entry point, the rest the held mutexes.
     refs: UnsafeCell<[*mut u8; REFS]>,
     held: Cell<usize>,
-    next: UnsafeCell<*const Fiber>,
-    prev: UnsafeCell<*const Fiber>,
 }
 
-// SAFETY: a fiber's mutable fields are touched only by the thread running it, by the worker
-// switching it, or under the allocation lock; the shared state is atomic.
+// SAFETY: a fiber's mutable fields are touched only by the thread running it or by the worker
+// switching it; the shared state is atomic.
 unsafe impl Send for Fiber {}
 unsafe impl Sync for Fiber {}
 
-pub(crate) type FiberRef = Arc<Fiber>;
+/// A counted reference to a fiber, like an `Arc` whose memory is the top of the fiber's stack.
+pub(crate) struct FiberRef(std::ptr::NonNull<Fiber>);
 
-/// What a fiber runs.
-pub(crate) type Entry = Box<dyn FnOnce(&Fiber)>;
+// SAFETY: as for `Fiber`.
+unsafe impl Send for FiberRef {}
+unsafe impl Sync for FiberRef {}
+
+impl FiberRef {
+    /// Another reference to a fiber that is alive.
+    fn to(fiber: &Fiber) -> FiberRef {
+        fiber.references.fetch_add(1, Ordering::Relaxed);
+        FiberRef(std::ptr::NonNull::from(fiber))
+    }
+
+    fn as_ptr(&self) -> *mut Fiber {
+        self.0.as_ptr()
+    }
+}
+
+impl Clone for FiberRef {
+    fn clone(&self) -> FiberRef {
+        FiberRef::to(self)
+    }
+}
+
+impl std::ops::Deref for FiberRef {
+    type Target = Fiber;
+    fn deref(&self) -> &Fiber {
+        // SAFETY: the reference keeps the fiber alive.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl Drop for FiberRef {
+    fn drop(&mut self) {
+        if self.references.fetch_sub(1, Ordering::Release) != 1 {
+            return;
+        }
+        std::sync::atomic::fence(Ordering::Acquire);
+        // The last reference. The fiber has ended (a fiber that has not holds a reference to
+        // itself: its worker's while it runs, a queue's while it is runnable, its waker's
+        // while it waits), so nothing runs on the stack any more.
+        // SAFETY: the record was written by `spawn` and is dropped once; `Stack` owns nothing
+        // to drop, so it can be read out first.
+        unsafe {
+            let stack = std::ptr::read(&(*self.as_ptr()).stack);
+            std::ptr::drop_in_place(self.as_ptr());
+            stack.release();
+        }
+    }
+}
+
+/// What a fiber runs: a function with a word for it (a task), or a closure.
+pub(crate) enum Entry {
+    Plain(fn(&Fiber, usize), usize),
+    Closure(Box<dyn FnOnce(&Fiber)>),
+}
 
 impl Fiber {
     /// The collected references given at spawn.
@@ -324,67 +570,70 @@ pub(crate) fn spawn(refs: [*mut u8; 2], entry: Entry) -> FiberRef {
     start_workers();
     let stack = Stack::new();
     let top = stack.top();
+    // SAFETY: the first page is the guard.
+    let bottom = unsafe { stack.base.add(PAGE) };
+    let slot = STACKS.slot(stack.slot);
     let mut all_refs = [std::ptr::null_mut(); REFS];
     all_refs[..2].copy_from_slice(&refs);
-    let fiber = Arc::new(Fiber {
+    // The record goes at the top of the stack, aligned to a cache line; the first frame below.
+    let record = ((top as usize - std::mem::size_of::<Fiber>()) & !63) as *mut Fiber;
+    let fiber = Fiber {
+        link: QueueLink { next: AtomicPtr::new(std::ptr::null_mut()) },
         id: NEXT_FIBER.fetch_add(1, Ordering::Relaxed),
+        // The one returned.
+        references: AtomicUsize::new(1),
         state: AtomicU8::new(QUEUED),
         permit: AtomicBool::new(false),
         panicked: AtomicBool::new(false),
         sp: UnsafeCell::new(std::ptr::null_mut()),
+        stack_lo: bottom,
         stack_hi: top,
-        stack: UnsafeCell::new(Some(stack)),
-        on_cpu: UnsafeCell::new(false),
+        stack,
         intent: Cell::new(Intent::Exit),
         entry: UnsafeCell::new(Some(entry)),
         refs: UnsafeCell::new(all_refs),
         held: Cell::new(0),
-        next: UnsafeCell::new(std::ptr::null()),
-        prev: UnsafeCell::new(std::ptr::null()),
-    });
+    };
+    // SAFETY: the top of a stack no fiber uses, with room for the record.
+    let fiber = unsafe {
+        record.write(fiber);
+        FiberRef(std::ptr::NonNull::new_unchecked(record))
+    };
     // The first switch "returns" into `lrt_fiber_start` with the fiber in r12 (see the layout
     // in `lrt_fiber_switch`): control words, r15 to r12, rbx, rbp, return address, and a zero
     // word where the stack is 16-byte aligned, as a call expects.
-    // SAFETY: writing the initial frame inside the new stack's top 80 bytes.
+    // SAFETY: writing the initial frame in the 80 bytes below the record.
     unsafe {
-        let words = top as *mut u64;
+        let words = record as *mut u64;
         words.sub(1).write(0);
         words.sub(2).write(0);
         words.sub(3).write(lrt_fiber_start as *const () as u64);
         words.sub(4).write(0); // rbp
         words.sub(5).write(0); // rbx
-        words.sub(6).write(Arc::as_ptr(&fiber) as u64); // r12
+        words.sub(6).write(fiber.as_ptr() as u64); // r12
         words.sub(7).write(0); // r13
         words.sub(8).write(0); // r14
         words.sub(9).write(0); // r15
         words.sub(10).write(0x037F_0000_1F80); // MXCSR default, then the x87 control word
         *fiber.sp.get() = words.sub(10) as *mut u8;
     }
-    // SAFETY: linking into the registry under the allocation lock.
-    unsafe {
-        GC_alloc_lock();
-        let head = *REGISTRY.0.get();
-        *fiber.next.get() = head;
-        if !head.is_null() {
-            *(*head).prev.get() = Arc::as_ptr(&fiber);
-        }
-        *REGISTRY.0.get() = Arc::as_ptr(&fiber);
-        GC_alloc_unlock();
-    }
+    // From here on the collector scans the stack, and the record with it.
+    slot.store(fiber.as_ptr(), Ordering::Release);
     enqueue(fiber.clone());
     fiber
 }
 
 /// The first thing a fiber runs, on its own stack.
 extern "C" fn fiber_main(fiber: *const Fiber) -> ! {
-    // The worker took the allocation lock before switching here.
-    // SAFETY: matched with the worker's lock.
-    unsafe { GC_alloc_unlock() };
+    // SAFETY: the worker running this fiber holds a reference to it.
     let fiber = unsafe { &*fiber };
     // SAFETY: only this fiber takes its entry, once.
     let entry = unsafe { (*fiber.entry.get()).take() };
     if let Some(entry) = entry {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(fiber)));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match entry {
+            Entry::Plain(function, word) => function(fiber, word),
+            Entry::Closure(closure) => closure(fiber),
+        }));
         if outcome.is_err() {
             fiber.panicked.store(true, Ordering::SeqCst);
         }
@@ -424,12 +673,7 @@ fn current_worker() -> *const Worker {
 
 /// A reference to the running fiber that can outlive this call.
 fn current_ref() -> Option<FiberRef> {
-    let fiber = current()?;
-    // SAFETY: the fiber is owned by an `Arc` (made in `spawn`); take another count.
-    unsafe {
-        Arc::increment_strong_count(fiber as *const Fiber);
-        Some(Arc::from_raw(fiber as *const Fiber))
-    }
+    Some(FiberRef::to(current()?))
 }
 
 /// Switch from the running fiber to its worker's scheduler.
@@ -438,14 +682,8 @@ fn suspend(intent: Intent) {
     let fiber = current().expect("suspend outside a fiber");
     let worker = current_worker();
     fiber.intent.set(intent);
-    // SAFETY: the worker resumes from its saved context; the lock is released on the other
-    // side of the switch (see "The collector" above).
-    unsafe {
-        GC_alloc_lock();
-        *fiber.on_cpu.get() = false;
-        lrt_fiber_switch(fiber.sp.get(), *(*worker).sched_sp.get());
-        GC_alloc_unlock();
-    }
+    // SAFETY: the worker resumes from its saved context.
+    unsafe { lrt_fiber_switch(fiber.sp.get(), *(*worker).sched_sp.get()) };
 }
 
 // ---- parking ----------------------------------------------------------------------------
@@ -675,21 +913,240 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 // ---- the scheduler ----------------------------------------------------------------------
 
-struct Worker {
-    queue: Mutex<VecDeque<FiberRef>>,
-    /// The scheduler's saved stack pointer while a fiber runs.
-    sched_sp: UnsafeCell<*mut u8>,
-    gc_thread: Cell<*mut u8>,
-    native_bottom: Cell<*mut u8>,
+/// A queue of runnable fibers. Its length is kept outside the lock too, so that looking for
+/// work does not take the locks of empty queues.
+struct RunQueue {
+    items: Mutex<VecDeque<FiberRef>>,
+    len: AtomicUsize,
 }
 
-// SAFETY: `sched_sp` and the cells are only used by the worker's own thread.
+impl RunQueue {
+    fn new() -> RunQueue {
+        RunQueue { items: Mutex::new(VecDeque::new()), len: AtomicUsize::new(0) }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len.load(Ordering::SeqCst) == 0
+    }
+
+    /// Add a fiber; true if the queue was empty.
+    fn push(&self, fiber: FiberRef) -> bool {
+        let mut items = lock(&self.items);
+        items.push_back(fiber);
+        self.len.store(items.len(), Ordering::SeqCst);
+        items.len() == 1
+    }
+
+    fn extend(&self, fibers: impl IntoIterator<Item = FiberRef>) {
+        let mut items = lock(&self.items);
+        items.extend(fibers);
+        self.len.store(items.len(), Ordering::SeqCst);
+    }
+
+    /// Up to `limit` fibers from the front, in order; none if the lock is busy and `wait` is
+    /// false.
+    fn take(&self, limit: impl FnOnce(usize) -> usize, wait: bool) -> VecDeque<FiberRef> {
+        if self.is_empty() {
+            return VecDeque::new();
+        }
+        let mut items = if wait {
+            lock(&self.items)
+        } else {
+            match self.items.try_lock() {
+                Ok(items) => items,
+                Err(_) => return VecDeque::new(),
+            }
+        };
+        let take = limit(items.len()).min(items.len());
+        let taken = if take == items.len() { std::mem::take(&mut *items) } else { items.drain(..take).collect() };
+        self.len.store(items.len(), Ordering::SeqCst);
+        taken
+    }
+
+    fn pop(&self) -> Option<FiberRef> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut items = lock(&self.items);
+        let fiber = items.pop_front();
+        self.len.store(items.len(), Ordering::SeqCst);
+        fiber
+    }
+}
+
+/// A link in [`GlobalQueue`].
+struct QueueLink {
+    next: AtomicPtr<QueueLink>,
+}
+
+/// The queue of fibers made runnable by threads that are not workers (the main thread, the
+/// accept loop, the timer thread): an intrusive multi-producer queue (Vyukov's), so adding a
+/// fiber is an atomic swap and a store, never a lock, however many workers are taking from it.
+/// One worker at a time takes (`taking`); the others look elsewhere meanwhile.
+///
+/// The producers' fields and the taker's are on separate cache lines, and the queue on lines of
+/// its own, away from other hot statics.
+#[repr(C, align(128))]
+struct GlobalQueue {
+    /// The link added last.
+    head: AtomicPtr<QueueLink>,
+    /// Fibers added or being added and not yet taken.
+    len: AtomicUsize,
+    taker: CacheLine<Taker>,
+}
+
+struct Taker {
+    /// The next link to take, or the stub; only the taker touches it.
+    tail: UnsafeCell<*mut QueueLink>,
+    taking: AtomicBool,
+}
+
+#[repr(align(128))]
+struct CacheLine<T>(T);
+
+impl<T> std::ops::Deref for CacheLine<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+// SAFETY: `tail` is only used by the worker holding `taking`; the rest is atomic.
+unsafe impl Sync for GlobalQueue {}
+
+/// The queue's permanent link, which keeps it from ever being empty of links.
+static STUB: QueueLink = QueueLink { next: AtomicPtr::new(std::ptr::null_mut()) };
+
+static GLOBAL: GlobalQueue = GlobalQueue {
+    head: AtomicPtr::new(std::ptr::addr_of!(STUB) as *mut QueueLink),
+    len: AtomicUsize::new(0),
+    taker: CacheLine(Taker {
+        tail: UnsafeCell::new(std::ptr::addr_of!(STUB) as *mut QueueLink),
+        taking: AtomicBool::new(false),
+    }),
+};
+
+impl GlobalQueue {
+    fn is_empty(&self) -> bool {
+        self.len.load(Ordering::SeqCst) == 0
+    }
+
+    /// Whether a worker could take from the queue now. While one is taking, the others need
+    /// not look: the taker wakes another if it leaves fibers behind.
+    fn takeable(&self) -> bool {
+        !self.is_empty() && !self.taker.taking.load(Ordering::SeqCst)
+    }
+
+    /// Add a fiber; true if the queue was empty.
+    fn push(&self, fiber: FiberRef) -> bool {
+        // Counted first, so the count is never below the links a taker can find.
+        let was_empty = self.len.fetch_add(1, Ordering::SeqCst) == 0;
+        // The queue owns the reference until the fiber is taken.
+        let link = fiber.as_ptr() as *mut QueueLink;
+        std::mem::forget(fiber);
+        // SAFETY: the link is the fiber's own, unused while it is not queued.
+        unsafe { self.append(link) };
+        was_empty
+    }
+
+    /// # Safety
+    /// `link` is not in the queue.
+    unsafe fn append(&self, link: *mut QueueLink) {
+        unsafe {
+            (*link).next.store(std::ptr::null_mut(), Ordering::Relaxed);
+            let previous = self.head.swap(link, Ordering::AcqRel);
+            (*previous).next.store(link, Ordering::Release);
+        }
+    }
+
+    /// Take the next fiber. None if the queue is empty, or if the fiber added next is still
+    /// being linked by its producer.
+    ///
+    /// # Safety
+    /// The caller holds `taking`.
+    unsafe fn pop(&self) -> Option<FiberRef> {
+        let stub = std::ptr::addr_of!(STUB) as *mut QueueLink;
+        unsafe {
+            let tail = &mut *self.taker.tail.get();
+            let mut next = (**tail).next.load(Ordering::Acquire);
+            if *tail == stub {
+                if next.is_null() {
+                    return None;
+                }
+                *tail = next;
+                next = (*next).next.load(Ordering::Acquire);
+            }
+            let taken = *tail;
+            if next.is_null() {
+                // `taken` may be the last link. If a producer is adding after it, wait for
+                // that; otherwise put the stub behind it so it can be taken.
+                if taken != self.head.load(Ordering::Acquire) {
+                    return None;
+                }
+                self.append(stub);
+                next = (*taken).next.load(Ordering::Acquire);
+                if next.is_null() {
+                    return None;
+                }
+            }
+            *tail = next;
+            self.len.fetch_sub(1, Ordering::SeqCst);
+            Some(FiberRef(std::ptr::NonNull::new_unchecked(taken as *mut Fiber)))
+        }
+    }
+
+    /// Up to `limit(len)` fibers, in order; none if another worker is taking.
+    fn take(&self, limit: impl FnOnce(usize) -> usize) -> VecDeque<FiberRef> {
+        let len = self.len.load(Ordering::SeqCst);
+        if len == 0 || self.taker.taking.swap(true, Ordering::SeqCst) {
+            return VecDeque::new();
+        }
+        let mut taken = VecDeque::new();
+        let want = limit(len).max(1);
+        let mut waits = 0;
+        while taken.len() < want {
+            // SAFETY: this worker holds `taking`.
+            match unsafe { self.pop() } {
+                Some(fiber) => taken.push_back(fiber),
+                // A producer between its two steps finishes within a few instructions,
+                // unless it was preempted; then leave the rest for later.
+                None if taken.is_empty() && !self.is_empty() && waits < 100 => {
+                    waits += 1;
+                    std::hint::spin_loop();
+                }
+                None => break,
+            }
+        }
+        self.taker.taking.store(false, Ordering::SeqCst);
+        taken
+    }
+}
+
+struct Worker {
+    queue: RunQueue,
+    /// The scheduler's saved stack pointer while a fiber runs.
+    sched_sp: UnsafeCell<*mut u8>,
+    /// The fiber the worker is switching to, running, or switching back from.
+    running: AtomicPtr<Fiber>,
+    /// The worker's thread (`pthread_t`), once it has started.
+    thread: AtomicUsize,
+    /// The top of the worker thread's own stack, which Boehm calls its bottom.
+    native_bottom: AtomicPtr<u8>,
+    /// Where the worker was stopped for the collection in progress (see `correct_sp`).
+    stopped_sp: AtomicPtr<u8>,
+}
+
+/// The most a worker thread's own stack can hold: its size and a margin.
+const NATIVE_STACK: usize = 256 * 1024;
+const NATIVE_STACK_LIMIT: usize = NATIVE_STACK + 64 * 1024;
+
+// SAFETY: `sched_sp` is written only by the worker's own thread, and read by the collector
+// while the world is stopped.
 unsafe impl Sync for Worker {}
 unsafe impl Send for Worker {}
 
 struct Scheduler {
     workers: Vec<Worker>,
-    global: Mutex<VecDeque<FiberRef>>,
     /// Workers waiting in the poller.
     idle: AtomicUsize,
     /// A wake-up has been sent and not yet taken.
@@ -716,13 +1173,14 @@ pub(crate) fn start_workers() {
     let scheduler = Scheduler {
         workers: (0..count)
             .map(|_| Worker {
-                queue: Mutex::new(VecDeque::new()),
+                queue: RunQueue::new(),
                 sched_sp: UnsafeCell::new(std::ptr::null_mut()),
-                gc_thread: Cell::new(std::ptr::null_mut()),
-                native_bottom: Cell::new(std::ptr::null_mut()),
+                running: AtomicPtr::new(std::ptr::null_mut()),
+                thread: AtomicUsize::new(0),
+                native_bottom: AtomicPtr::new(std::ptr::null_mut()),
+                stopped_sp: AtomicPtr::new(std::ptr::null_mut()),
             })
             .collect(),
-        global: Mutex::new(VecDeque::new()),
         idle: AtomicUsize::new(0),
         waking: AtomicBool::new(false),
     };
@@ -732,7 +1190,7 @@ pub(crate) fn start_workers() {
     for index in 0..count {
         let started = std::thread::Builder::new()
             .name(format!("worker-{index}"))
-            .stack_size(256 * 1024)
+            .stack_size(NATIVE_STACK)
             .spawn(move || worker_main(index));
         if let Err(error) = started {
             crate::out::flush();
@@ -749,15 +1207,19 @@ fn scheduler() -> &'static Scheduler {
 
 /// Make a fiber runnable: on this worker's queue if called from a worker, else the global one.
 fn enqueue(fiber: FiberRef) {
-    let scheduler = scheduler();
     let worker = current_worker();
     if worker.is_null() {
-        lock(&scheduler.global).push_back(fiber);
+        // A worker is woken when the global queue stops being empty. Until it is empty again,
+        // each worker that takes from it and leaves some behind wakes the next (`find_work`),
+        // so a thread starting many tasks makes one wake-up, not one per task.
+        if GLOBAL.push(fiber) {
+            wake_idle_worker();
+        }
     } else {
         // SAFETY: the worker lives as long as the scheduler.
-        lock(unsafe { &(*worker).queue }).push_back(fiber);
+        unsafe { &(*worker).queue }.push(fiber);
+        wake_idle_worker();
     }
-    wake_idle_worker();
 }
 
 /// The poller has taken a wake-up (whichever worker took it): the next one may be sent.
@@ -767,8 +1229,13 @@ pub(crate) fn wake_taken() {
     }
 }
 
+/// Wake a worker waiting in the poller.
+///
+/// Against a lost wake-up: a worker counts itself idle, then looks at the queues once more
+/// before it waits; this side adds to a queue, then reads `idle`. Both steps are sequentially
+/// consistent, so either the worker sees the new fiber or this side sees it idle.
 fn wake_idle_worker() {
-    let scheduler = scheduler();
+    let Some(scheduler) = SCHEDULER.get() else { return };
     if scheduler.idle.load(Ordering::SeqCst) > 0
         && scheduler.waking.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok()
     {
@@ -783,9 +1250,11 @@ fn worker_main(index: usize) {
     WORKER.with(|w| w.set(worker));
     let mut base = StackBase { mem_base: std::ptr::null_mut(), reg_base: std::ptr::null_mut() };
     // SAFETY: the calling thread is registered.
-    let handle = unsafe { GC_get_my_stackbottom(&mut base) };
-    worker.gc_thread.set(handle);
-    worker.native_bottom.set(base.mem_base);
+    unsafe { GC_get_my_stackbottom(&mut base) };
+    worker.native_bottom.store(base.mem_base, Ordering::Relaxed);
+    // From here on the collector leaves this thread's stacks to `push_fibers`.
+    // SAFETY: a plain call.
+    worker.thread.store(unsafe { pthread_self() }, Ordering::Release);
     let mut ticks: u32 = 0;
     loop {
         ticks = ticks.wrapping_add(1);
@@ -808,64 +1277,50 @@ fn worker_main(index: usize) {
 }
 
 fn has_work(scheduler: &Scheduler) -> bool {
-    !lock(&scheduler.global).is_empty() || scheduler.workers.iter().any(|w| !lock(&w.queue).is_empty())
+    GLOBAL.takeable() || scheduler.workers.iter().any(|w| !w.queue.is_empty())
 }
 
 fn find_work(scheduler: &Scheduler, index: usize) -> Option<FiberRef> {
-    if let Some(fiber) = lock(&scheduler.workers[index].queue).pop_front() {
+    let own = &scheduler.workers[index].queue;
+    if let Some(fiber) = own.pop() {
         return Some(fiber);
     }
-    if let Some(fiber) = lock(&scheduler.global).pop_front() {
-        return Some(fiber);
-    }
-    // Steal half of another worker's queue.
+    // From the global queue, a fair share at once, so that a thread starting many tasks is
+    // not slowed by every worker taking its lock for each one.
     let count = scheduler.workers.len();
-    for offset in 1..count {
-        let victim = &scheduler.workers[(index + offset) % count];
-        let Ok(mut queue) = victim.queue.try_lock() else { continue };
-        let take = queue.len().div_ceil(2);
-        if take == 0 {
-            continue;
-        }
-        let mut stolen: VecDeque<FiberRef> = queue.drain(..take).collect();
-        drop(queue);
-        let first = stolen.pop_front();
-        if !stolen.is_empty() {
-            lock(&scheduler.workers[index].queue).extend(stolen);
-            wake_idle_worker();
-        }
-        return first;
+    let mut taken = GLOBAL.take(|len| (len / count + 1).min(64));
+    if !GLOBAL.is_empty() {
+        wake_idle_worker();
     }
-    None
+    if taken.is_empty() {
+        // Steal half of another worker's queue.
+        for offset in 1..count {
+            let victim = &scheduler.workers[(index + offset) % count];
+            taken = victim.queue.take(|len| len.div_ceil(2), false);
+            if !taken.is_empty() {
+                break;
+            }
+        }
+    }
+    let first = taken.pop_front();
+    if !taken.is_empty() {
+        own.extend(taken);
+        wake_idle_worker();
+    }
+    first
 }
 
 /// Run a fiber until it switches out, then do what it asked.
 fn run(worker: &Worker, fiber: FiberRef) {
     fiber.state.store(RUNNING, Ordering::SeqCst);
-    CURRENT.with(|c| c.set(Arc::as_ptr(&fiber)));
-    let fiber_top = StackBase { mem_base: fiber.stack_hi, reg_base: std::ptr::null_mut() };
-    let native = StackBase { mem_base: worker.native_bottom.get(), reg_base: std::ptr::null_mut() };
-    // SAFETY: see "The collector" above: the stack bottom changes with the stack, under the
-    // allocation lock, which the fiber's side of the switch releases.
-    unsafe {
-        GC_alloc_lock();
-        *fiber.on_cpu.get() = true;
-        GC_set_stackbottom(worker.gc_thread.get(), &fiber_top);
-        lrt_fiber_switch(worker.sched_sp.get(), *fiber.sp.get());
-        GC_set_stackbottom(worker.gc_thread.get(), &native);
-        if fiber.intent.get() == Intent::Exit {
-            // Unlink from the registry while still holding the lock.
-            let (prev, next) = (*fiber.prev.get(), *fiber.next.get());
-            if prev.is_null() {
-                *REGISTRY.0.get() = next;
-            } else {
-                *(*prev).next.get() = next;
-            }
-            if !next.is_null() {
-                *(*next).prev.get() = prev;
-            }
-        }
-        GC_alloc_unlock();
+    CURRENT.with(|c| c.set(fiber.as_ptr()));
+    // See "The collector" above: `running` covers the whole switch, both ways.
+    worker.running.store(fiber.as_ptr(), Ordering::Release);
+    // SAFETY: the fiber's saved context, made by `spawn` or by its last switch out.
+    unsafe { lrt_fiber_switch(worker.sched_sp.get(), *fiber.sp.get()) };
+    worker.running.store(std::ptr::null_mut(), Ordering::Release);
+    if fiber.intent.get() == Intent::Exit {
+        STACKS.slot(fiber.stack.slot).store(std::ptr::null_mut(), Ordering::Release);
     }
     CURRENT.with(|c| c.set(std::ptr::null()));
     match fiber.intent.get() {
@@ -878,11 +1333,8 @@ fn run(worker: &Worker, fiber: FiberRef) {
             }
         }
         Intent::Exit => {
+            // The stack is reused once the last reference goes, which may be this one.
             fiber.state.store(DONE, Ordering::SeqCst);
-            // SAFETY: the fiber has ended; nothing runs on its stack any more.
-            if let Some(stack) = unsafe { (*fiber.stack.get()).take() } {
-                stack.release();
-            }
         }
     }
 }

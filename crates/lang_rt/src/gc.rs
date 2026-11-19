@@ -13,6 +13,9 @@
 //!   collect less often. The default is 1, which lets the heap grow to about twice the live data
 //!   before collecting, like Go's default `GOGC=100`; Boehm's own default, 3, collects about
 //!   three times as often (docs/08, D73).
+//! - `GC_MIN_ALLOC`: the least the program allocates between collections, in bytes; 4 MiB by
+//!   default, Go's minimum heap. Without it, a program whose live data is small collects after
+//!   every megabyte or so, which for a busy server is a thousand times a second (docs/08, D84).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -26,9 +29,13 @@ unsafe extern "C" {
     fn GC_gcollect();
     fn GC_expand_hp(bytes: usize) -> i32;
     fn GC_set_free_space_divisor(divisor: usize);
+    fn GC_set_min_bytes_allocd(bytes: usize);
 }
 
 static STRESS: AtomicBool = AtomicBool::new(false);
+
+/// The least a program allocates between collections, whatever the size of its live data.
+const MIN_ALLOC: usize = 4 << 20;
 
 fn env_number(suffix: &str) -> Option<usize> {
     std::env::var(lang_names::env_var(suffix)).ok().and_then(|v| v.trim().parse().ok())
@@ -43,6 +50,9 @@ pub fn init() {
     let divisor = env_number("GC_FREE_SPACE_DIVISOR").filter(|&d| d > 0).unwrap_or(1);
     // SAFETY: plain configuration call.
     unsafe { GC_set_free_space_divisor(divisor) };
+    let min_alloc = env_number("GC_MIN_ALLOC").filter(|&b| b > 0).unwrap_or(MIN_ALLOC);
+    // SAFETY: plain configuration call.
+    unsafe { GC_set_min_bytes_allocd(min_alloc) };
     if let Some(bytes) = env_number("GC_INITIAL_HEAP") {
         // SAFETY: plain configuration call; failure only means the heap grows later.
         unsafe { GC_expand_hp(bytes) };

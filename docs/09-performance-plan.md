@@ -189,7 +189,14 @@ Items 1, 2 and 4 are done; item 3 waits for phase 5, as recommended. See D83 in 
 
 Exit: `/items` at 256 connections at or above Go's rate; `binary_trees` within 1.1x of Go.
 
-### Phase 3 — Runtime: scheduler, tasks, HTTP (one to two weeks)
+### Phase 3 — Runtime: scheduler, tasks, HTTP (one to two weeks) — done 2026-11-19
+
+All four items are done, plus one the plan did not have; see D84 in [08](08-decisions-and-risks.md).
+- **Exit criteria met.** `spawn` takes 0.044 s against Go's 0.042 s, well within 2x. HTTP throughput rose on every endpoint, and p99 latency is no worse.
+- **Item 1 gained little.** Taking the collector's lock off the switch gave about 2%.
+- **Why `/items` was behind Go.** It was limited by how often the collector ran, over 1,100 times a second, and not by allocation itself. A 4 MiB floor on allocation between collections (Go's minimum heap) took it from 0.93x to about 1.06x Go's rate.
+- **`/users/42`** gained 50% from the router.
+- **Profiling.** `bench/profile/` is a small sampling profiler that stands in for `perf`.
 
 1. **Take the collector's lock off the context switch.** Each worker publishes "which fiber is running and where its stack ends" through per-worker fields. The collector's "push other roots" hook reads them once the world is stopped: Boehm stops every thread with a signal, so the fields are stable by then.
 

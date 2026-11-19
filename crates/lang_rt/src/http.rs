@@ -187,10 +187,10 @@ pub unsafe extern "C-unwind" fn lrt_http_serve(listener: i64, entry: Entry, code
             let tls = tls.clone();
             fiber::spawn(
                 [std::ptr::null_mut(); 2],
-                Box::new(move |_| {
+                fiber::Entry::Closure(Box::new(move |_| {
                     serve_connection(stream, tls, peer.to_string(), entry, roots as *mut *mut u8);
                     ACTIVE.fetch_sub(1, Ordering::SeqCst);
-                }),
+                })),
             );
             if listener.set_nonblocking(true).is_err() {
                 break;
@@ -883,8 +883,7 @@ fn serve_connection(
             Some(out) => (out, request.keep_alive),
             None => {
                 let body = b"internal server error\n";
-                let head = "Content-Type: text/plain; charset=utf-8\r\n";
-                (response_bytes(500, head, body, false, request.head), false)
+                (response_bytes(500, "text/plain; charset=utf-8", "", body, false, request.head), false)
             }
         };
         if connection.socket.write_all(&out).is_err() || !keep_alive {
@@ -974,40 +973,53 @@ pub unsafe extern "C-unwind" fn lrt_http_req_body(handle: i64) -> Str {
     optional(std::str::from_utf8(&unsafe { request(handle) }.body).ok())
 }
 
-/// Leave the response: its status, header lines (`Name: value\r\n` each) and body.
+/// Leave the response: its status, content type (none if empty), other header lines
+/// (`Name: value\r\n` each) and body.
 ///
 /// # Safety
 /// `handle` is a live request; the strings are UTF-8.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C-unwind" fn lrt_http_respond(
     handle: i64,
     status: i64,
+    content_type: *const u8,
+    content_type_len: i64,
     headers: *const u8,
     headers_len: i64,
     body: *const u8,
     body_len: i64,
 ) {
+    let content_type = unsafe { Str::from_raw(content_type, content_type_len) };
     let headers = unsafe { Str::from_raw(headers, headers_len) };
     let body = unsafe { Str::from_raw(body, body_len) }.as_bytes();
     let request = unsafe { request(handle) };
     // The response is serialised here, while the body is still reachable, so the body is
     // copied once, straight into what is written.
-    request.response = Some(response_bytes(status, headers, body, request.keep_alive, request.head));
+    request.response = Some(response_bytes(status, content_type, headers, body, request.keep_alive, request.head));
 }
 
-/// A complete HTTP/1.1 response: status line, the handler's header lines, the automatic
-/// headers, and the body (left out for `HEAD`, 204 and 304).
-fn response_bytes(status: i64, headers: &str, body: &[u8], keep_alive: bool, head: bool) -> Vec<u8> {
+/// A complete HTTP/1.1 response: status line, `Content-Type`, the handler's header lines, the
+/// automatic headers, and the body (left out for `HEAD`, 204 and 304).
+fn response_bytes(
+    status: i64,
+    content_type: &str,
+    headers: &str,
+    body: &[u8],
+    keep_alive: bool,
+    head: bool,
+) -> Vec<u8> {
     use std::io::Write as _;
     let has_body = status != 204 && status != 304;
-    let mut out = Vec::with_capacity(160 + headers.len() + if head { 0 } else { body.len() });
-    let _ = write!(
-        out,
-        "HTTP/1.1 {status} {}\r\n{headers}Date: {}\r\nServer: {}\r\n",
-        reason(status),
-        http_date(),
-        lang_names::CLI_NAME
-    );
+    let mut out = Vec::with_capacity(192 + content_type.len() + headers.len() + if head { 0 } else { body.len() });
+    let _ = write!(out, "HTTP/1.1 {status} {}\r\n", reason(status));
+    if !content_type.is_empty() {
+        out.extend_from_slice(b"Content-Type: ");
+        out.extend_from_slice(content_type.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(headers.as_bytes());
+    let _ = write!(out, "Date: {}\r\nServer: {}\r\n", http_date(), lang_names::CLI_NAME);
     if has_body {
         let _ = write!(out, "Content-Length: {}\r\n", body.len());
     }

@@ -316,6 +316,7 @@ With `--check`, nothing is changed: the command lists the files that are not for
 | `WEBY_WORKERS` | the number of CPUs the process may use | Worker threads that run tasks. The default respects `taskset` and container CPU limits |
 | `WEBY_TASK_STACK` | `1048576` (1 MiB) | Bytes of stack reserved for each task; at least 64 KiB. Only the pages a task touches use memory |
 | `WEBY_GC_FREE_SPACE_DIVISOR` | `1` | How often the collector runs. `1` collects when the heap has about doubled, like Go's default. `2` or `3` use less memory for more collection time |
+| `WEBY_GC_MIN_ALLOC` | `4194304` (4 MiB) | The least the program allocates between collections, in bytes, however little live data it has. Go's minimum heap is the same. Lower values save up to that much memory in small programs, at the cost of many more collections in busy ones |
 | `WEBY_GC_INITIAL_HEAP` | the collector's default | Bytes of heap to reserve at start, to skip the first few collections |
 | `WEBY_GC_STRESS` | off | Any value other than `0` collects before every allocation. Slow; it finds missing garbage-collector roots |
 | `WEBY_LOG` | `info` | The lowest `log` level written: `debug`, `info`, `warn`, `error` or `off` |

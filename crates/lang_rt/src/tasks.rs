@@ -109,27 +109,32 @@ pub unsafe extern "C-unwind" fn lrt_task_result(task: *mut Task) -> *mut u8 {
 /// task it reports to.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_spawn(entry: extern "C-unwind" fn(*mut u8), env: *mut u8, task: *mut Task) {
-    fiber::spawn(
-        [env, task as *mut u8],
-        Box::new(move |me| {
-            // The environment and task are read from the fiber, which the collector scans.
-            let (env, task) = me.refs();
-            let task = task as *mut Task;
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(env)));
-            if outcome.is_err() {
-                fiber::release_held(me);
-            }
-            // SAFETY: `task` is kept alive by the fiber's references.
-            let mut state = fiber::lock(unsafe { &(*task).state });
-            state.done = true;
-            state.panicked = outcome.is_err();
-            state.joiners.wake_all();
-        }),
-    );
+    fiber::spawn([env, task as *mut u8], fiber::Entry::Plain(run_task, entry as usize));
+}
+
+/// The body of a task's fiber: run `entry`, then mark the task done.
+fn run_task(me: &fiber::Fiber, entry: usize) {
+    // SAFETY: the function pointer `lrt_spawn` was given.
+    let entry: extern "C-unwind" fn(*mut u8) = unsafe { std::mem::transmute(entry) };
+    // The environment and task are read from the fiber, which the collector scans.
+    let (env, task) = me.refs();
+    let task = task as *mut Task;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(env)));
+    if outcome.is_err() {
+        fiber::release_held(me);
+    }
+    // SAFETY: `task` is kept alive by the fiber's references.
+    let mut state = fiber::lock(unsafe { &(*task).state });
+    state.done = true;
+    state.panicked = outcome.is_err();
+    state.joiners.wake_all();
 }
 
 /// Wait until the task has finished, or until `deadline`. Returns whether it has finished.
 fn wait_for(task: &Task, deadline: Option<Instant>) -> bool {
+    if fiber::lock(&task.state).done {
+        return true;
+    }
     loop {
         let node = WaitNode::new();
         {

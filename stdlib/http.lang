@@ -55,7 +55,7 @@ def req_header(handle: int, name: str) -> str?
 def req_body(handle: int) -> str?
 
 @extern("lrt_http_respond")
-def respond_raw(handle: int, status: int, headers: str, body: str)
+def respond_raw(handle: int, status: int, content_type: str, headers: str, body: str)
 
 @extern("lrt_io_error")
 def last_error() -> str
@@ -380,32 +380,82 @@ pub type Handler = def(Request) -> Result[Response]
 pub type Middleware = def(Request, Handler) -> Result[Response]
 """Code that runs around handlers: it gets the request and the next handler."""
 
+# The kinds of a route's path segments.
+const LITERAL = 0
+const PARAM = 1
+const REST = 2
+
 struct Route:
     method: str
     pattern: str
-    segments: list[str]
     handler: Handler
+    # Per segment: its kind, and the literal text or the parameter's name.
+    kinds: list[int]
+    names: list[str]
+    # Whether the pattern has parameters; if not, every path it matches is the same.
+    has_params: bool
+
+def new_route(method: str, pattern: str, handler: Handler) -> Route:
+    kinds: list[int] = []
+    names: list[str] = []
+    for part in split_path(pattern):
+        if part.starts_with("{") and part.ends_with("...}"):
+            kinds.append(REST)
+            names.append(part[1:len(part) - 4])
+        elif part.starts_with("{") and part.ends_with("}"):
+            kinds.append(PARAM)
+            names.append(part[1:len(part) - 1])
+        else:
+            kinds.append(LITERAL)
+            names.append(part)
+    has_params = PARAM in kinds or REST in kinds
+    return Route(method, pattern, handler, kinds, names, has_params)
 
 def split_path(path: str) -> list[str]:
     return [part for part in path.split("/") if part != ""]
 
-def match_route(pattern: list[str], path: list[str]) -> dict[str, str]?:
-    """The path parameters if `path` fits the pattern's segments."""
-    params: dict[str, str] = {}
-    for i in range(len(pattern)):
-        part = pattern[i]
-        if part.starts_with("{") and part.ends_with("...}"):
-            params[part[1:len(part) - 4]] = "/".join(path[i:])
-            return params
+def fits(route: Route, path: list[str]) -> bool:
+    """Whether `path` (split into segments) fits the route's pattern. Allocates nothing."""
+    for i in range(len(route.kinds)):
+        kind = route.kinds[i]
+        if kind == REST:
+            return True
         if i >= len(path):
-            return None
-        if part.starts_with("{") and part.ends_with("}"):
-            params[part[1:len(part) - 1]] = path[i]
-        elif part != path[i]:
-            return None
-    if len(path) != len(pattern):
-        return None
+            return False
+        if kind == LITERAL and route.names[i] != path[i]:
+            return False
+    return len(path) == len(route.kinds)
+
+def params_of(route: Route, path: list[str]) -> dict[str, str]:
+    """The parameters of a path that fits the route."""
+    params: dict[str, str] = {}
+    for i in range(len(route.kinds)):
+        kind = route.kinds[i]
+        if kind == REST:
+            params[route.names[i]] = "/".join(path[i:])
+            return params
+        if kind == PARAM:
+            params[route.names[i]] = path[i]
     return params
+
+def accepts(route: Route, method: str) -> bool:
+    return route.method == method or (method == "HEAD" and route.method == "GET")
+
+struct Candidate:
+    """A route a path fits, with the parameters it gives."""
+    route: Route
+    params: dict[str, str]
+
+def not_routed(req: Request, fitting: list[Route]) -> Result[Response]:
+    """The response when no route takes the request: 405 with the methods the path's routes
+    accept, or 404 if no route fits the path."""
+    allowed: list[str] = []
+    for route in fitting:
+        if route.method not in allowed:
+            allowed.append(route.method)
+    if len(allowed) > 0:
+        return error(405, "method not allowed").with_header("Allow", ", ".join(allowed))
+    return error(404, "not found")
 
 def wrap(middleware: Middleware, next: Handler) -> Handler:
     return lambda req: middleware(req, next)
@@ -423,11 +473,17 @@ pub struct Server:
     priv error_handler: (def(Request, HttpError) -> Response)? = None
     priv chain: Handler? = None
     priv listener: int = -1
+    # For each path that is exactly a route's pattern without parameters, every route that
+    # path fits, in order, with its parameters: worked out once, in `compose`.
+    priv fixed: dict[str, list[Candidate]] = {}
+    # The parameters of a request on a route without any, shared by all such requests. Never
+    # changed: `params` is only ever replaced, and read.
+    priv no_params: dict[str, str] = {}
 
 impl Server:
     def route(self, method: str, path: str, handler: Handler):
         """Register a handler for a method and a path such as `/todos/{id}` or `/files/{rest...}`."""
-        self.routes.append(Route(method.upper(), path, split_path(path), handler))
+        self.routes.append(new_route(method.upper(), path, handler))
         self.chain = None
 
     def get(self, path: str, handler: Handler):
@@ -469,21 +525,36 @@ impl Server:
         self.error_handler = handler
 
     def dispatch(self, req: Request) -> Result[Response]:
+        # The first route, in order, that the path fits and that accepts the method.
+        match self.fixed.get(req.path):
+            case Some(candidates):
+                for candidate in candidates:
+                    if accepts(candidate.route, req.method):
+                        req.params = candidate.params
+                        return candidate.route.handler(req)
+                return not_routed(req, [candidate.route for candidate in candidates])
+            case None:
+                pass
         segments = split_path(req.path)
-        allowed: list[str] = []
         for route in self.routes:
-            match match_route(route.segments, segments):
-                case Some(params):
-                    if route.method == req.method or (req.method == "HEAD" and route.method == "GET"):
-                        req.params = params
-                        return route.handler(req)
-                    if route.method not in allowed:
-                        allowed.append(route.method)
-                case None:
-                    pass
-        if len(allowed) > 0:
-            return error(405, "method not allowed").with_header("Allow", ", ".join(allowed))
-        return error(404, "not found")
+            if fits(route, segments) and accepts(route, req.method):
+                req.params = params_of(route, segments) if route.has_params else self.no_params
+                return route.handler(req)
+        return not_routed(req, [route for route in self.routes if fits(route, segments)])
+
+    def build_fixed(self):
+        fixed: dict[str, list[Candidate]] = {}
+        for route in self.routes:
+            if route.has_params or route.pattern in fixed:
+                continue
+            segments = split_path(route.pattern)
+            candidates: list[Candidate] = []
+            for other in self.routes:
+                if fits(other, segments):
+                    params = params_of(other, segments) if other.has_params else self.no_params
+                    candidates.append(Candidate(other, params))
+            fixed[route.pattern] = candidates
+        self.fixed = fixed
 
     def handle(self, req: Request) -> Response:
         """Answer one request: route it through the middleware and map errors to responses."""
@@ -509,6 +580,7 @@ impl Server:
                 return chain
             case None:
                 pass
+        self.build_fixed()
         server = self
         handler: Handler = lambda req: server.dispatch(req)
         for i in range(len(self.middleware) - 1, -1, -1):
@@ -540,12 +612,17 @@ impl Server:
         self.compose()
         server = self
         def serve_one(handle: int):
-            req = Request(req_method(handle), req_path(handle), handle)
+            req = Request(req_method(handle), req_path(handle), handle, server.no_params)
             response = server.handle(req)
-            headers = f"Content-Type: {response.content_type}\r\n" if response.content_type != "" else ""
-            for name, value in response.headers.items():
-                headers = headers + f"{name}: {value}\r\n"
-            respond_raw(handle, response.status, headers, response.body)
+            # The runtime writes the status line, `Content-Type` and its own headers straight
+            # into the response; only extra headers need a string here.
+            headers = ""
+            if len(response.headers) > 0:
+                header_lines: list[str] = []
+                for name, value in response.headers.items():
+                    header_lines.append(f"{name}: {value}\r\n")
+                headers = "".join(header_lines)
+            respond_raw(handle, response.status, response.content_type, headers, response.body)
         __http_serve(self.listener, serve_one)
 
     def listen(self, address: str) -> Result[None, HttpError]:

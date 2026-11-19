@@ -435,7 +435,7 @@ This replaces D42 and D50. `corosensei` and `crossbeam` would have been the obvi
 
 ### D62. How fibers and the Boehm collector cooperate
 
-Boehm scans each registered thread from its stack pointer to the stack bottom it was told about. A worker switching to a fiber calls `GC_set_stackbottom` with the fiber's stack top, and back to its own when the fiber switches out, both inside `GC_alloc_lock`, which the collector holds while it stops the world and marks, so no collection sees a stack pointer on one stack and a bottom on another. Fibers that are not running are reported through `GC_set_push_other_roots` (chaining Boehm's own hook, which pushes the thread stacks): the live part of each stack, and a small array of each fiber's references (its entry's environment and task, and the mutexes it holds). The list of fibers changes only under the same lock. This is the cost of the design: two lock acquisitions per switch. At 690,000 requests per second on 12 workers it has not shown up as a bottleneck.
+Boehm scans each registered thread from its stack pointer to the stack bottom it was told about. A worker switching to a fiber calls `GC_set_stackbottom` with the fiber's stack top, and back to its own when the fiber switches out, both inside `GC_alloc_lock`, which the collector holds while it stops the world and marks, so no collection sees a stack pointer on one stack and a bottom on another. Fibers that are not running are reported through `GC_set_push_other_roots` (chaining Boehm's own hook, which pushes the thread stacks): the live part of each stack, and a small array of each fiber's references (its entry's environment and task, and the mutexes it holds). The list of fibers changes only under the same lock. This is the cost of the design: two lock acquisitions per switch. At 690,000 requests per second on 12 workers it has not shown up as a bottleneck. (Replaced in D84: the switch takes no lock, and the collector works out each worker's stack from its stack pointer.)
 
 ### D63. The main function stays on the main thread
 
@@ -582,6 +582,42 @@ Phase 2 of [09](09-performance-plan.md) attacks the cost of each allocation and 
 **Rejected.**
 - **Using LLVM's `HeapToStack`** (part of the Attributor) instead of a custom analysis. It is not in the standard pipeline, places its stack memory where the allocation was, which grows the stack on every loop iteration, and cannot see the program's own rules about what escapes.
 - **Reading the thread-local through `llvm.threadlocal.address`.** It is the documented way, but nothing stops later passes from reusing the address across a task switch.
+
+### D84. Runtime: the context switch, task creation, routing, and how often to collect (performance plan, phase 3)
+
+Phase 3 of [09](09-performance-plan.md). The evidence comes from a small sampling profiler, `bench/profile/`, built because `perf` is not installed: a SIGPROF handler loaded with `LD_PRELOAD` that records instruction pointers and frame-pointer callers, symbolised with `llvm-symbolizer`.
+
+- **No collector lock on the context switch** (`lang_rt/src/fiber.rs`, "The collector").
+  - **How workers are scanned now.** Workers no longer move Boehm's "stack bottom" between stacks under the allocation lock. Boehm's sp corrector hands over each stopped worker's stack pointer, and the runtime's root hook decides which stack it is on from where it points: inside the stack of the fiber the worker says it is running, or else the worker's own stack.
+  - **Why no stop can be missed.** The worker scans the live part of that stack and of the other one, from the pointer saved there. The switch saves one stack pointer before loading the other, so a worker stopped at any instruction is covered.
+  - **Effect.** About 2% on `/plaintext`, nothing measurable on `/items`. Finding 7's guess that this lock limited small responses was wrong at this core count.
+- **Cheaper `spawn`.** Profiling showed the main thread spending most of its time in contended locks (the global run queue, the stack pool, the fiber registry), in glibc's allocator locks (an `Arc` and a boxed closure per task, freed on another thread), and in futex calls. Now:
+  - the fiber's record sits at the top of its own stack, with a reference count, so a task allocates nothing in Rust;
+  - a task's entry is a function pointer, not a boxed closure;
+  - each thread keeps up to 64 stacks and trades them with the shared pool 32 at a time;
+  - a table of stack slots, set and cleared with single stores, replaces the locked registry of fibers;
+  - the global run queue is an intrusive lock-free multi-producer queue (Vyukov's), with one worker taking at a time and the producer and taker fields on separate cache lines;
+  - workers take a share of the global queue at once, and a worker is woken when the queue stops being empty, not for every task;
+  - empty queues are seen without taking their locks.
+
+  `spawn` went from 0.130 s to 0.044 s (Go: 0.042 s).
+- **A router that does not allocate per route tried** (`stdlib/http.lang`).
+  - **Precomputed segments.** Each route's segments are classified once.
+  - **Fixed paths.** A path that is exactly a route's pattern without parameters (`/plaintext`, `/items`) is answered from a table built when the handler chain is composed. The table holds, in order, every route that path fits, with its parameters, so the answer is the one the full search would give, with no split and no dictionary.
+  - **Other paths** are split once and matched without allocating. The parameters dictionary is built only for the route that matched, and requests to routes without parameters share one empty dictionary.
+  - **Tests.** `tests/run/routing.wb` checks order, 404, 405 with `Allow`, `HEAD`, rest parameters, extra slashes, groups and late routes; it gives the same output with the old router.
+- **Headers straight into the response.** `lrt_http_respond` takes the content type and writes the `Content-Type` line itself. The handler's other headers are joined into a string only when there are any.
+- **A minimum allocation between collections** (`WEBY_GC_MIN_ALLOC`, default 4 MiB, Go's minimum heap).
+  - **The finding.** `/items` was not limited by allocation, the router or the scheduler but by how often the collector ran. With little live data, Boehm (free-space divisor 1, D73) collects after about a megabyte of allocation: over 1,100 collections a second at 230,000 requests a second, each stopping every worker.
+  - **The floor.** `GC_set_min_bytes_allocd` sets a floor on the bytes allocated between collections. With 4 MiB, collections fell by 70% and `/items` rose from 209,000 to 271,000 requests a second, for a peak of 24.5 MB against 17.5 MB, as much as Go uses. 2 MiB gave 260,000 at 20 MB; 8 MiB and more gave nothing further.
+
+**Tried and dropped.**
+- **Spinning idle workers** before they wait in the poller, as Go does.
+  - With a locked global queue, every spinning worker took a core from the main thread, which is not a worker, and `spawn` got slower (0.20 s).
+  - Limited to one spinner with the lock-free queue, it changed nothing.
+- **Offsetting each fiber record by a per-stack amount** to spread them over cache sets made HTTP slightly slower.
+
+**Results** (A/B runs of the same programs, 256 connections; the full tables are in [bench/README.md](../bench/README.md)): `spawn` 0.130 s to 0.044 s; `/items` 232,000 to 271,000 requests a second, now ahead of Go; `/users/42` 570,000 to 855,000; `/plaintext` and `/json` about 13% faster.
 
 ## Risks
 

@@ -1,0 +1,79 @@
+# Routing, through `server.handle` without a connection: which route a path and method reach,
+# in the order routes were registered, and the 404 and 405 answers. Paths that are exactly a
+# route's pattern are answered from a table built once (docs/09, phase 3); the rest are matched
+# segment by segment. Both must give the same answers.
+# expect: GET /users/me -> 200 param me
+# expect: GET /static -> 200 static
+# expect: GET /users/42 -> 200 param 42
+# expect: GET /files/a/b/c -> 200 rest a/b/c
+# expect: GET /files -> 200 rest
+# expect: POST /static -> 405 GET, PUT
+# expect: PUT /static -> 200 put
+# expect: HEAD /static -> 200 static
+# expect: GET //static/ -> 200 static
+# expect: DELETE /users/7 -> 405 GET
+# expect: GET /nowhere -> 404
+# expect: GET /api/v1/items -> 200 group
+# expect: GET /api/v1/items/9 -> 200 item 9
+# expect: GET /late -> 200 late
+# expect: GET /users/me/ -> 200 param me
+
+import http
+
+def param(req: http.Request) -> Result[http.Response]:
+    return http.text(f"param {req.param('id')}")
+
+def static(req: http.Request) -> Result[http.Response]:
+    return http.text("static")
+
+def put(req: http.Request) -> Result[http.Response]:
+    return http.text("put")
+
+def rest(req: http.Request) -> Result[http.Response]:
+    return http.text(f"rest {req.param('path')}")
+
+def group(req: http.Request) -> Result[http.Response]:
+    return http.text("group")
+
+def item(req: http.Request) -> Result[http.Response]:
+    return http.text(f"item {req.param('id')}")
+
+def late(req: http.Request) -> Result[http.Response]:
+    return http.text("late")
+
+def show(server: http.Server, method: str, path: str):
+    response = server.handle(http.test_request(method, path))
+    text = response.body if response.status == 200 else ""
+    if response.status == 405:
+        text = response.headers.get_or("Allow", "")
+    print(f"{method} {path} -> {response.status} {text}".strip())
+
+def main():
+    server = http.Server()
+    # Registered first, so it wins over the static route below for `/users/me`.
+    server.get("/users/{id}", param)
+    server.get("/users/me", static)
+    server.get("/static", static)
+    server.put("/static", put)
+    server.get("/files/{path...}", rest)
+    api = server.group("/api/v1")
+    api.get("/items", group)
+    api.get("/items/{id}", item)
+
+    show(server, "GET", "/users/me")
+    show(server, "GET", "/static")
+    show(server, "GET", "/users/42")
+    show(server, "GET", "/files/a/b/c")
+    show(server, "GET", "/files")
+    show(server, "POST", "/static")
+    show(server, "PUT", "/static")
+    show(server, "HEAD", "/static")
+    show(server, "GET", "//static/")
+    show(server, "DELETE", "/users/7")
+    show(server, "GET", "/nowhere")
+    show(server, "GET", "/api/v1/items")
+    show(server, "GET", "/api/v1/items/9")
+    # A route added after requests were handled is seen by the next one.
+    server.get("/late", late)
+    show(server, "GET", "/late")
+    show(server, "GET", "/users/me/")
