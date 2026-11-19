@@ -184,4 +184,5 @@ def main() -> None:
 
 
 PIN = "--no-pin" not in sys.argv
-main()
+if __name__ == "__main__":
+    main()

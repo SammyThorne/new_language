@@ -9,7 +9,7 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 The prototype is complete and milestones 0 to 11 are done. Milestone 12 (performance and ecosystem) is ongoing by design. So far it has added:
 
 - TLS, an HTTP client, a PostgreSQL driver and regular expressions;
-- the first phase of the [performance plan](docs/09-performance-plan.md), after which sorting and list-heavy code run faster than Go.
+- phases 1 to 4 of the [performance plan](docs/09-performance-plan.md), after which every benchmark and every HTTP endpoint measured runs at or ahead of Go (see [Web performance](docs/web-performance.md)).
 
 The WebSocket server passes the Autobahn conformance suite, and the JSON parser passes JSONTestSuite. See the [roadmap](docs/06-roadmap.md#progress).
 
@@ -201,16 +201,18 @@ Messages show the source line and usually a fix. Constructs from the design that
 
 ## Performance
 
-| Compared with Go | Result |
-|---|---|
-| Plain function calls, list building and indexing, string-keyed counting, sorting with a key function (2.4x), typed JSON | Faster than Go |
-| Allocation, dynamic dispatch | 1.1x to 1.7x Go's time |
-| Starting tasks | About 3x Go's time |
-| HTTP server, small responses | 1.5x to 1.6x Go's `net/http` throughput |
-| HTTP server, a JSON list of 20 records | 0.7x to 0.8x Go's throughput |
-| Idle WebSocket connections | 11 KiB each, measured with 50,000 |
+On a 6-core laptop, against the same service in Go (`net/http`) and Python. The full report, with methodology, per-core figures and caveats, is **[Web performance: what to expect](docs/web-performance.md)**.
 
-Programs are 3x to 42x faster than the same programs in CPython. The numbers and how they were measured are in [bench/README.md](bench/README.md). Allocation is the remaining gap with Go; [docs/09](docs/09-performance-plan.md) is the plan for closing it, and its first phase is done.
+| Measure | Weby | Go | Python |
+|---|---|---|---|
+| Small JSON responses, 256 connections | 1.11 M req/s, p99 0.69 ms | 543 k req/s, p99 1.68 ms | 28 k req/s |
+| 20-record JSON list, 256 connections | 279 k req/s, p99 1.80 ms | 259 k req/s, p99 4.03 ms | 19 k req/s |
+| JSON POST decoded into structs, 256 connections | 690 k req/s | 306 k req/s | 21 k req/s |
+| Server CPU per small request, one core | 2.7 µs | 5.6 µs | |
+| Idle server memory | 4.2 MB | 10.9 MB | 18.2 MB |
+| Memory per idle WebSocket (50,000 open) | 15.5 KiB | not measured | not measured |
+
+Every benchmark in [bench/](bench/README.md) runs at or ahead of Go: from about level (task creation, list indexing) to 2.4x faster (sorting with a key function) and 3.4x (calls through trait objects). They run 3.6x to 64x faster than CPython. Allocation-heavy programs use up to twice Go's memory, which is the [plan](docs/09-performance-plan.md)'s remaining phase.
 
 ## Building and running
 
@@ -289,6 +291,7 @@ The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real socke
 | [docs/08-decisions-and-risks.md](docs/08-decisions-and-risks.md) | Decision log with rejected alternatives, risks, open questions |
 | [docs/09-performance-plan.md](docs/09-performance-plan.md) | Where the time goes today, and the phased plan to close the gaps to Go |
 | [bench/README.md](bench/README.md) | Benchmarks against Go and CPython |
+| [docs/web-performance.md](docs/web-performance.md) | What a web service can do: throughput, latency, CPU per request, memory |
 | [editors/README.md](editors/README.md) | Editor support and the language server |
 
 The name "Weby" and the `.wb` extension may still change. The name is kept out of crate names and runtime symbols and lives in one small crate of constants, so it can be changed later with a short checklist ([docs/03-compiler-architecture.md](docs/03-compiler-architecture.md#renaming-the-language)).

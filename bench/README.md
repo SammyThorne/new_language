@@ -39,6 +39,14 @@ The Go versions are written the way a Go programmer would write them. Where that
 python3 bench/http/run.py --seconds 5 --connections 64
 ```
 
+`one_core.py` runs the same endpoints with each server on a single CPU (`WEBY_WORKERS=1`, `GOMAXPROCS=1`) and prints the CPU time each request costs:
+
+```bash
+python3 bench/http/one_core.py
+```
+
+The summary for readers deciding whether to use the language is [docs/web-performance.md](../docs/web-performance.md).
+
 ## Idle WebSockets and task creation
 
 `ws_idle/` holds a WebSocket echo server (`server.wb`) and a Go client (`client.go`) that opens N connections from several loopback addresses, holds them idle, then checks that each still echoes. `run.py` measures the server's resident memory before and after.
@@ -50,6 +58,22 @@ python3 bench/ws_idle/run.py --connections 50000
 `spawn` (in the main suite) starts 10,000 tasks that each add two numbers, joins them, twenty times. Go uses goroutines with a result channel each; Python a pool of 64 threads.
 
 ## Results
+
+### 2026-11-19, web performance report
+
+The measurements behind [docs/web-performance.md](../docs/web-performance.md), on the phase 4 build. HTTP at 64 and 256 connections is in that report.
+
+One CPU per server, 64 connections, best of 3 runs of 4 s (`one_core.py`):
+
+| Endpoint | Weby | Go | Weby vs Go | CPU per request: Weby / Go |
+|---|---|---|---|---|
+| `/plaintext` | 382,310 | 186,777 | 2.05x | 2.6 / 5.4 µs |
+| `/json` | 377,275 | 179,428 | 2.10x | 2.7 / 5.6 µs |
+| `/items` | 104,364 | 91,637 | 1.14x | 9.6 / 10.9 µs |
+| `/users/42` | 315,783 | 170,838 | 1.85x | 3.2 / 5.9 µs |
+| `POST /orders` | 219,666 | 110,386 | 1.99x | 4.6 / 9.1 µs |
+
+Idle WebSockets: 50,000 connections opened in 2.2 s, all still echoing afterwards; the server grew from 4.2 MB to 763 MB, **15.5 KiB per connection**. The phase 2 build, measured the same way, used 16.5 KiB; milestone 10's figure was 11.3 KiB.
 
 ### 2026-11-19, performance plan phase 4
 
