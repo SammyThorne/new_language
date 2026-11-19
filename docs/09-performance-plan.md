@@ -1,5 +1,7 @@
 # 09 — Performance plan
 
+All five phases are done. The last round of work after them is planned in the [final optimisation plan](10-final-optimization-plan.md).
+
 An analysis of where Weby's time goes today and a plan to close the remaining gaps to Go. Measured on 2026-11-19, after milestone 12's second part, on the machine in [bench/README.md](../bench/README.md) (Ryzen AI 5 340, 12 threads, LLVM 19.1.7, Boehm 8.2.8, Go 1.27.4).
 
 `perf` is not installed on this machine, so the evidence below comes from reading the optimised IR and machine code (`weby build --release --emit llvm-ir`, `llvm-objdump`), Boehm's own statistics (`GC_PRINT_STATS=1`), and small experiments that change one thing at a time. Times are the best of 5 runs.

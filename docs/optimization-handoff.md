@@ -161,7 +161,7 @@ Then the compiled handler copies the method and path again into collected string
 
 ## 6. Known gaps and leads, with evidence
 
-Ordered roughly by expected value for web workloads. None is started.
+Ordered roughly by expected value for web workloads. None is started. **The [final optimisation plan](10-final-optimization-plan.md) turns leads 1 to 4, 6 and 7 into milestones, with fresh measurements, and says why the others are left out.**
 
 1. **The HTTP request and response path without Rust heap allocation.**
    - Parse into offsets over the connection's buffer, and keep the remote address once per connection.
