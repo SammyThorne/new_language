@@ -1,0 +1,207 @@
+================================================================================
+Imports
+================================================================================
+
+import http
+import a.b as c
+from json import Value, decode as d
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_statement
+    (dotted_name
+      (identifier)))
+  (import_statement
+    (dotted_name
+      (identifier)
+      (identifier))
+    (identifier))
+  (import_from_statement
+    (dotted_name
+      (identifier))
+    (identifier)
+    (aliased_import
+      (identifier)
+      (identifier))))
+
+================================================================================
+Annotated struct with fields
+================================================================================
+
+@derive(Json)
+pub struct User:
+    """A user."""
+    id: int
+    priv tags: list[str?] = []
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (decorated_definition
+    (annotation
+      (dotted_name
+        (identifier))
+      (argument_list
+        (identifier)))
+    (struct_definition
+      (visibility)
+      (identifier)
+      (struct_body
+        (docstring
+          (string_content))
+        (field_declaration
+          (identifier)
+          (named_type
+            (identifier)))
+        (field_declaration
+          (visibility)
+          (identifier)
+          (generic_type
+            (named_type
+              (identifier))
+            (type_arguments
+              (optional_type
+                (named_type
+                  (identifier)))))
+          (list))))))
+
+================================================================================
+Enum with variants
+================================================================================
+
+enum Shape:
+    Circle(radius: float)
+    Pair(int, str)
+    Quit
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_definition
+    (identifier)
+    (enum_body
+      (variant
+        (identifier)
+        (variant_field
+          (identifier)
+          (named_type
+            (identifier))))
+      (variant
+        (identifier)
+        (named_type
+          (identifier))
+        (named_type
+          (identifier)))
+      (variant
+        (identifier)))))
+
+================================================================================
+Trait and impl
+================================================================================
+
+trait Shape(Display):
+    def area(self) -> float
+
+impl[T: Ord + Hash] Display for Box[T]:
+    def show(self, width: int = 0) -> Result[str, Error]?:
+        return ""
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (trait_definition
+    (identifier)
+    (named_type
+      (identifier))
+    (block
+      (function_definition
+        (identifier)
+        (parameters
+          (self))
+        (named_type
+          (identifier)))))
+  (impl_block
+    (type_parameters
+      (type_parameter
+        (identifier)
+        (trait_bound
+          (named_type
+            (identifier))
+          (named_type
+            (identifier)))))
+    (named_type
+      (identifier))
+    (generic_type
+      (named_type
+        (identifier))
+      (type_arguments
+        (named_type
+          (identifier))))
+    (block
+      (function_definition
+        (identifier)
+        (parameters
+          (self)
+          (default_parameter
+            (identifier)
+            (named_type
+              (identifier))
+            (integer)))
+        (optional_type
+          (generic_type
+            (named_type
+              (identifier))
+            (type_arguments
+              (named_type
+                (identifier))
+              (named_type
+                (identifier)))))
+        (block
+          (return_statement
+            (string)))))))
+
+================================================================================
+Const, type alias and extern function
+================================================================================
+
+const LIMIT: int = 10
+type Handler = def(Request) -> Result[Response]
+@extern("labs")
+def labs(x: int) -> int
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (const_declaration
+    (identifier)
+    (named_type
+      (identifier))
+    (integer))
+  (type_alias
+    (identifier)
+    (function_type
+      (named_type
+        (identifier))
+      (generic_type
+        (named_type
+          (identifier))
+        (type_arguments
+          (named_type
+            (identifier))))))
+  (decorated_definition
+    (annotation
+      (dotted_name
+        (identifier))
+      (argument_list
+        (string
+          (string_content))))
+    (function_definition
+      (identifier)
+      (parameters
+        (typed_parameter
+          (identifier)
+          (named_type
+            (identifier))))
+      (named_type
+        (identifier)))))

@@ -1,0 +1,16 @@
+[package]
+name = "zed_weby"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The Zed extension for Weby: starts `weby lsp`"
+
+# Built by Zed to WebAssembly; not part of the compiler's workspace.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

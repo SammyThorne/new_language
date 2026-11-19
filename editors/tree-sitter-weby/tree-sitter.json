@@ -1,0 +1,17 @@
+{
+  "grammars": [
+    {
+      "name": "weby",
+      "camelcase": "Weby",
+      "scope": "source.weby",
+      "path": ".",
+      "file-types": ["wb"],
+      "highlights": "queries/highlights.scm",
+      "injection-regex": "^weby$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "description": "Weby grammar for tree-sitter"
+  }
+}

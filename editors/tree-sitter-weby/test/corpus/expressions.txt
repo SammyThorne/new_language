@@ -1,0 +1,177 @@
+================================================================================
+Precedence
+================================================================================
+
+x = -a ** 2 + b * c if not d in e else f
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (conditional_expression
+      (binary_operator
+        (unary_operator
+          (binary_operator
+            (identifier)
+            (integer)))
+        (binary_operator
+          (identifier)
+          (identifier)))
+      (not_operator
+        (comparison_operator
+          (identifier)
+          (identifier)))
+      (identifier))))
+
+================================================================================
+Postfix, generics and spawn
+================================================================================
+
+t = spawn work(x)
+v = json.decode[list[User]](text)?
+s = name[1:3]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (spawn_expression
+      (call
+        (identifier)
+        (argument_list
+          (identifier)))))
+  (assignment
+    (identifier)
+    (try_expression
+      (call
+        (subscript
+          (attribute
+            (identifier)
+            (identifier))
+          (subscript
+            (identifier)
+            (identifier)))
+        (argument_list
+          (identifier)))))
+  (assignment
+    (identifier)
+    (subscript
+      (identifier)
+      (slice
+        (integer)
+        (integer)))))
+
+================================================================================
+Collections, comprehensions and lambdas
+================================================================================
+
+xs = [x * 2 for x in range(10) if x % 2 == 0]
+d = {k: v for k, v in pairs}
+e = {"a": 1, "b": [1, 2], "c": (1,)}
+f = lambda a, b: a + b
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (list_comprehension
+      (binary_operator
+        (identifier)
+        (integer))
+      (for_in_clause
+        (identifier)
+        (call
+          (identifier)
+          (argument_list
+            (integer))))
+      (if_clause
+        (comparison_operator
+          (binary_operator
+            (identifier)
+            (integer))
+          (integer)))))
+  (assignment
+    (identifier)
+    (dict_comprehension
+      (pair
+        (identifier)
+        (identifier))
+      (for_in_clause
+        (pattern_list
+          (identifier)
+          (identifier))
+        (identifier))))
+  (assignment
+    (identifier)
+    (dict
+      (pair
+        (string
+          (string_content))
+        (integer))
+      (pair
+        (string
+          (string_content))
+        (list
+          (integer)
+          (integer)))
+      (pair
+        (string
+          (string_content))
+        (tuple
+          (integer)))))
+  (assignment
+    (identifier)
+    (lambda
+      (lambda_parameters
+        (identifier)
+        (identifier))
+      (binary_operator
+        (identifier)
+        (identifier)))))
+
+================================================================================
+Strings and f-strings
+================================================================================
+
+a = "tab\t and 'quotes'"
+b = f"{x:.2f} {{literal}} {user.name}!"
+c = """line one
+"quoted" line two"""
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content)))
+  (assignment
+    (identifier)
+    (string
+      (fstring
+        (interpolation
+          (identifier)
+          (format_spec))
+        (string_content)
+        (escape_sequence)
+        (string_content)
+        (escape_sequence)
+        (string_content)
+        (interpolation
+          (attribute
+            (identifier)
+            (identifier)))
+        (string_content))))
+  (assignment
+    (identifier)
+    (string
+      (string_content)
+      (string_content)
+      (string_content)
+      (string_content)
+      (string_content))))

@@ -1,10 +1,12 @@
 # Weby
 
-A compiled, Python-shaped language for web backends: indentation syntax, structs and traits instead of classes, an LLVM backend, and REST, WebSocket, JSON and concurrency support in the standard library.
+A compiled, Python-shaped language for web backends: indentation syntax, structs and traits instead of classes, an LLVM backend, and HTTP, TLS, WebSocket, JSON, PostgreSQL and concurrency support in the standard library.
 
 ## Status
 
-The prototype is complete, milestones 0 to 11 are done, and milestone 12 (performance and libraries, ongoing by design) has added TLS, a PostgreSQL driver, an HTTP client and regular expressions. See the [roadmap](docs/06-roadmap.md#progress). Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
+The prototype is complete and milestones 0 to 11 are done. Milestone 12 (performance and ecosystem) is ongoing by design and has so far added TLS, a PostgreSQL driver, an HTTP client and regular expressions. The WebSocket server passes the Autobahn conformance suite and the JSON parser passes JSONTestSuite. See the [roadmap](docs/06-roadmap.md#progress).
+
+Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime. The runtime uses the Boehm garbage collector and runs tasks as fibers on one worker thread per core.
 
 ```python
 trait Shape(Display):
@@ -42,9 +44,56 @@ def main():
                 print("error:", error.message())
 ```
 
+A web service: typed routes declared with annotations, a PostgreSQL pool shared by every request, rows decoded straight into structs, and HTTPS.
+
+```python
+import http
+import os
+import postgres
+
+@derive(Json)
+@frozen
+struct Todo:
+    id: int
+    title: str
+    done: bool
+
+@derive(Json)
+@frozen
+struct NewTodo:
+    title: str
+
+@frozen
+struct App:
+    db: postgres.Db
+
+impl App:
+    @http.get("/todos/{id}")
+    def get(self, id: int) -> Result[Todo]:
+        sql = "select id, title, done from todos where id = $1"
+        match postgres.query_one_as[Todo](self.db, sql, [str(id)])?:
+            case Some(todo):
+                return todo
+            case None:
+                return Err(http.Error(404, "todo not found"))
+
+    @http.post("/todos", status=201)
+    def create(self, body: NewTodo) -> Result[Todo]:
+        sql = "insert into todos (title, done) values ($1, false) returning id, title, done"
+        return postgres.query_one_as[Todo](self.db, sql, [body.title])?.unwrap()
+
+def main():
+    db = postgres.connect(os.getenv("DATABASE_URL").unwrap()).unwrap()
+    server = http.Server()
+    server.mount(App(db))
+    server.listen_tls(":8443", "cert.pem", "key.pem").unwrap()
+```
+
+The compiler checks the routes against the handlers: `id` must parse as an `int` or the request gets a 400, and the body must decode as a `NewTodo`. An error from the database becomes a 500, `http.Error(404, ...)` a 404, and a panic in a handler a 500 while the server carries on.
+
 | Works now | Not yet |
 |---|---|
-| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | Variables in the debugger (line tables and function names only); a VS Code client extension for the language server |
+| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | |
 | An HTTP client (`http.get`, `http.post`, `http.fetch`) for `http://` and `https://`; header and cookie parameters in typed handlers; regular expressions (`re`) | Connection reuse and redirects in the client |
 | A PostgreSQL client (`postgres`): a shared connection pool, parameters, rows decoded into `@derive(Json)` structs, transactions with `with`, SCRAM authentication and TLS | Prepared-statement caching, `COPY`, `LISTEN`/`NOTIFY` |
 | An HTTP/1.1 server: `@http.get("/todos/{id}")` route annotations with typed path, query and JSON-body parameters checked at compile time, or call-style routes, middleware, groups, graceful shutdown, HTTPS (`listen_tls`); the `log` module | HTTP/2 |
@@ -63,15 +112,28 @@ def main():
 | `@derive(Eq, Hash, Display, Copy, Ord)`, `@frozen`, operator traits | |
 | `list`, `dict`, tuples, optionals (`T?`), f-strings with Python's format specs | |
 | `min`, `max`, `sum`, `sorted` and `sort` with `key=` and `reverse=`, `enumerate`, `zip`, `any`, `all` | |
-| Panics with source locations; diagnostics with source snippets | |
+| Panics with source locations and backtraces; diagnostics with source snippets; debug information for `gdb` and `perf` | Variables in the debugger (line tables and function names only) |
+| Tooling: `weby test`, `weby fmt`, `weby lsp` (diagnostics, hover, go to definition, formatting), git and path dependencies with a lock file | |
+| Editors: a Zed extension (Tree-sitter grammar, outline, run buttons, language server), VS Code and Vim syntax, and setup for Neovim and Helix ([editors/README.md](editors/README.md)) | A VS Code client extension for the language server |
 
 Constructs from the design that are not implemented are rejected with an error saying they are not supported yet.
 
-Compiled programs run between 1.1x and 1.8x Go's time on allocation, list indexing and dynamic dispatch, and faster than Go on plain function calls, string-keyed counting, sorting with a key function, and typed JSON. The HTTP server answers small requests 1.5x faster than Go's `net/http` and a JSON list of 20 records at 0.72x its rate; 50,000 idle WebSocket connections take 11 KiB each. Against CPython programs are 3x to 33x faster; see [bench/README.md](bench/README.md).
+## Performance
+
+| Compared with Go | Result |
+|---|---|
+| Plain function calls, string-keyed counting, sorting with a key function, typed JSON | Faster than Go |
+| Allocation, list indexing, dynamic dispatch | 1.1x to 1.8x Go's time |
+| Starting tasks | About 3x Go's time |
+| HTTP server, small responses | 1.5x to 1.6x Go's `net/http` throughput |
+| HTTP server, a JSON list of 20 records | 0.7x to 0.8x Go's throughput |
+| Idle WebSocket connections | 11 KiB each, measured with 50,000 |
+
+Programs are 3x to 33x faster than the same programs in CPython. The numbers and how they were measured are in [bench/README.md](bench/README.md). Allocation is the remaining gap with Go; escape analysis is the planned next step.
 
 ## Building and running
 
-Requires Rust 1.85 or newer, LLVM 19 development files, a C compiler for linking, and the Boehm garbage collector library. On Debian or Ubuntu: `apt install llvm-19-dev gcc libgc1`. The path to LLVM is set in `.cargo/config.toml`; adjust it if LLVM 19 lives elsewhere.
+Requires Rust 1.85 or newer, LLVM 19 development files, a C compiler (for linking, and for the `ring` cryptography library behind TLS), and the Boehm garbage collector library. On Debian or Ubuntu: `apt install llvm-19-dev gcc libgc1`. The path to LLVM is set in `.cargo/config.toml`; adjust it if LLVM 19 lives elsewhere. Programs do not depend on the system's OpenSSL or certificate store: TLS is `rustls`, with the Mozilla root certificates built in, and `SSL_CERT_FILE` adds more.
 
 ```bash
 cargo build --workspace
@@ -115,7 +177,9 @@ Tests:
 cargo test --workspace
 ```
 
-The end-to-end tests compile every program in `tests/run` (in debug and release mode) and compare its output with the `# expect:` comments in the file, and check every program in `tests/ui` against the expected compiler messages in its `.stderr` file. After an intended change to a message, regenerate those files with `WEBY_BLESS=1 cargo test -p lang_cli --test programs` and review the diff.
+The end-to-end tests compile every program in `tests/run` and compare its output with the `# expect:` comments in the file. Each program runs in debug mode, in release mode, and with the collector running before every allocation. They also check every program in `tests/ui` against the expected compiler messages in its `.stderr` file. After an intended change to a message, regenerate those files with `WEBY_BLESS=1 cargo test -p lang_cli --test programs` and review the diff.
+
+The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real sockets. The PostgreSQL test runs only when `WEBY_TEST_DATABASE_URL` names a database it may use ([tests/db/README.md](tests/db/README.md)). The Autobahn and JSONTestSuite conformance runs are manual, because each needs a download ([tests/conformance/README.md](tests/conformance/README.md)).
 
 ## The plan
 
@@ -130,5 +194,7 @@ The end-to-end tests compile every program in `tests/run` (in debug and release 
 | [docs/06-roadmap.md](docs/06-roadmap.md) | Milestones with exit criteria |
 | [docs/07-testing-and-performance.md](docs/07-testing-and-performance.md) | Test strategy, benchmarks, performance targets |
 | [docs/08-decisions-and-risks.md](docs/08-decisions-and-risks.md) | Decision log with rejected alternatives, risks, open questions |
+| [bench/README.md](bench/README.md) | Benchmarks against Go and CPython |
+| [editors/README.md](editors/README.md) | Editor support and the language server |
 
 The name "Weby" and the `.wb` extension may still change. The name is kept out of crate names and runtime symbols and lives in one small crate of constants, so it can be changed later with a short checklist ([docs/03-compiler-architecture.md](docs/03-compiler-architecture.md#renaming-the-language)).

@@ -1,0 +1,211 @@
+================================================================================
+Control flow
+================================================================================
+
+def main():
+    if a:
+        pass
+    elif b:
+        break
+    else:
+        continue
+    while x < 10:
+        x += 1
+    for k, v in d.items():
+        print(k)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    (identifier)
+    (parameters)
+    (block
+      (if_statement
+        (identifier)
+        (block
+          (pass_statement))
+        (elif_clause
+          (identifier)
+          (block
+            (break_statement)))
+        (else_clause
+          (block
+            (continue_statement))))
+      (while_statement
+        (comparison_operator
+          (identifier)
+          (integer))
+        (block
+          (augmented_assignment
+            (identifier)
+            (integer))))
+      (for_statement
+        (pattern_list
+          (identifier)
+          (identifier))
+        (call
+          (attribute
+            (identifier)
+            (identifier))
+          (argument_list))
+        (block
+          (expression_statement
+            (call
+              (identifier)
+              (argument_list
+                (identifier)))))))))
+
+================================================================================
+Match with patterns and guards
+================================================================================
+
+def f(m: Message):
+    match m:
+        case Text(body) | Binary(body) if len(body) > 0:
+            return
+        case Shape.Circle(radius=r):
+            return
+        case (1, -2):
+            return
+        case _:
+            pass
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    (identifier)
+    (parameters
+      (typed_parameter
+        (identifier)
+        (named_type
+          (identifier))))
+    (block
+      (match_statement
+        (identifier)
+        (case_clause
+          (or_pattern
+            (variant_pattern
+              (dotted_name
+                (identifier))
+              (variant_pattern
+                (dotted_name
+                  (identifier))))
+            (variant_pattern
+              (dotted_name
+                (identifier))
+              (variant_pattern
+                (dotted_name
+                  (identifier)))))
+          (comparison_operator
+            (call
+              (identifier)
+              (argument_list
+                (identifier)))
+            (integer))
+          (block
+            (return_statement)))
+        (case_clause
+          (variant_pattern
+            (dotted_name
+              (identifier)
+              (identifier))
+            (keyword_pattern
+              (identifier)
+              (variant_pattern
+                (dotted_name
+                  (identifier)))))
+          (block
+            (return_statement)))
+        (case_clause
+          (tuple_pattern
+            (literal_pattern
+              (integer))
+            (literal_pattern
+              (integer)))
+          (block
+            (return_statement)))
+        (case_clause
+          (wildcard_pattern)
+          (block
+            (pass_statement)))))))
+
+================================================================================
+Assignments, with and assert
+================================================================================
+
+def g():
+    a, b = b, a
+    total: int = 0
+    with lock.lock() as v:
+        v.append(1)
+    assert total == 0, "not zero"
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    (identifier)
+    (parameters)
+    (block
+      (assignment
+        (expression_list
+          (identifier)
+          (identifier))
+        (expression_list
+          (identifier)
+          (identifier)))
+      (annotated_assignment
+        (identifier)
+        (named_type
+          (identifier))
+        (integer))
+      (with_statement
+        (call
+          (attribute
+            (identifier)
+            (identifier))
+          (argument_list))
+        (identifier)
+        (block
+          (expression_statement
+            (call
+              (attribute
+                (identifier)
+                (identifier))
+              (argument_list
+                (integer))))))
+      (assert_statement
+        (comparison_operator
+          (identifier)
+          (integer))
+        (string
+          (string_content))))))
+
+================================================================================
+Comments do not disturb blocks
+================================================================================
+
+def h():
+    x = 1
+    # a comment in the block
+
+# a comment after it
+y = 2
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    (identifier)
+    (parameters)
+    (block
+      (assignment
+        (identifier)
+        (integer))
+      (comment)))
+  (comment)
+  (assignment
+    (identifier)
+    (integer)))
