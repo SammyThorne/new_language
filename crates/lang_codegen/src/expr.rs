@@ -107,11 +107,25 @@ impl<'ctx> Codegen<'ctx, '_> {
             ExprKind::List(items) => {
                 let desc = self.desc(expr.ty);
                 let list = self.call_rt("lrt_list_new", &[desc.into(), self.i64(items.len() as i64).into()]).unwrap();
-                for item in items {
-                    let value = self.value(item);
-                    self.list_push(list.into_pointer_value(), value);
+                if items.is_empty() {
+                    return Some(list);
                 }
-                list
+                // The buffer has room for every item: store each where it goes, then set the
+                // length once. The collector scans the whole buffer, so items stored before a
+                // later item's allocation stay alive.
+                let list = list.into_pointer_value();
+                let data = self.list_data(list);
+                for (index, item) in items.iter().enumerate() {
+                    let value = self.value(item);
+                    // SAFETY (LLVM): `index` is below the capacity the list was made with.
+                    let slot =
+                        unsafe { self.b.build_in_bounds_gep(value.get_type(), data, &[self.i64(index as i64)], "") }
+                            .must();
+                    self.store_tagged(slot, value, "list.elem");
+                }
+                let len_ptr = self.b.build_struct_gep(self.list_type, list, 1, "").must();
+                self.store_tagged(len_ptr, self.i64(items.len() as i64).into(), "list.len");
+                list.into()
             }
             ExprKind::Dict(pairs) => {
                 let desc = self.desc(expr.ty);

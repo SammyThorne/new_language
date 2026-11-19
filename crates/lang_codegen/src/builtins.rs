@@ -211,6 +211,19 @@ impl<'ctx> Codegen<'ctx, '_> {
                 return None;
             }
             Builtin::ListCopy => self.call_rt("lrt_list_copy", &[values[0]]).unwrap(),
+            Builtin::ListWithCapacity => {
+                // Clamped to [0, 2^20]: the count is exact, but a huge one is better reached by
+                // growing than reserved at once.
+                let wanted = values[0].into_int_value();
+                let zero = self.i64(0);
+                let most = self.i64(1 << 20);
+                let negative = self.b.build_int_compare(IntPredicate::SLT, wanted, zero, "").must();
+                let wanted = self.b.build_select(negative, zero, wanted, "").must().into_int_value();
+                let big = self.b.build_int_compare(IntPredicate::SGT, wanted, most, "").must();
+                let capacity = self.b.build_select(big, most, wanted, "").must();
+                let desc = self.desc(expr.ty);
+                self.call_rt("lrt_list_new", &[desc.into(), capacity]).unwrap()
+            }
 
             // ---- dict ----
             Builtin::DictGet | Builtin::DictGetOr => {

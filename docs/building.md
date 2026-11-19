@@ -318,7 +318,8 @@ With `--check`, nothing is changed: the command lists the files that are not for
 | `WEBY_GC_FREE_SPACE_DIVISOR` | `2` | How often the collector runs once the live data is larger than `WEBY_GC_MIN_ALLOC`: after allocating about half the live data. `1` collects about half as often, like Go's default, for up to 40% more memory; `3` uses a little less memory for more collection time |
 | `WEBY_GC_MIN_ALLOC` | `4194304` (4 MiB) | The least the program allocates between collections, in bytes, however little live data it has. Go's minimum heap is the same. Lower values save up to that much memory in small programs, at the cost of many more collections in busy ones |
 | `WEBY_GC_INITIAL_HEAP` | the collector's default | Bytes of heap to reserve at start, to skip the first few collections |
-| `WEBY_GC_STRESS` | off | Any value other than `0` collects before every allocation. Slow; it finds missing garbage-collector roots |
+| `WEBY_GC_STRESS` | off | Any value other than `0` collects before every allocation. Slow; it finds missing garbage-collector roots. `cache` instead keeps the per-thread free lists in use but short, and collects before every refill: it finds objects on a free list that the collector cannot see |
+| `WEBY_PARALLEL_MARK_HEAP` | `33554432` (32 MiB) | Once the heap is this large, a program that has started no tasks lets the collector mark with up to four threads (a program with tasks does from its first `spawn`). Less wall time for more CPU time; `0` keeps marking on one thread |
 | `WEBY_ALLOC_STATS` | off | Any value other than `0` prints, at exit, the bytes allocated, the number of collections and the heap size to standard error |
 | `WEBY_LOG` | `info` | The lowest `log` level written: `debug`, `info`, `warn`, `error` or `off` |
 | `WEBY_BACKTRACE` | on | `0` leaves the backtrace out of panic messages |

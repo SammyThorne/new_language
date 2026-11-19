@@ -96,7 +96,8 @@ fn expectations(source: &str) -> Expectations {
 }
 
 /// Every program runs in debug and release builds, and once more in each with the collector
-/// running before every allocation, which turns a missing root into an immediate crash. The
+/// running before every allocation, which turns a missing root into an immediate crash. A fifth
+/// run, in release, collects before every free-list refill with the lists kept short. The
 /// release run matters as much as the debug one: optimised code keeps fewer values alive, which
 /// is how a reference held only by Rust heap memory was found (docs/09, phase 1).
 #[test]
@@ -105,16 +106,22 @@ fn run_programs() {
     let mut failures = Vec::new();
     for program in programs("tests/run") {
         let expected = expectations(&fs::read_to_string(repo_root().join(&program)).unwrap());
-        for (mode, gc_stress) in
-            [("debug", false), ("release", false), ("debug, GC stress", true), ("release, GC stress", true)]
-        {
+        for (mode, gc_stress) in [
+            ("debug", None),
+            ("release", None),
+            ("debug, GC stress", Some("1")),
+            ("release, GC stress", Some("1")),
+            // The free lists in use but short, with a collection before every refill
+            // (docs/10, milestone 3): catches objects on a list that the collector cannot see.
+            ("release, cache stress", Some("cache")),
+        ] {
             let mut command = Command::new(compiler());
             command.arg("run").current_dir(repo_root());
             if mode.starts_with("release") {
                 command.arg("--release");
             }
-            if gc_stress {
-                command.env(&stress, "1");
+            if let Some(value) = gc_stress {
+                command.env(&stress, value);
             }
             command.envs(expected.env.iter().map(|(name, value)| (name, value)));
             let output = command.arg(&program).args(&expected.args).output().unwrap();

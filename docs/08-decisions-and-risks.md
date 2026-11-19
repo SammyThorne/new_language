@@ -768,6 +768,45 @@ Milestone 2 of the [final optimisation plan](10-final-optimization-plan.md): the
 
 **Not done.** `writev` for large bodies (optional in the plan): no benchmark needs it. A single atomic state word in place of the waiter's mutex: `IoSource::wait` no longer shows in profiles.
 
+### D89. Runtime allocations from per-thread lists; buffers sized once; parallel marking (final plan, milestone 3)
+
+Milestone 3 of the [final optimisation plan](10-final-optimization-plan.md): allocation and the collector.
+
+**What was done.**
+- **A stress mode for the free lists** (`GC_STRESS=cache`), built first: the lists stay in use but hold at most two objects, and every refill collects. An object on a list that the collector cannot see is then reclaimed and handed out again within a few allocations. Every program in `tests/run` now also runs in this mode. Checked by planting such a bug (the lists' block on the Rust heap): 16 of 46 programs failed in this mode and none without it.
+- **Runtime allocations of scanned memory from per-thread free lists.** `gc::alloc` below 256 bytes pops from a per-thread cache of the same shape as generated code's, refilled by the same `lrt_alloc_slow`. It is a separate cache held in a Rust `thread_local!`, read only inside an `#[inline(never)]` function that never parks.
+- **The JSON output builder sized from the last result.** A global per encoded type holds the length of its last output (read and written with `unordered` atomics), and the next encoding reserves that much, up to 64 KiB. Builder buffers are rounded to 16n - 1 bytes, which the collector's extra byte makes a whole number of granules.
+- **Comprehensions of known length presized.** One `for`, no `if`, over a list or a `range` with step 1: sema hoists the source into temporaries and starts the list with that many slots (`Builtin::ListWithCapacity`, at most 2^20). List literals store their items straight into the buffer and set the length once. `tests/run/comprehension_sizes.wb` covers empty, reversed and filtered cases and the order of evaluation.
+- **Parallel marking for batch programs.** The collector gets up to four marker threads (`GC_set_markers_count`), which start only once threads are allowed. A heap-growth callback sets a flag at 32 MiB (`PARALLEL_MARK_HEAP`), and the allocation slow path then calls `tasks::allow_threads()`, as the first `spawn` does. Four against six markers, and an 8 MiB threshold, made no difference.
+
+**Tried and dropped: a cache for unscanned memory** (plan items 3.3 and 3.4). Built as the plan described it: per size, an array of pointers in a scanned block, refilled from `GC_generic_malloc_many` with collection disabled while the list is copied. Planting a bug showed the stress mode catches mistakes in it (4 programs failed). But it gained nothing: `json_orders` 0.4% slower with it, `/items` 2.1%, `POST /orders` 1.0%, and `sort` 5% to 10% slower (handing objects out in descending address order explained about half of that). Boehm's own thread-local lists for unscanned objects are already that fast. It was removed, and with it the reason for inline allocation of pointer-free structs.
+
+**Counts per request** (`bench/http/counts.py`):
+
+| `/items` | Before | After |
+|---|---|---|
+| `GC_malloc` calls | 46 | 0 |
+| `GC_malloc_atomic` calls | 28 | 22 |
+| Bytes allocated | 8,880 | 5,328 (-40%) |
+
+**Timings**, interleaved A/B against milestone 2:
+
+| Measure | Before | After | Change |
+|---|---|---|---|
+| `/items`, one CPU | 201,400 req/s (4.97 µs) | 246,000 req/s (4.07 µs) | +22% |
+| `/items`, six CPUs, 256 connections | 348,300 req/s | 572,800 req/s | +64% |
+| `/users/42`, one CPU | 423,100 | 438,800 | +3.7% |
+| `POST /orders`, one CPU | 350,700 | 361,500 | +3.1% |
+| `/plaintext`, `/json`, one CPU | | | +1% |
+| `binary_trees` | 0.675 s | 0.577 s | -14.5% wall time |
+| `json_orders` | 0.223 s | 0.209 s | -6.2% |
+| `word_count` | 0.610 s | 0.582 s | -4.6% |
+| `sort`, `sieve` | | | within 1.2% |
+
+**Why six CPUs gained most.** With several threads, every `GC_malloc` takes the collector's allocation lock. On `/items` the runtime made 46 of those calls per request, on six CPUs at once; now it pops from its own list. Peak memory: `json_orders` 62 to 57 MB, the others unchanged.
+
+**Not met: `binary_trees` at 0.55 s.** It reached 0.577 s. The plan's 20% came from the earlier measurement with all of the machine's CPUs marking; capped at four, and only from 32 MiB, it gains 14.5%, and more markers or an earlier start did not help.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

@@ -416,6 +416,8 @@ Record as D88.
 
 ## Milestone 3: Allocation and the collector
 
+**Done 2026-11-19 (D89).** Runtime `GC_malloc` calls 46 to 0 and bytes 40% down per `/items` request; `/items` +22% on one CPU and +64% on six; `binary_trees` -14.5% (0.577 s, not the 0.55 s target). The unscanned-object cache (3.3) was built, measured, and dropped as it gained nothing; 3.4 with it.
+
 ### 3.1 A stress mode that exercises the caches
 
 Do this first. Today collector-stress mode bypasses the per-thread caches (`gc.rs`, `lrt_alloc_slow` returns early), so the test suite never collects while objects sit on a free list. Everything else in this milestone changes those lists.

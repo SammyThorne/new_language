@@ -527,6 +527,8 @@ pub enum Builtin {
     StrEndsWith,
     StrContains,
     ListAppend,
+    /// An empty list with room for `args[0]` elements (a comprehension of known length).
+    ListWithCapacity,
     ListExtend,
     ListInsert,
     ListPopLast,

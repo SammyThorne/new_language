@@ -20,6 +20,9 @@ use lang_sema::types::{Ty, TyKind};
 /// `json.rs`, which asserts that the reader fits.
 const JSON_READER_BYTES: u64 = 512;
 
+/// The most room reserved for a JSON encoding from the last one's length.
+const JSON_SIZE_HINT_MAX: i64 = 64 * 1024;
+
 /// A string as a JSON string literal, for keys known when compiling.
 fn json_literal(text: &str) -> String {
     let mut out = String::from("\"");
@@ -725,11 +728,37 @@ impl<'ctx> Codegen<'ctx, '_> {
 
     // ---- the json module's intrinsics ---------------------------------------------------
 
-    /// `__json_encode(value)`.
+    /// `__json_encode(value)`. The output's length is remembered per type, in a global, and the
+    /// next encoding of that type starts with that much room: one buffer instead of doubling
+    /// from 32 bytes (docs/10, milestone 3). A wrong guess costs nothing new: too small grows as
+    /// before, too large wastes at most `JSON_SIZE_HINT_MAX`. The global is read and written
+    /// with `unordered` atomics, so handlers on several threads do not race; on x86-64 they are
+    /// plain moves.
     pub(crate) fn json_encode(&mut self, ty: Ty, value: Option<BasicValueEnum<'ctx>>) -> BasicValueEnum<'ctx> {
+        let i64_type = self.cx.i64_type();
+        let name = format!("json.size.{}", self.program.types.display(ty));
+        let hint = self.module.get_global(&name).unwrap_or_else(|| {
+            let global = self.module.add_global(i64_type, None, &name);
+            global.set_initializer(&i64_type.const_zero());
+            global.set_linkage(inkwell::module::Linkage::Internal);
+            global
+        });
         let builder = self.builder_new();
+        let load = self.b.build_load(i64_type, hint.as_pointer_value(), "json.size").must();
+        let instruction = inkwell::values::BasicValue::as_instruction_value(&load).unwrap();
+        instruction.set_alignment(8).must();
+        instruction.set_atomic_ordering(inkwell::AtomicOrdering::Unordered).must();
+        let max = self.i64(JSON_SIZE_HINT_MAX);
+        let too_big = self.b.build_int_compare(IntPredicate::UGT, load.into_int_value(), max, "").must();
+        let size = self.b.build_select(too_big, max, load.into_int_value(), "").must();
+        self.call_rt("lrt_builder_reserve", &[builder.into(), size]);
         self.emit_json(builder, ty, value);
-        self.call_rt("lrt_builder_finish", &[builder.into()]).unwrap()
+        let text = self.call_rt("lrt_builder_finish", &[builder.into()]).unwrap();
+        let [_, len] = self.str_parts(text);
+        let store = self.b.build_store(hint.as_pointer_value(), len).must();
+        store.set_alignment(8).must();
+        store.set_atomic_ordering(inkwell::AtomicOrdering::Unordered).must();
+        text
     }
 
     /// `__json_decode(text)` into a `Result[T, JsonError]`.

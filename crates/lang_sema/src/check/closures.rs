@@ -489,6 +489,35 @@ impl Checker<'_, '_> {
         }
         let temp = cx.temp(result_ty, span);
         let load = mk(K::Local(temp), result_ty, span);
+        // A list comprehension with one `for` and no `if`, over a list or a `range` with step 1,
+        // has as many elements as its source: the list starts with that much room. The source
+        // is evaluated into temporaries first, once, as the loop would.
+        let mut hoisted = Vec::new();
+        let mut capacity = None;
+        if value.is_none()
+            && let [(_, source, conditions)] = loops.as_mut_slice()
+            && conditions.is_empty()
+        {
+            let mut hoist = |cx: &mut FnCx, expr: &mut hir::Expr| {
+                let local = cx.temp(expr.ty, span);
+                let original = std::mem::replace(expr, mk(K::Local(local), expr.ty, span));
+                hoisted.push(hir::Stmt::Assign { place: hir::Place::Local(local), value: original });
+                mk(K::Local(local), expr.ty, span)
+            };
+            match source {
+                hir::LoopSource::List(list) => {
+                    let list = hoist(cx, list);
+                    capacity = Some(mk(K::Builtin { op: hir::Builtin::Len, args: vec![list] }, Ty::INT, span));
+                }
+                hir::LoopSource::Range { start, stop, step } if matches!(step.kind, K::Int(1)) => {
+                    let start = hoist(cx, start);
+                    let stop = hoist(cx, stop);
+                    let op = hir::BinaryOp::IntSub;
+                    capacity = Some(mk(K::Binary { op, lhs: Box::new(stop), rhs: Box::new(start) }, Ty::INT, span));
+                }
+                _ => {}
+            }
+        }
         let mut inner = inner.into_iter();
         let mut body = match value {
             None => {
@@ -516,11 +545,15 @@ impl Checker<'_, '_> {
             }
             body = vec![hir::Stmt::For { target, source, body }];
         }
-        let empty = match value {
-            None => mk(K::List(Vec::new()), result_ty, span),
-            Some(_) => mk(K::Dict(Vec::new()), result_ty, span),
+        let empty = match (value, capacity) {
+            (None, Some(capacity)) => {
+                mk(K::Builtin { op: hir::Builtin::ListWithCapacity, args: vec![capacity] }, result_ty, span)
+            }
+            (None, None) => mk(K::List(Vec::new()), result_ty, span),
+            (Some(_), _) => mk(K::Dict(Vec::new()), result_ty, span),
         };
-        let mut stmts = vec![hir::Stmt::Assign { place: hir::Place::Local(temp), value: empty }];
+        let mut stmts = hoisted;
+        stmts.push(hir::Stmt::Assign { place: hir::Place::Local(temp), value: empty });
         stmts.extend(body);
         mk(K::Block { stmts, value: Box::new(load) }, result_ty, span)
     }

@@ -1,0 +1,30 @@
+# Comprehensions of known length start at their final size (docs/10, milestone 3): over a
+# `range` with step 1 or over a list, with one `for` and no `if`. The source is evaluated once,
+# start before stop, and the results are as before.
+# expect: [0, 1, 4, 9, 16]
+# expect: [] []
+# expect: [5, 6, 7]
+# expect: start stop [2, 3]
+# expect: ['A', 'B', 'C'] 3
+# expect: [[0, 0], [0, 1], [1, 0], [1, 1]]
+# expect: [0, 2, 4] [10, 8, 6]
+# expect: 100000 99999
+
+def note(seen: list[str], text: str, value: int) -> int:
+    seen.append(text)
+    return value
+
+def main():
+    print([i * i for i in range(5)])
+    print([i for i in range(0)], [i for i in range(5, 2)])
+    print([i for i in range(5, 8)])
+    seen: list[str] = []
+    values = [i for i in range(note(seen, "start", 2), note(seen, "stop", 4))]
+    print(seen[0], seen[1], values)
+    letters = ["a", "b", "c"]
+    upper = [c.upper() for c in letters]
+    print(upper, len(upper))
+    print([[i, j] for i in range(2) for j in range(2)])
+    print([i for i in range(6) if i % 2 == 0], [i for i in range(10, 5, -2)])
+    big = [i for i in range(100000)]
+    print(len(big), big[99999])

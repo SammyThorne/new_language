@@ -8,6 +8,12 @@
 //!
 //! Environment variables (names from `lang_names::env_var`):
 //! - `GC_STRESS`: collect before every allocation, to make missing roots crash immediately.
+//!   `GC_STRESS=cache` instead keeps the per-thread free lists in use but at most two objects
+//!   long, and collects before every refill: an object on a list that the collector could not
+//!   see would be reclaimed and handed out twice within a few allocations.
+//! - `PARALLEL_MARK_HEAP`: once the heap passes this many bytes (32 MiB by default; 0 for
+//!   never), a program that has not started any tasks lets the collector mark with several
+//!   threads, which a multi-threaded program does from its first `spawn` (docs/08, D89).
 //! - `GC_INITIAL_HEAP`: bytes to reserve at startup.
 //! - `GC_FREE_SPACE_DIVISOR`: Boehm's heap growth control; lower values grow the heap faster and
 //!   collect less often. The default is 2: a collection after allocating about half the live
@@ -20,7 +26,8 @@
 //! - `ALLOC_STATS`: at exit, print the bytes allocated, the number of collections and the heap
 //!   size to standard error (`bench/http/counts.py` divides them by the requests served).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[link(name = "libgc.so.1", kind = "dylib", modifiers = "+verbatim")]
 unsafe extern "C" {
@@ -36,6 +43,8 @@ unsafe extern "C" {
     fn GC_get_total_bytes() -> usize;
     fn GC_get_gc_no() -> usize;
     fn GC_get_heap_size() -> usize;
+    fn GC_set_on_heap_resize(callback: extern "C" fn(usize));
+    fn GC_set_markers_count(count: u32);
 }
 
 unsafe extern "C" {
@@ -49,6 +58,22 @@ extern "C" fn print_alloc_stats() {
 }
 
 static STRESS: AtomicBool = AtomicBool::new(false);
+static CACHE_STRESS: AtomicBool = AtomicBool::new(false);
+
+/// The heap size past which marking goes parallel, and whether it has been passed.
+static PARALLEL_MARK_HEAP: AtomicUsize = AtomicUsize::new(32 << 20);
+static HEAP_IS_LARGE: AtomicBool = AtomicBool::new(false);
+
+/// Most marker threads to use: beyond four, they mostly wait for one another.
+const MAX_MARKERS: usize = 4;
+
+/// Called by the collector, with its lock held, whenever the heap grows: so only a flag.
+extern "C" fn on_heap_resize(size: usize) {
+    let threshold = PARALLEL_MARK_HEAP.load(Ordering::Relaxed);
+    if threshold != 0 && size >= threshold {
+        HEAP_IS_LARGE.store(true, Ordering::Relaxed);
+    }
+}
 
 /// The least a program allocates between collections, whatever the size of its live data.
 const MIN_ALLOC: usize = 4 << 20;
@@ -59,10 +84,23 @@ fn env_number(suffix: &str) -> Option<usize> {
 
 /// Initialise the collector. Called once, from the main thread, before any allocation.
 pub fn init() {
+    let markers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_MARKERS);
+    // SAFETY: configuration before `GC_init`, as the collector requires. Marker threads start
+    // only once threads are allowed (`tasks::allow_threads`).
+    unsafe { GC_set_markers_count(markers as u32) };
     // SAFETY: called once at startup on the main thread, as Boehm requires.
     unsafe { GC_init() };
-    let stress = std::env::var(lang_names::env_var("GC_STRESS")).is_ok_and(|v| !v.is_empty() && v != "0");
-    STRESS.store(stress, Ordering::Relaxed);
+    let stress = std::env::var(lang_names::env_var("GC_STRESS")).unwrap_or_default();
+    match stress.as_str() {
+        "" | "0" => {}
+        "cache" => CACHE_STRESS.store(true, Ordering::Relaxed),
+        _ => STRESS.store(true, Ordering::Relaxed),
+    }
+    if let Some(bytes) = env_number("PARALLEL_MARK_HEAP") {
+        PARALLEL_MARK_HEAP.store(bytes, Ordering::Relaxed);
+    }
+    // SAFETY: registering a callback that only stores to an atomic.
+    unsafe { GC_set_on_heap_resize(on_heap_resize) };
     let divisor = env_number("GC_FREE_SPACE_DIVISOR").filter(|&d| d > 0).unwrap_or(2);
     // SAFETY: plain configuration call.
     unsafe { GC_set_free_space_divisor(divisor) };
@@ -85,11 +123,14 @@ fn out_of_memory(size: usize) -> ! {
     std::process::abort()
 }
 
-/// Allocate zeroed memory that the collector scans for references.
+/// Allocate zeroed memory that the collector scans for references. Small sizes come from the
+/// thread's free lists, as generated code's allocations do.
 pub fn alloc(size: usize) -> *mut u8 {
     if STRESS.load(Ordering::Relaxed) {
         // SAFETY: collection may run at any allocation.
         unsafe { GC_gcollect() };
+    } else if size < CACHE_GRANULES * 16 {
+        return alloc_cached(size);
     }
     // SAFETY: plain allocation.
     let ptr = unsafe { GC_malloc(size.max(1)) };
@@ -100,7 +141,8 @@ pub fn alloc(size: usize) -> *mut u8 {
 }
 
 /// Allocate memory the collector never scans, for bytes that cannot contain references (string
-/// contents, buffers of numbers). Not zeroed.
+/// contents, buffers of numbers). Not zeroed. There is no runtime cache for these: one was
+/// tried, and the collector's own thread-local lists for unscanned objects were as fast (D89).
 pub fn alloc_atomic(size: usize) -> *mut u8 {
     if STRESS.load(Ordering::Relaxed) {
         // SAFETY: collection may run at any allocation.
@@ -145,6 +187,39 @@ pub extern "C-unwind" fn lrt_alloc_atomic_raw(size: i64) -> *mut u8 {
 // on a free list stays reachable (through the head and the link words) and is never reclaimed
 // while it waits there.
 
+thread_local! {
+    /// The runtime's own free lists for this thread. Generated code has its own, in a
+    /// thread-local defined in the program's object, which Rust cannot name; two caches per
+    /// thread cost a few hundred bytes.
+    static RUNTIME_CACHE: Cell<*mut AllocCache> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// Pop an object of `size` bytes (less than `CACHE_GRANULES * 16`) from this thread's lists.
+/// Never inlined, and never parks: a task can move to another thread only when it parks, and
+/// the thread-local's address must not be reused across such a move.
+#[inline(never)]
+fn alloc_cached(size: usize) -> *mut u8 {
+    let granules = (size + 16) >> 4;
+    RUNTIME_CACHE.with(|slot| {
+        let cache = slot.get();
+        if !cache.is_null() {
+            // SAFETY: the cache is this thread's, and `granules` indexes its lists.
+            unsafe {
+                let list = &mut (*cache).lists[granules];
+                let head = *list;
+                if !head.is_null() {
+                    *list = *head.cast::<*mut u8>();
+                    // The objects on a list are zeroed except for the link.
+                    *head.cast::<*mut u8>() = std::ptr::null_mut();
+                    return head;
+                }
+            }
+        }
+        // SAFETY: the slot is this thread's, and `granules` is at most `CACHE_GRANULES`.
+        unsafe { lrt_alloc_slow(granules as i64, size as i64, slot.as_ptr()) }
+    })
+}
+
 /// The largest size, in 16-byte granules, served from a thread's free lists. Must match
 /// `ALLOC_CACHE_GRANULES` in `lang_codegen`.
 pub const CACHE_GRANULES: usize = 16;
@@ -171,6 +246,15 @@ pub unsafe extern "C-unwind" fn lrt_alloc_slow(granules: i64, size: i64, slot: *
     }
     let granules = granules as usize;
     debug_assert!((1..=CACHE_GRANULES).contains(&granules));
+    // A program without tasks marks on one thread until its heap is large (see `init`).
+    if HEAP_IS_LARGE.load(Ordering::Relaxed) {
+        crate::tasks::allow_threads();
+    }
+    let cache_stress = CACHE_STRESS.load(Ordering::Relaxed);
+    if cache_stress {
+        // SAFETY: collection may run at any allocation.
+        unsafe { GC_gcollect() };
+    }
     // SAFETY: the caller passes this thread's slot.
     let mut cache = unsafe { *slot };
     if cache.is_null() {
@@ -193,6 +277,11 @@ pub unsafe extern "C-unwind" fn lrt_alloc_slow(granules: i64, size: i64, slot: *
     // `granules` indexes the cache's lists.
     unsafe {
         let next = *first.cast::<*mut u8>();
+        // Under cache stress, keep one object on the list and drop the rest, which the next
+        // collection reclaims: refills, and so collections, come every second allocation.
+        if cache_stress && !next.is_null() {
+            *next.cast::<*mut u8>() = std::ptr::null_mut();
+        }
         (*cache).lists[granules] = next;
         *first.cast::<*mut u8>() = std::ptr::null_mut();
     }

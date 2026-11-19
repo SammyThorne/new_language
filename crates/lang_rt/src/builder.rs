@@ -16,6 +16,9 @@ pub struct Builder {
 
 impl Builder {
     fn grow_to(&mut self, cap: usize) {
+        // The collector adds a byte to every object and rounds to 16-byte granules, so a
+        // request one byte short of a granule boundary wastes nothing.
+        let cap = (cap + 1).next_multiple_of(16) - 1;
         let data = gc::alloc_atomic(cap);
         if self.len > 0 {
             // SAFETY: both regions are at least `len` bytes and do not overlap.
