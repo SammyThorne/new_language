@@ -100,6 +100,7 @@ pub fn start(program: &str) -> Server {
         .unwrap();
     assert!(output.status.success(), "{program} did not compile:\n{}", String::from_utf8_lossy(&output.stderr));
     let mut child = Command::new(&executable)
+        .current_dir(&root)
         .env(env_var("LOG"), "warn")
         .stderr(Stdio::piped())
         .stdout(Stdio::null())

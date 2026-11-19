@@ -7,7 +7,7 @@
 # expect: k2 weby no session
 # expect: 400 {"error":"missing header `Api-Key`"}
 # expect: client error: no host in `http://`
-# expect: https is not supported yet
+# expect: `ftp://x` is not an http:// or https:// URL
 
 import http
 import json
@@ -64,7 +64,7 @@ def main():
             print("unexpected")
         case Err(error):
             print("client error:", error.message().split(": ")[1])
-    print(http.get("https://example.com").unwrap_err().message().split(": ")[1].split(";")[0])
+    print(http.get("ftp://x").unwrap_err().message().split(": ")[1])
     http.Server().stop()
     server.join()
 

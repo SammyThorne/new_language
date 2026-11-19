@@ -1,0 +1,35 @@
+# Runs JSONTestSuite (github.com/nst/JSONTestSuite) against `json.parse`: give it the suite's
+# test_parsing directory. Files named y_* must be accepted and n_* rejected; for i_* either is
+# allowed and the outcome is only counted. A file that is not UTF-8 counts as rejected, since
+# JSON text must be UTF-8 and `str` cannot hold anything else. A crash, which the suite also
+# looks for, would stop the program. See docs/07, "Conformance".
+
+import io
+import json
+import os
+
+def main():
+    directory = os.args()[1]
+    names = io.list_dir(directory).unwrap()
+    names.sort()
+    counts: dict[str, int] = {}
+    failures: list[str] = []
+    for name in names:
+        if not name.ends_with(".json"):
+            continue
+        ok = False
+        match io.read_file(f"{directory}/{name}"):
+            case Ok(text):
+                ok = json.parse(text).is_ok()
+            case Err(_):
+                ok = False
+        kind = name[0:1]
+        outcome = "accepted" if ok else "rejected"
+        key = f"{kind} {outcome}"
+        counts[key] = counts.get_or(key, 0) + 1
+        if (kind == "y" and not ok) or (kind == "n" and ok):
+            failures.append(f"{name}: {outcome}")
+    for key in ["y accepted", "y rejected", "n rejected", "n accepted", "i accepted", "i rejected"]:
+        print(key, counts.get_or(key, 0))
+    for failure in failures:
+        print("FAIL", failure)

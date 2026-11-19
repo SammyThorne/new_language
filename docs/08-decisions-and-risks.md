@@ -498,11 +498,33 @@ Boehm's default free-space divisor of 3 starts a collection when about a third o
 
 ### D77. The HTTP client is plain HTTP/1.1, one request per connection
 
-`http.fetch` connects, sends `Connection: close`, and reads the whole response (sized, chunked, or to the end of the stream), with a 30-second deadline, over the same non-blocking socket as the server, so a waiting task parks. Name resolution uses the system resolver, which blocks the worker for its duration (there is no blocking pool, D66). There is no TLS, no connection reuse, no redirects and no streaming; `https://` URLs are an error that says so. A `ClientError` returned from a handler maps to 502.
+`http.fetch` connects, sends `Connection: close`, and reads the whole response (sized, chunked, or to the end of the stream), with a 30-second deadline, over the same non-blocking socket as the server, so a waiting task parks. Name resolution uses the system resolver, which blocks the worker for its duration (there is no blocking pool, D66). There is no connection reuse, no redirects and no streaming. TLS came later (D79). A `ClientError` returned from a handler maps to 502. Connecting was at first a blocking `connect` with a timeout, which held a worker for as long as an unreachable host took to fail; since D79 the connect itself is non-blocking and the task parks.
 
 ### D78. Headers and cookies bind by type
 
 A handler parameter of type `http.Header` is the header named after the parameter (`user_agent` is `User-Agent`), and `http.Cookie` the cookie of that name; `T?` makes either optional, and otherwise a missing one is a 400 naming it. Binding by type keeps the rule table fixed and readable (R11): the parameter's type says where the value comes from, as it does for bodies.
+
+### D79. TLS is `rustls` inside the socket
+
+TLS uses `rustls` 0.23 with the `ring` provider (`aws-lc-rs`, the default, needs CMake and a longer build), `webpki-roots` for the Mozilla root store, and nothing from the system: a program does not depend on the machine's OpenSSL or certificate directory, which keeps binaries portable and the trust decision reviewable. `SSL_CERT_FILE` adds roots, the convention OpenSSL and Go share, for private authorities and tests.
+
+The session lives inside the runtime's `Socket`, beside the non-blocking descriptor, so every protocol on top (HTTP server and client, WebSockets, PostgreSQL) gets TLS without knowing. Reads and writes drive `rustls` by hand: plaintext it already has first, then any records it wants written, then more records from the socket, parking the task on `WouldBlock`. The session is behind a short-held mutex, never held across a park, because a WebSocket reads in one task while another writes. The server handshake runs on the connection's first read, in its own task, so a slow or hostile handshake ties up nothing else. ALPN is offered per protocol (`http/1.1`; `postgresql`, which PostgreSQL 17 insists on if any is offered).
+
+Measured: 1 MiB bodies each way and WebSocket messages larger than a TLS record pass through intact, and a plain-HTTP client on the TLS port is turned away without stopping the server (`crates/lang_cli/tests/tls.rs`).
+
+### D80. The PostgreSQL driver is runtime code with text parameters
+
+The wire protocol (version 3) is implemented in the runtime, about 1,200 lines with its unit tests, rather than wrapping libpq or a Rust crate: libpq blocks the calling thread, the Rust drivers are built on async runtimes this one is not, and the protocol is small. SCRAM-SHA-256 uses `ring`'s PBKDF2, HMAC and SHA-256, already present for TLS; MD5 for old servers is hand-written.
+
+Every query uses the extended protocol with all parameters and results in text format. Parameters are `list[str?]` because the language cannot put an `int` and a `str` in one list without a wrapper type (only structs coerce to trait objects), and a wrapper enum makes every call site noisy; the server types text parameters from the statement, so nothing is lost but the `str(n)` at the call. Results come back as text and are converted on request (`row.int`) or, for `query_as[T]`, turned into JSON by the runtime (numbers, booleans and `json` columns as themselves) and decoded by the `FromJson` code `@derive(Json)` already generates. That reuses the most heavily tested decoder in the system instead of adding a `@derive(Row)`.
+
+The pool is per `connect` call and lives in the runtime; a `Db` is a frozen struct holding its number, so it is shareable by construction. A transaction is a `Db` that holds one connection; `with` rolls it back unless `commit` ran. A connection is returned to the pool only if its last ReadyForQuery said idle; one whose socket failed is closed. The SQLSTATE of each failure is kept, so a program can tell a unique violation (`23505`) from a lost connection (`08006`).
+
+Not done: statement caching (each query is parsed each time; a cache keyed by SQL text is the next step for speed), `COPY`, `LISTEN`/`NOTIFY`, cancellation, and retrying a query whose pooled connection the server had already closed.
+
+### D81. Conformance suites run from scratch directories, not from CI
+
+JSONTestSuite and the Autobahn WebSocket suite are run by hand (`tests/conformance/README.md`), against programs that live in the repository. Autobahn's suite only runs on Python 2; it was installed into a portable PyPy 2.7 with its TLS dependency left out (the fuzzing client does not use it). Neither suite is vendored, and CI does not run them, because each needs a download and Autobahn takes minutes. Results are recorded in [07](07-testing-and-performance.md#protocol-conformance).
 
 ## Risks
 

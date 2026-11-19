@@ -4,7 +4,7 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 
 ## Status
 
-The prototype is complete, milestones 0 to 11 are done, and the first part of milestone 12 (performance and libraries) is in. See the [roadmap](docs/06-roadmap.md#progress). Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
+The prototype is complete, milestones 0 to 11 are done, and milestone 12 (performance and libraries, ongoing by design) has added TLS, a PostgreSQL driver, an HTTP client and regular expressions. See the [roadmap](docs/06-roadmap.md#progress). Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
 
 ```python
 trait Shape(Display):
@@ -45,10 +45,11 @@ def main():
 | Works now | Not yet |
 |---|---|
 | Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | Variables in the debugger (line tables and function names only); a VS Code client extension for the language server |
-| An HTTP client (`http.get`, `http.post`, `http.fetch`); header and cookie parameters in typed handlers; regular expressions (`re`) | TLS (`https`), a PostgreSQL driver |
-| An HTTP/1.1 server: `@http.get("/todos/{id}")` route annotations with typed path, query and JSON-body parameters checked at compile time, or call-style routes, middleware, groups, graceful shutdown; the `log` module | TLS, HTTP/2, an HTTP client |
-| WebSockets: `@http.ws("/chat")` endpoints or `server.ws(...)`, `for msg in ws`, sends from any task, pings, fragmentation and the closing handshake handled by the runtime; a `bytes` type | WebSocket compression (`permessage-deflate`) |
-| JSON: `@derive(Json)` with generated encoders and decoders, `@json(name=...)`, error paths, and dynamic `json.Value` | |
+| An HTTP client (`http.get`, `http.post`, `http.fetch`) for `http://` and `https://`; header and cookie parameters in typed handlers; regular expressions (`re`) | Connection reuse and redirects in the client |
+| A PostgreSQL client (`postgres`): a shared connection pool, parameters, rows decoded into `@derive(Json)` structs, transactions with `with`, SCRAM authentication and TLS | Prepared-statement caching, `COPY`, `LISTEN`/`NOTIFY` |
+| An HTTP/1.1 server: `@http.get("/todos/{id}")` route annotations with typed path, query and JSON-body parameters checked at compile time, or call-style routes, middleware, groups, graceful shutdown, HTTPS (`listen_tls`); the `log` module | HTTP/2 |
+| WebSockets: `@http.ws("/chat")` endpoints or `server.ws(...)`, `for msg in ws`, sends from any task, pings, fragmentation and the closing handshake handled by the runtime, secure WebSockets on an HTTPS server; passes the Autobahn suite; a `bytes` type | WebSocket compression (`permessage-deflate`) |
+| JSON: `@derive(Json)` with generated encoders and decoders, `@json(name=...)`, error paths, and dynamic `json.Value`; passes JSONTestSuite | |
 | `spawn`, `Task`, `Channel`, `Mutex`, `Atomic`, `time.sleep`; the compiler rejects sharing mutable data between tasks. Tasks and connections are fibers on one worker thread per core with an epoll poller; a panic ends only its task | Preemption of CPU-bound tasks |
 | Immutable collections `tuple[T, ...]` and `frozendict[K, V]` | |
 | `int` (wrapping), `float` (printed exactly as Python prints it), `bool`, `str`, sized numbers (`i32`, `u8`, `f32`, ...) | |

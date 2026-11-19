@@ -19,6 +19,7 @@
 
 use crate::fiber;
 use crate::poll::{self, IoSource, Wait};
+use crate::tls::{self, Session};
 use crate::{Str, tasks};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -33,7 +34,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicI64 = AtomicI64::new(0);
 static MAX_BODY: AtomicI64 = AtomicI64::new(8 * 1024 * 1024);
-static LISTENERS: Mutex<Vec<Option<TcpListener>>> = Mutex::new(Vec::new());
+static LISTENERS: Mutex<Vec<Option<Listener>>> = Mutex::new(Vec::new());
+
+/// A listening socket, and the TLS configuration for its connections if it serves HTTPS.
+struct Listener {
+    socket: TcpListener,
+    tls: Option<Arc<rustls::ServerConfig>>,
+}
 
 unsafe extern "C" {
     fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
@@ -55,12 +62,38 @@ fn set_error(message: impl std::fmt::Display) {
 /// `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_http_listen(ptr: *const u8, len: i64) -> i64 {
-    let address = unsafe { Str::from_raw(ptr, len) };
+    listen(unsafe { Str::from_raw(ptr, len) }, None)
+}
+
+/// `lrt_http_listen` for HTTPS, with a PEM certificate chain and private key.
+///
+/// # Safety
+/// The pointer and length pairs describe UTF-8 strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_listen_tls(
+    ptr: *const u8,
+    len: i64,
+    cert: *const u8,
+    cert_len: i64,
+    key: *const u8,
+    key_len: i64,
+) -> i64 {
+    let (cert, key) = unsafe { (Str::from_raw(cert, cert_len), Str::from_raw(key, key_len)) };
+    match tls::server_config(cert, key) {
+        Ok(config) => listen(unsafe { Str::from_raw(ptr, len) }, Some(config)),
+        Err(message) => {
+            set_error(message);
+            -1
+        }
+    }
+}
+
+fn listen(address: &str, tls: Option<Arc<rustls::ServerConfig>>) -> i64 {
     let address = if address.starts_with(':') { format!("0.0.0.0{address}") } else { address.to_string() };
     match TcpListener::bind(&address) {
-        Ok(listener) => {
+        Ok(socket) => {
             let mut listeners = LISTENERS.lock().unwrap_or_else(|p| p.into_inner());
-            listeners.push(Some(listener));
+            listeners.push(Some(Listener { socket, tls }));
             listeners.len() as i64 - 1
         }
         Err(error) => {
@@ -77,7 +110,7 @@ pub extern "C-unwind" fn lrt_http_port(listener: i64) -> i64 {
     listeners
         .get(listener as usize)
         .and_then(Option::as_ref)
-        .and_then(|l| l.local_addr().ok())
+        .and_then(|l| l.socket.local_addr().ok())
         .map_or(-1, |a| i64::from(a.port()))
 }
 
@@ -129,7 +162,7 @@ pub unsafe extern "C-unwind" fn lrt_http_serve(listener: i64, entry: Entry, code
         signal(2, on_signal);
         signal(15, on_signal);
     }
-    let listener = {
+    let Listener { socket: listener, tls } = {
         let mut listeners = LISTENERS.lock().unwrap_or_else(|p| p.into_inner());
         match listeners.get_mut(listener as usize).and_then(Option::take) {
             Some(l) => l,
@@ -151,10 +184,11 @@ pub unsafe extern "C-unwind" fn lrt_http_serve(listener: i64, entry: Entry, code
         while let Ok((stream, peer)) = listener.accept() {
             ACTIVE.fetch_add(1, Ordering::SeqCst);
             let (entry, roots) = (callback.entry, callback.roots);
+            let tls = tls.clone();
             fiber::spawn(
                 [std::ptr::null_mut(); 2],
                 Box::new(move |_| {
-                    serve_connection(stream, peer.to_string(), entry, roots as *mut *mut u8);
+                    serve_connection(stream, tls, peer.to_string(), entry, roots as *mut *mut u8);
                     ACTIVE.fetch_sub(1, Ordering::SeqCst);
                 }),
             );
@@ -200,18 +234,89 @@ fn raise_file_limit() {
 
 /// A connected socket: non-blocking, and registered with the poller when fibers are running,
 /// so that waiting for it parks the task instead of blocking a thread.
+///
+/// With a TLS session, reads and writes go through it; the socket carries the encrypted records.
 pub(crate) struct Socket {
     stream: TcpStream,
     source: Option<&'static IoSource>,
+    tls: Option<Session>,
 }
 
 impl Socket {
-    pub(crate) fn new(stream: TcpStream) -> Socket {
+    pub(crate) fn with_tls(stream: TcpStream, tls: Option<Session>) -> Socket {
         use std::os::fd::AsRawFd;
         let _ = stream.set_nodelay(true);
         let _ = stream.set_nonblocking(true);
         let source = IoSource::register(stream.as_raw_fd());
-        Socket { stream, source }
+        Socket { stream, source, tls }
+    }
+
+    /// Connect to `address` without blocking the worker thread: the task parks until the
+    /// connection is made, refused, or the deadline passes.
+    pub(crate) fn connect(address: &std::net::SocketAddr, deadline: Instant) -> std::io::Result<Socket> {
+        use std::net::SocketAddr;
+        use std::os::fd::FromRawFd;
+        unsafe extern "C" {
+            fn socket(domain: i32, kind: i32, protocol: i32) -> i32;
+            fn connect(fd: i32, address: *const u8, length: u32) -> i32;
+        }
+        const SOCK_STREAM: i32 = 1;
+        const SOCK_NONBLOCK: i32 = 0o4000;
+        const SOCK_CLOEXEC: i32 = 0o2000000;
+        const EINPROGRESS: i32 = 115;
+        const EINTR: i32 = 4;
+        // `struct sockaddr_in` and `struct sockaddr_in6`, built by hand.
+        let mut raw = [0u8; 28];
+        let (domain, length) = match address {
+            SocketAddr::V4(v4) => {
+                raw[0..2].copy_from_slice(&2u16.to_ne_bytes());
+                raw[2..4].copy_from_slice(&v4.port().to_be_bytes());
+                raw[4..8].copy_from_slice(&v4.ip().octets());
+                (2, 16)
+            }
+            SocketAddr::V6(v6) => {
+                raw[0..2].copy_from_slice(&10u16.to_ne_bytes());
+                raw[2..4].copy_from_slice(&v6.port().to_be_bytes());
+                raw[4..8].copy_from_slice(&v6.flowinfo().to_be_bytes());
+                raw[8..24].copy_from_slice(&v6.ip().octets());
+                raw[24..28].copy_from_slice(&v6.scope_id().to_ne_bytes());
+                (10, 28)
+            }
+        };
+        // SAFETY: plain system calls; the descriptor is owned by the stream from here on.
+        let fd = unsafe { socket(domain, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let stream = unsafe { TcpStream::from_raw_fd(fd) };
+        let started = unsafe { connect(fd, raw.as_ptr(), length) };
+        let in_progress = started != 0 && {
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(EINPROGRESS | EINTR) => true,
+                _ => return Err(error),
+            }
+        };
+        let socket = Socket::with_tls(stream, None);
+        if in_progress {
+            loop {
+                if socket.wait(true, Some(deadline)) == Wait::TimedOut {
+                    return Err(std::io::ErrorKind::TimedOut.into());
+                }
+                if let Some(error) = socket.stream.take_error()? {
+                    return Err(error);
+                }
+                if socket.stream.peer_addr().is_ok() {
+                    break;
+                }
+            }
+        }
+        Ok(socket)
+    }
+
+    /// Run the connection through a TLS session from now on.
+    pub(crate) fn start_tls(&mut self, session: Session) {
+        self.tls = Some(session);
     }
 
     fn wait(&self, write: bool, deadline: Option<Instant>) -> Wait {
@@ -231,6 +336,9 @@ impl Socket {
         stop_at_shutdown: bool,
     ) -> std::io::Result<usize> {
         use std::io::ErrorKind;
+        if let Some(session) = &self.tls {
+            return self.read_tls(session, buffer, deadline, stop_at_shutdown);
+        }
         loop {
             if stop_at_shutdown && SHUTDOWN.load(Ordering::SeqCst) {
                 return Err(ErrorKind::TimedOut.into());
@@ -251,6 +359,9 @@ impl Socket {
     pub(crate) fn write_all(&self, mut bytes: &[u8]) -> std::io::Result<()> {
         use std::io::ErrorKind;
         let deadline = Instant::now() + IDLE_TIMEOUT;
+        if let Some(session) = &self.tls {
+            return self.write_tls(session, bytes, deadline);
+        }
         while !bytes.is_empty() {
             match (&self.stream).write(bytes) {
                 Ok(0) => return Err(ErrorKind::WriteZero.into()),
@@ -268,7 +379,101 @@ impl Socket {
     }
 
     pub(crate) fn shutdown(&self) {
+        if let Some(session) = &self.tls {
+            // Say goodbye properly if the socket will take it now; never wait for it.
+            let mut connection = session.lock();
+            connection.send_close_notify();
+            let _ = self.flush_tls(&mut connection);
+        }
         let _ = self.stream.shutdown(Shutdown::Both);
+    }
+
+    /// Write out the records the TLS session has ready. `Ok(false)` if the socket is full
+    /// before they are all written.
+    fn flush_tls(&self, connection: &mut rustls::Connection) -> std::io::Result<bool> {
+        use std::io::ErrorKind;
+        while connection.wants_write() {
+            match connection.write_tls(&mut &self.stream) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(true)
+    }
+
+    /// `read` through the TLS session: plaintext it already has, or else more records from the
+    /// socket (which may first mean writing handshake records).
+    fn read_tls(
+        &self,
+        session: &Session,
+        buffer: &mut [u8],
+        deadline: Option<Instant>,
+        stop_at_shutdown: bool,
+    ) -> std::io::Result<usize> {
+        use std::io::ErrorKind;
+        loop {
+            if stop_at_shutdown && SHUTDOWN.load(Ordering::SeqCst) {
+                return Err(ErrorKind::TimedOut.into());
+            }
+            let wait_for_write = {
+                let mut connection = session.lock();
+                match connection.reader().read(buffer) {
+                    Ok(n) => return Ok(n),
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                    // The peer closed without a close_notify; for HTTP that is an ordinary end.
+                    Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(0),
+                    Err(e) => return Err(e),
+                }
+                if !self.flush_tls(&mut connection)? {
+                    true
+                } else {
+                    match connection.read_tls(&mut &self.stream) {
+                        Ok(0) => return Ok(0),
+                        Ok(_) => {
+                            if let Err(error) = connection.process_new_packets() {
+                                // Send the alert that explains the failure, if the socket takes it.
+                                let _ = self.flush_tls(&mut connection);
+                                return Err(std::io::Error::new(ErrorKind::InvalidData, error));
+                            }
+                            continue;
+                        }
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => false,
+                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                        Err(e) => return Err(e),
+                    }
+                }
+            };
+            // The session's lock is released while the task waits.
+            if self.wait(wait_for_write, deadline) == Wait::TimedOut {
+                return Err(ErrorKind::TimedOut.into());
+            }
+        }
+    }
+
+    /// `write_all` through the TLS session.
+    fn write_tls(&self, session: &Session, mut bytes: &[u8], deadline: Instant) -> std::io::Result<()> {
+        use std::io::ErrorKind;
+        loop {
+            let flushed = {
+                let mut connection = session.lock();
+                while !bytes.is_empty() {
+                    let n = connection.writer().write(bytes)?;
+                    if n == 0 {
+                        break;
+                    }
+                    bytes = &bytes[n..];
+                }
+                self.flush_tls(&mut connection)?
+            };
+            if flushed && bytes.is_empty() {
+                return Ok(());
+            }
+            if !flushed && self.wait(true, Some(deadline)) == Wait::TimedOut {
+                return Err(ErrorKind::TimedOut.into());
+            }
+        }
     }
 }
 
@@ -631,8 +836,19 @@ fn write_simple(socket: &Socket, status: u16, text: &str) {
     let _ = socket.write_all(response.as_bytes());
 }
 
-fn serve_connection(stream: TcpStream, remote: String, entry: Entry, roots: *mut *mut u8) {
-    let mut connection = Connection { socket: Arc::new(Socket::new(stream)), buffer: Vec::new() };
+fn serve_connection(
+    stream: TcpStream,
+    tls: Option<Arc<rustls::ServerConfig>>,
+    remote: String,
+    entry: Entry,
+    roots: *mut *mut u8,
+) {
+    // The TLS handshake happens as the first request is read.
+    let session = match tls.map(|config| Session::server(&config)).transpose() {
+        Ok(session) => session,
+        Err(_) => return,
+    };
+    let mut connection = Connection { socket: Arc::new(Socket::with_tls(stream, session)), buffer: Vec::new() };
     loop {
         let (mut request, keep_alive) = match connection.read_request(&remote) {
             Ok(request) => request,

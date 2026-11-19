@@ -22,3 +22,4 @@ clap.workspace = true
 
 [dev-dependencies]
 lang_names.workspace = true
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }

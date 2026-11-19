@@ -37,6 +37,15 @@ The end-to-end layer carries the most weight. A language feature is not done unt
 - **WebSocket.** The Autobahn test suite, the standard conformance suite for RFC 6455 implementations. Target: no failures outside the compression extension cases.
 - **JSON.** A public conformance corpus of must-accept and must-reject documents, plus round-trip tests of floats.
 
+Results (2026-11-19, milestone 12; how to run them is in `tests/conformance/README.md`):
+
+| Suite | Result |
+|---|---|
+| Autobahn 0.8.2, fuzzing client against `tests/conformance/ws_echo.wb` | 301 cases: 296 OK, 3 informational (close codes the suite only records), 2 non-strict, **0 failed**. Sections 12 and 13 (compression, 216 cases) excluded: not offered |
+| JSONTestSuite (commit 1ef36fa), `json.parse` | 95 of 95 `y_` accepted, 188 of 188 `n_` rejected, no crashes. Of the 35 `i_` files, 6 accepted (out-of-range numbers, 500 nested arrays) and 29 rejected (non-UTF-8 and UTF-16 input among them) |
+
+The two non-strict Autobahn cases, 6.4.3 and 6.4.4, send invalid UTF-8 in one frame delivered in pieces; the server fails the connection when the frame is complete rather than at the first bad byte. Invalid UTF-8 split across frames (6.4.1, 6.4.2) fails at the frame that has it. Section 9 (large messages and many small ones) took 156 ms for one 16 MiB text message and 73 ms for 1,000 round trips of 4 KiB messages.
+
 ### Continuous integration
 
 On every change: build, compiler unit and snapshot tests, end-to-end suite in debug and release, GC stress run, formatting and lints. Nightly: sanitizer jobs, fuzzing for a fixed time budget, benchmark run with results archived.

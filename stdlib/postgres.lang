@@ -1,0 +1,259 @@
+"""
+A PostgreSQL client with a connection pool. Calls wait without blocking other tasks, and a `Db`
+can be shared by every request handler.
+
+    import postgres
+
+    @derive(Json)
+    struct User:
+        id: int
+        name: str
+
+    def main():
+        db = postgres.connect("postgres://app:secret@localhost/app").unwrap()
+        db.execute("insert into users (name) values ($1)", ["ann"]).unwrap()
+        users = postgres.query_as[User](db, "select id, name from users where id > $1", ["0"]).unwrap()
+        for row in db.query("select id, name from users").unwrap():
+            print(row.int("id").unwrap(), row.text("name").unwrap())
+
+Parameters are `$1`, `$2`, ... in the statement and a `list[str?]` beside it, `None` for NULL.
+They travel as text and PostgreSQL converts each to the type the statement needs, so write
+`str(n)` for a number. Values are never spliced into the SQL, so they cannot inject any.
+
+The URL is `postgres://user:password@host:port/database`, with options after `?`: `sslmode`
+(`disable`, `prefer` (the default), `require`, `verify-full`) and `pool_max` (default 10).
+"""
+
+import json as jsonlib
+
+@extern("lrt_pg_open")
+def open_raw(url: str) -> int
+
+@extern("lrt_pg_arg")
+def arg_raw(value: str, null: int)
+
+@extern("lrt_pg_query")
+def query_raw(pool: int, tx: int, sql: str) -> int
+
+@extern("lrt_pg_script")
+def script_raw(pool: int, tx: int, sql: str) -> int
+
+@extern("lrt_pg_begin")
+def begin_raw(pool: int) -> int
+
+@extern("lrt_pg_finish")
+def finish_raw(tx: int, commit: int) -> int
+
+@extern("lrt_pg_rows")
+def rows_raw(handle: int) -> int
+
+@extern("lrt_pg_columns")
+def columns_raw(handle: int) -> int
+
+@extern("lrt_pg_column")
+def column_raw(handle: int, column: int) -> str
+
+@extern("lrt_pg_value")
+def value_raw(handle: int, row: int, column: int) -> str?
+
+@extern("lrt_pg_affected")
+def affected_raw(handle: int) -> int
+
+@extern("lrt_pg_json")
+def json_raw(handle: int) -> str
+
+@extern("lrt_pg_free")
+def free_raw(handle: int)
+
+@extern("lrt_pg_error_code")
+def error_code() -> str
+
+@extern("lrt_pg_close")
+def close_raw(pool: int)
+
+@extern("lrt_io_error")
+def last_error() -> str
+
+pub struct DbError:
+    """A failed database call. `code` is PostgreSQL's SQLSTATE: `23505` for a unique violation,
+    `42P01` for an unknown table, `08006` when the connection failed, and so on."""
+    code: str
+    reason: str
+
+impl Error for DbError:
+    def message(self) -> str:
+        return self.reason
+
+def failed() -> DbError:
+    reason = last_error()
+    return DbError(error_code(), reason)
+
+pub struct Row:
+    """One row of a result. Values are read by column name."""
+    priv names: list[str]
+    priv values: list[str?]
+
+impl Row:
+    def columns(self) -> list[str]:
+        return self.names
+
+    def get(self, column: str) -> str?:
+        """The value as PostgreSQL writes it as text; `None` for NULL or an unknown column."""
+        for i in range(len(self.names)):
+            if self.names[i] == column:
+                return self.values[i]
+        return None
+
+    def text(self, column: str) -> Result[str, DbError]:
+        """The value as text; an error for NULL or an unknown column."""
+        for i in range(len(self.names)):
+            if self.names[i] == column:
+                match self.values[i]:
+                    case Some(value):
+                        return value
+                    case None:
+                        return Err(DbError("22004", f"column `{column}` is NULL"))
+        return Err(DbError("42703", f"no column `{column}` in the result"))
+
+    def int(self, column: str) -> Result[int, DbError]:
+        text = self.text(column)?
+        match int.parse(text):
+            case Ok(n):
+                return n
+            case Err(_):
+                return Err(DbError("22P02", f"column `{column}` is `{text}`, not an integer"))
+
+    def float(self, column: str) -> Result[float, DbError]:
+        text = self.text(column)?
+        match float.parse(text):
+            case Ok(x):
+                return x
+            case Err(_):
+                return Err(DbError("22P02", f"column `{column}` is `{text}`, not a number"))
+
+    def bool(self, column: str) -> Result[bool, DbError]:
+        text = self.text(column)?
+        if text == "t":
+            return True
+        if text == "f":
+            return False
+        return Err(DbError("22P02", f"column `{column}` is `{text}`, not a boolean"))
+
+@frozen
+pub struct Db:
+    """A pool of connections, or, from `transaction`, one connection inside a transaction."""
+    priv pool: int
+    priv tx: int = -1
+
+pub def connect(url: str) -> Result[Db, DbError]:
+    """Open a pool and check the URL and credentials with one connection."""
+    pool = open_raw(url)
+    if pool < 0:
+        return Err(failed())
+    return Db(pool)
+
+def send_args(args: list[str?]):
+    for arg in args:
+        match arg:
+            case Some(value):
+                arg_raw(value, 0)
+            case None:
+                arg_raw("", 1)
+
+impl Db:
+    def run(self, sql: str, args: list[str?]) -> Result[int, DbError]:
+        send_args(args)
+        handle = query_raw(self.pool, self.tx, sql)
+        if handle < 0:
+            return Err(failed())
+        return handle
+
+    def query(self, sql: str, args: list[str?] = []) -> Result[list[Row], DbError]:
+        """Run a statement and return its rows."""
+        handle = self.run(sql, args)?
+        names: list[str] = [column_raw(handle, c) for c in range(columns_raw(handle))]
+        rows: list[Row] = []
+        for r in range(rows_raw(handle)):
+            rows.append(Row(names, [value_raw(handle, r, c) for c in range(len(names))]))
+        free_raw(handle)
+        return rows
+
+    def query_row(self, sql: str, args: list[str?] = []) -> Result[Row?, DbError]:
+        """The first row, or `None` if there are none."""
+        rows = self.query(sql, args)?
+        if len(rows) == 0:
+            return Ok(None)
+        return Ok(Some(rows[0]))
+
+    def execute(self, sql: str, args: list[str?] = []) -> Result[int, DbError]:
+        """Run a statement; returns how many rows it inserted, updated, deleted or returned."""
+        handle = self.run(sql, args)?
+        count = affected_raw(handle)
+        free_raw(handle)
+        return count
+
+    def script(self, sql: str) -> Result[None, DbError]:
+        """Run several statements separated by `;`, without parameters: a schema, a migration."""
+        handle = script_raw(self.pool, self.tx, sql)
+        if handle < 0:
+            return Err(failed())
+        free_raw(handle)
+
+    def transaction(self) -> Result[Db, DbError]:
+        """Start a transaction on a connection of its own. Use it with `with`, which rolls it
+        back unless `commit` was called:
+
+            with db.transaction()? as tx:
+                tx.execute("update accounts set balance = balance - 10 where id = $1", [a])?
+                tx.execute("update accounts set balance = balance + 10 where id = $1", [b])?
+                tx.commit()?
+        """
+        if self.tx >= 0:
+            return Err(DbError("25001", "a transaction is already in progress"))
+        tx = begin_raw(self.pool)
+        if tx < 0:
+            return Err(failed())
+        return Db(self.pool, tx)
+
+    def commit(self) -> Result[None, DbError]:
+        """Commit the transaction; it is over either way."""
+        if self.tx < 0:
+            return Err(DbError("25P01", "not in a transaction"))
+        if finish_raw(self.tx, 1) < 0:
+            return Err(failed())
+
+    def rollback(self) -> Result[None, DbError]:
+        """Roll the transaction back."""
+        if self.tx < 0:
+            return Err(DbError("25P01", "not in a transaction"))
+        if finish_raw(self.tx, 0) < 0:
+            return Err(failed())
+
+    def exit(self):
+        """At the end of a `with` block: roll back a transaction that was not committed."""
+        if self.tx >= 0:
+            _ = finish_raw(self.tx, 0)
+
+    def close(self):
+        """Close the idle connections; ones in use close when they are given back."""
+        close_raw(self.pool)
+
+pub def query_as[T: FromJson](db: Db, sql: str, args: list[str?] = []) -> Result[list[T], DbError]:
+    """Run a statement and read each row into a `T` (a `@derive(Json)` struct whose fields are
+    named like the columns). Numbers, booleans and `json` columns convert to fields of those
+    types, NULL to `None`, and anything else to `str`."""
+    handle = db.run(sql, args)?
+    text = json_raw(handle)
+    free_raw(handle)
+    match jsonlib.decode[list[T]](text):
+        case Ok(values):
+            return values
+        case Err(error):
+            return Err(DbError("42804", f"a row does not fit the type: {error.message()}"))
+
+pub def query_one_as[T: FromJson](db: Db, sql: str, args: list[str?] = []) -> Result[T?, DbError]:
+    """The first row as a `T`, or `None` if there are none."""
+    values = query_as[T](db, sql, args)?
+    if len(values) == 0:
+        return Ok(None)
+    return Ok(Some(values[0]))

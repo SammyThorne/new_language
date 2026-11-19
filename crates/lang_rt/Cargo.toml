@@ -13,3 +13,6 @@ crate-type = ["staticlib"]
 lang_names.workspace = true
 lang_format.workspace = true
 regex-lite = "0.1.9"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1.0.12"
+ring = "0.17.14"

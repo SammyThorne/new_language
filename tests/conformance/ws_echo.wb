@@ -1,0 +1,23 @@
+# The echo server for the Autobahn WebSocket test suite (docs/07, "Conformance"): every message
+# comes back as it was sent. Listens on 127.0.0.1 at the port given as the first argument.
+
+import http
+import io
+import os
+
+def echo(ws: http.WebSocket):
+    for msg in ws:
+        match msg:
+            case Text(body):
+                _ = ws.send(body)
+            case Binary(data):
+                _ = ws.send_bytes(data)
+
+def main():
+    server = http.Server()
+    # Section 9 sends messages of up to 16 MiB.
+    server.max_message = 67108864
+    server.ws("/", echo)
+    port = server.bind(f"127.0.0.1:{os.args()[1]}").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()

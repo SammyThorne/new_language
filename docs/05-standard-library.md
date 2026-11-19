@@ -15,8 +15,10 @@ The standard library is what makes Weby a backend language and not a general-pur
 | `http` | Server, router, request, response, middleware, WebSockets | M8–M9 | Runtime protocol code; Weby API layer |
 | `log` | Levelled, structured logging to standard error | M8 | Weby |
 | `testing` | Assertions and the `@test` runner | post-prototype | Weby |
+| `re` | Regular expressions | M12 | Weby API over the `regex-lite` crate |
+| `postgres` | PostgreSQL client with a connection pool | M12 | Runtime protocol code; Weby API layer |
 
-Not in the prototype: HTTP client, TLS, database drivers, templating, regular expressions, cryptography beyond what the WebSocket handshake needs. An HTTP client and a PostgreSQL driver are the first two additions afterwards, since a backend without them is a toy.
+Not in the prototype: HTTP client, TLS, database drivers, templating, regular expressions, cryptography beyond what the WebSocket handshake needs. An HTTP client and a PostgreSQL driver are the first two additions afterwards, since a backend without them is a toy. Milestone 12 added the client, TLS (server and client, through `rustls`), the PostgreSQL driver and regular expressions.
 
 ## `io` and `os` (M5)
 
@@ -183,9 +185,17 @@ resp = http.fetch("PUT", url, body, {"Authorization": token})?    # any method, 
 | `http.get(url)`, `http.post(url, body, content_type="application/json")`, `http.fetch(method, url, body="", headers={})` | Send a request and wait for the whole response. A task waiting here parks; it does not hold a worker |
 | `http.ClientResponse` | `status`, `body: bytes`, `ok()`, `header(name) -> str?`, `text() -> Result[str]`, `json() -> Result[json.Value]` |
 | `http.decode_json[T](response)` | The body decoded into `T` |
-| `http.ClientError` | No response: unreachable host, timeout (30 seconds), connection closed early, or a URL that is not `http://`. Returned from a handler with `?`, it becomes a 502 |
+| `http.ClientError` | No response: unreachable host, timeout (30 seconds), connection closed early, an untrusted TLS certificate, or a URL that is not `http://` or `https://`. Returned from a handler with `?`, it becomes a 502 |
 
-One request per connection, HTTP/1.1, `http://` only: TLS is not in the runtime yet (D77).
+One request per connection, HTTP/1.1 (D77). `https://` URLs use TLS and check the server's certificate against the Mozilla root store built into the program, plus the certificates in the file named by `SSL_CERT_FILE` if it is set (D79).
+
+### TLS (M12)
+
+```python
+server.listen_tls(":8443", "cert.pem", "key.pem").unwrap()      # or bind_tls(...) and serve()
+```
+
+`server.bind_tls(addr, cert_file, key_file)` and `server.listen_tls(...)` are `bind` and `listen` for HTTPS. The certificate file holds the PEM chain, the server's certificate first; the key file holds its PEM private key (PKCS#8, PKCS#1 or SEC1). TLS 1.2 and 1.3 through `rustls`; the server offers ALPN `http/1.1`. WebSockets on an HTTPS server are secure WebSockets with no other change. The handshake happens in the connection's own task, on its first read, so a slow client holds nothing else up (D79).
 
 ### What a handler may return
 
@@ -262,7 +272,7 @@ The original plan for the prototype, inside the runtime:
 - Limits on header size, body size and idle time, on by default.
 - Responses are serialised into the connection's write buffer and flushed with one system call where possible.
 
-After the prototype: the router and the request/response types move into Weby; the byte-level parser may stay native indefinitely. TLS is added in the runtime with `rustls`. HTTP/2 is considered only if there is demand, since backends usually sit behind a proxy that speaks HTTP/1.1 upstream.
+After the prototype: the router and the request/response types move into Weby; the byte-level parser may stay native indefinitely. TLS was added in the runtime with `rustls` in M12. HTTP/2 is considered only if there is demand, since backends usually sit behind a proxy that speaks HTTP/1.1 upstream.
 
 ## WebSockets
 
@@ -340,6 +350,41 @@ for m in word.find_all("one two"):
 | `regex.is_match(text)`, `regex.find(text, start=0) -> re.Match?`, `regex.find_all(text) -> list[re.Match]`, `regex.split(text) -> list[str]`, `regex.replace(text, rep)`, `regex.replace_all(text, rep)` | `$1` and `${name}` in a replacement insert groups |
 | `re.Match` | `text`, `start`, `end` (byte offsets), `group(i) -> str?`, `named(name) -> str?` |
 | `re.Regex` | Frozen: one compiled pattern can be shared by every task |
+
+## PostgreSQL (M12)
+
+```python
+import postgres
+
+@derive(Json)
+struct User:
+    id: int
+    name: str
+    email: str?
+
+db = postgres.connect("postgres://app:secret@localhost/app").unwrap()   # a pool; share it freely
+db.execute("insert into users (name, email) values ($1, $2)", [name, None])?
+users = postgres.query_as[User](db, "select id, name, email from users where id > $1", [str(after)])?
+for row in db.query("select name, score from players")?:
+    print(row.text("name")?, row.float("score")?)
+with db.transaction()? as tx:            # rolled back unless committed
+    tx.execute("update accounts set balance = balance - $1 where id = $2", [amount, a])?
+    tx.execute("update accounts set balance = balance + $1 where id = $2", [amount, b])?
+    tx.commit()?
+```
+
+| Item | Shape |
+|---|---|
+| `postgres.connect(url) -> Result[postgres.Db, postgres.DbError]` | `postgres://user:password@host:port/database?sslmode=...&pool_max=...`. Opens one connection to check the URL and credentials |
+| `postgres.Db` | Frozen: one pool, shared by every task. `query(sql, args=[]) -> Result[list[Row]]`, `query_row(...) -> Result[Row?]`, `execute(...) -> Result[int]` (rows affected), `script(sql)` (several statements, no parameters), `transaction() -> Result[Db]`, `close()` |
+| A transaction | A `Db` holding one connection: the same methods, plus `commit()`, `rollback()`, and `exit()` so that `with` rolls back if `commit` was not reached. A commit after a failed statement is an error (`25P02`) |
+| `postgres.query_as[T](db, sql, args=[]) -> Result[list[T]]`, `query_one_as[T](...) -> Result[T?]` | Rows decoded into a `@derive(Json)` type by column name: numbers, booleans and `json`/`jsonb` columns to fields of those types, NULL to `None`, anything else to `str` |
+| `postgres.Row` | `get(column) -> str?` (the text PostgreSQL sends), `text`, `int`, `float`, `bool` (each `Result`, an error for NULL), `columns()` |
+| `postgres.DbError` | `code` (the SQLSTATE, such as `23505` for a unique violation; `08006` when the connection failed) and `reason`. Returned from a handler, a 500 |
+
+Parameters are `$1`, `$2` in the SQL and a `list[str?]` beside it. They are sent separately from the statement, in text format, and the server converts each to the type the statement needs, so they cannot inject SQL. The language has no way to put an `int` and a `str` in one list without a wrapper, and text parameters are what `psql` uses, so `str(n)` is the price (D80).
+
+The driver is runtime code over the same non-blocking socket as the HTTP server, so a query parks its task (D80). Authentication: SCRAM-SHA-256, MD5, cleartext and trust. `sslmode` is `disable`, `prefer` (the default: TLS when the server offers it, without checking the certificate, as libpq does), `require`, or `verify-full` (the certificate is checked against the trusted roots and the host name). A pool opens at most `pool_max` connections (10 by default); a task that finds them all busy waits up to 30 seconds. Not supported yet: `COPY`, `LISTEN`/`NOTIFY`, binary results, cancelling a running query, and statement caching (every query is parsed by the server each time).
 
 ## JSON
 
@@ -440,6 +485,8 @@ Cancellation is not in the prototype. The intended design is a deadline carried 
 | Tasks, channels, mutexes | `spawn` keyword | implementation | typed wrappers |
 | JSON | derive | scanner, writer | `Value`, API |
 | HTTP, WebSocket | | protocol, router, I/O | `Server`, `Request`, `Response`, helpers |
+| TLS | | `rustls` | `bind_tls`, `listen_tls` |
+| PostgreSQL | | protocol, pool | `Db`, `Row`, `query_as` |
 | `log`, `time`, `io`, `os` | | system calls | API |
 
 The direction of travel is rightwards: as generics, byte buffers and the optimiser mature, implementations move from the runtime column to the Weby column, which makes them inlinable and lets the language test itself.

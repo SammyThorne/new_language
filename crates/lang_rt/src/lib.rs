@@ -23,11 +23,13 @@ pub mod list;
 pub mod num;
 pub mod out;
 pub mod panic;
+pub mod pg;
 pub mod poll;
 pub mod re;
 pub mod strings;
 pub mod sys;
 pub mod tasks;
+pub mod tls;
 pub mod ws;
 
 /// Program entry. The C runtime calls this; it runs the compiled program's `main`.

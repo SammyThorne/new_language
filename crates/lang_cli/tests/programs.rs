@@ -2,7 +2,7 @@
 //!
 //! - `tests/run/*`: each program is compiled and run in debug and release mode. Its standard
 //!   output must equal the `# expect:` comment lines in the file, in order. `# args:` gives it
-//!   command-line arguments. Modules it imports live in subdirectories, which are not run.
+//!   command-line arguments and `# env: NAME=value` sets an environment variable. Modules it imports live in subdirectories, which are not run.
 //! - `tests/ui/*`: each program is checked, and the compiler's standard error must equal the
 //!   `.stderr` file next to it. The expected exit status is 1 if that file contains an error,
 //!   otherwise 0. Set the `BLESS` environment variable (with the language's prefix, see
@@ -70,6 +70,8 @@ struct Expectations {
     stderr: Vec<String>,
     /// Command-line arguments for the program, from `# args:`.
     args: Vec<String>,
+    /// Environment variables for the program, from `# env: NAME=value`.
+    env: Vec<(String, String)>,
 }
 
 fn expectations(source: &str) -> Expectations {
@@ -85,6 +87,11 @@ fn expectations(source: &str) -> Expectations {
         exit: directive("# expect-exit:").first().map_or(0, |code| code.trim().parse().expect("exit code")),
         stderr: directive("# expect-stderr:"),
         args: directive("# args:").iter().flat_map(|line| line.split_whitespace().map(String::from)).collect(),
+        env: directive("# env:")
+            .iter()
+            .map(|line| line.split_once('=').expect("# env: NAME=value"))
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect(),
     }
 }
 
@@ -105,6 +112,7 @@ fn run_programs() {
             if gc_stress {
                 command.env(&stress, "1");
             }
+            command.envs(expected.env.iter().map(|(name, value)| (name, value)));
             let output = command.arg(&program).args(&expected.args).output().unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);

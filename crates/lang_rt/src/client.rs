@@ -2,16 +2,17 @@
 //!
 //! One request per connection (`Connection: close`), over the same non-blocking socket as the
 //! server, so a task waiting for a response parks instead of blocking a worker. Response bodies
-//! may be sized by `Content-Length`, chunked, or end with the connection. `https://` URLs are
-//! refused for now: TLS needs a library the project does not have yet.
+//! may be sized by `Content-Length`, chunked, or end with the connection. `https://` URLs use TLS
+//! (see `tls.rs` for which certificates are trusted).
 //!
 //! The response of the last request on this thread is kept for the accessor functions, which the
 //! standard library calls straight after the request.
 
 use crate::http::Socket;
+use crate::tls::{Protocol, Session};
 use crate::{Str, sys};
 use std::cell::RefCell;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -29,18 +30,19 @@ thread_local! {
 
 #[derive(Debug)]
 struct Url {
+    tls: bool,
     host: String,
     port: u16,
     target: String,
 }
 
 fn parse_url(url: &str) -> Result<Url, String> {
-    let rest = if let Some(rest) = url.strip_prefix("http://") {
-        rest
-    } else if url.starts_with("https://") {
-        return Err("https is not supported yet; the runtime has no TLS".to_string());
+    let (tls, rest) = if let Some(rest) = url.strip_prefix("http://") {
+        (false, rest)
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        (true, rest)
     } else {
-        return Err(format!("`{url}` is not an http:// URL"));
+        return Err(format!("`{url}` is not an http:// or https:// URL"));
     };
     let (authority, target) = match rest.find(['/', '?']) {
         Some(i) if rest.as_bytes()[i] == b'/' => (&rest[..i], rest[i..].to_string()),
@@ -51,12 +53,12 @@ fn parse_url(url: &str) -> Result<Url, String> {
         Some((host, port)) if !host.ends_with(']') || host.starts_with('[') => {
             (host.to_string(), port.parse::<u16>().map_err(|_| format!("bad port in `{url}`"))?)
         }
-        _ => (authority.to_string(), 80),
+        _ => (authority.to_string(), if tls { 443 } else { 80 }),
     };
     if host.is_empty() {
         return Err(format!("no host in `{url}`"));
     }
-    Ok(Url { host: host.trim_start_matches('[').trim_end_matches(']').to_string(), port, target })
+    Ok(Url { tls, host: host.trim_start_matches('[').trim_end_matches(']').to_string(), port, target })
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -80,18 +82,34 @@ fn fill(socket: &Socket, buffer: &mut Vec<u8>, deadline: Instant) -> Result<bool
     }
 }
 
+/// Connect to the first of the host's addresses that answers.
+fn connect(host: &str, port: u16, deadline: Instant) -> Result<Socket, String> {
+    let addresses = (host, port).to_socket_addrs().map_err(|e| format!("cannot resolve `{host}`: {e}"))?;
+    let mut failure = format!("`{host}` has no address");
+    for address in addresses {
+        match Socket::connect(&address, deadline) {
+            Ok(socket) => return Ok(socket),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                return Err(format!("timed out connecting to {address}"));
+            }
+            Err(e) => failure = format!("cannot connect to {address}: {e}"),
+        }
+    }
+    Err(failure)
+}
+
 fn request(method: &str, url: &str, headers: &str, body: &[u8]) -> Result<(i64, Response), String> {
     let url = parse_url(url)?;
     let deadline = Instant::now() + TIMEOUT;
-    let address = (url.host.as_str(), url.port)
-        .to_socket_addrs()
-        .map_err(|e| format!("cannot resolve `{}`: {e}", url.host))?
-        .next()
-        .ok_or_else(|| format!("`{}` has no address", url.host))?;
-    let stream =
-        TcpStream::connect_timeout(&address, TIMEOUT).map_err(|e| format!("cannot connect to {address}: {e}"))?;
-    let socket = Socket::new(stream);
-    let host = if url.port == 80 { url.host.clone() } else { format!("{}:{}", url.host, url.port) };
+    let mut socket = connect(&url.host, url.port, deadline)?;
+    if url.tls {
+        socket.start_tls(Session::client(&url.host, Protocol::Http)?);
+    }
+    let host = if url.port == if url.tls { 443 } else { 80 } {
+        url.host.clone()
+    } else {
+        format!("{}:{}", url.host, url.port)
+    };
     let mut head = format!("{method} {} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n", url.target);
     let lower = headers.to_ascii_lowercase();
     if !lower.contains("user-agent:") {
@@ -229,7 +247,8 @@ mod tests {
         assert_eq!((url.host.as_str(), url.port, url.target.as_str()), ("example.com", 8080, "/a/b?c=1"));
         let url = parse_url("http://localhost?x").unwrap();
         assert_eq!((url.port, url.target.as_str()), (80, "/?x"));
-        assert!(parse_url("https://example.com").unwrap_err().contains("TLS"));
+        let url = parse_url("https://example.com/x").unwrap();
+        assert_eq!((url.tls, url.port, url.target.as_str()), (true, 443, "/x"));
         assert!(parse_url("ftp://x").is_err());
     }
 }

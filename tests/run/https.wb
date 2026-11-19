@@ -1,0 +1,47 @@
+# HTTPS: a server with the test certificate, and the client trusting the test authority.
+# env: SSL_CERT_FILE=tests/data/tls/ca.pem
+# expect: 200 hello ann
+# expect: 201 ping
+# expect: 4
+# expect: refused: certificate is not valid for 127.0.0.1
+# expect: bad key: cannot read the private key file
+
+import http
+
+def hello(req: http.Request) -> Result[http.Response]:
+    return http.text(f"hello {req.query('name').unwrap_or('?')}")
+
+def echo(req: http.Request) -> Result[http.Response]:
+    return http.text(req.text()?, 201)
+
+def serve(ports: Channel[int]):
+    server = http.Server()
+    server.get("/hello", hello)
+    server.post("/echo", echo)
+    ports.send(server.bind_tls("127.0.0.1:0", "tests/data/tls/cert.pem", "tests/data/tls/key.pem").unwrap())
+    server.serve()
+
+def main():
+    ports: Channel[int] = Channel(1)
+    server = spawn serve(ports)
+    port = ports.recv().unwrap()
+    base = f"https://localhost:{port}"
+    r = http.get(f"{base}/hello?name=ann").unwrap()
+    print(r.status, r.text().unwrap())
+    r = http.post(f"{base}/echo", "ping", "text/plain").unwrap()
+    print(r.status, r.text().unwrap())
+    counts = [spawn fetch_status(f"{base}/hello?name=x") for _ in range(4)]
+    print(sum([t.join() for t in counts]) // 200)
+    # The certificate names localhost only.
+    message = http.get(f"https://127.0.0.1:{port}/hello").unwrap_err().message()
+    print("refused:", "certificate is not valid for 127.0.0.1" if "not valid for name" in message else message)
+    match http.Server().bind_tls(":0", "tests/data/tls/cert.pem", "tests/data/tls/nowhere.pem"):
+        case Ok(_):
+            print("unexpected")
+        case Err(error):
+            print("bad key:", error.message().split(" `")[0])
+    http.Server().stop()
+    server.join()
+
+def fetch_status(url: str) -> int:
+    return http.get(url).unwrap().status

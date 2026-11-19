@@ -1,0 +1,126 @@
+# The PostgreSQL client against a real server, run by crates/lang_cli/tests/postgres.rs when a
+# database URL is given (see tests/db/README.md). The first argument is the URL, with a user and
+# password, of a database the test may write to; the optional second reaches the same server
+# with sslmode=verify-full.
+# expect-tls: tls: True
+# expect: schema ready
+# expect: inserted 3
+# expect: 1 ann 9.5 True
+# expect: 2 bob None False
+# expect: 3 cy 2 False
+# expect: NULL: 22004 column `score` is NULL
+# expect: missing: 42703 no column `nope` in the result
+# expect: typed: ann/9.5/{"tags":["a","b"]} bob/None/None cy/2.0/None
+# expect: one: bob
+# expect: none: True
+# expect: unique: 23505
+# expect: syntax: 42601
+# expect: still usable: 3
+# expect: committed: 4
+# expect: rolled back: 4
+# expect: failed commit: 25P02
+# expect: after failed commit: 4
+# expect: tasks: 40 40
+# expect: bad password: 28P01
+# expect: bad table: 42P01
+
+import os
+import postgres
+
+@derive(Json)
+struct Doc:
+    tags: list[str]
+
+@derive(Json)
+struct User:
+    id: int
+    name: str
+    score: float?
+    admin: bool
+    doc: Doc?
+
+def count(db: postgres.Db) -> int:
+    return db.query_row("select count(*) as n from users").unwrap().unwrap().int("n").unwrap()
+
+def worker(db: postgres.Db, n: int) -> int:
+    db.execute("insert into hits (task) values ($1)", [str(n)]).unwrap()
+    row = db.query_row("select count(*) as n from hits where task = $1", [str(n)]).unwrap().unwrap()
+    return row.int("n").unwrap()
+
+def main():
+    url = os.args()[1]
+    db = postgres.connect(url).unwrap()
+    db.script("""
+        drop table if exists users;
+        drop table if exists hits;
+        create table users (
+            id serial primary key,
+            name text unique not null,
+            score numeric,
+            admin bool not null default false,
+            doc jsonb
+        );
+        create table hits (task int not null);
+    """).unwrap()
+    print("schema ready")
+    n = db.execute(
+        "insert into users (name, score, admin, doc) values ($1, $2, $3, $4), ($5, null, false, null), ($6, $7, false, null)",
+        ["ann", "9.5", "true", "{\"tags\": [\"a\", \"b\"]}", "bob", "cy", str(2)],
+    ).unwrap()
+    print("inserted", n)
+    rows = db.query("select id, name, score, admin from users order by id").unwrap()
+    for row in rows:
+        print(row.int("id").unwrap(), row.text("name").unwrap(), row.get("score"), row.bool("admin").unwrap())
+    e = rows[1].float("score").unwrap_err()
+    print(f"NULL: {e.code} {e.reason}")
+    e = rows[0].text("nope").unwrap_err()
+    print(f"missing: {e.code} {e.reason}")
+
+    users = postgres.query_as[User](db, "select * from users order by id").unwrap()
+    parts: list[str] = []
+    for u in users:
+        doc = "None"
+        match u.doc:
+            case Some(d):
+                doc = "{\"tags\":[" + ",".join([f"\"{t}\"" for t in d.tags]) + "]}"
+            case None:
+                pass
+        parts.append(f"{u.name}/{u.score}/{doc}")
+    print("typed:", " ".join(parts))
+    print("one:", postgres.query_one_as[User](db, "select * from users where id = $1", ["2"]).unwrap().unwrap().name)
+    print("none:", postgres.query_one_as[User](db, "select * from users where id = $1", ["99"]).unwrap() == None)
+
+    print("unique:", db.execute("insert into users (name) values ($1)", ["ann"]).unwrap_err().code)
+    print("syntax:", db.execute("selec 1").unwrap_err().code)
+    print("still usable:", count(db))
+
+    with db.transaction().unwrap() as tx:
+        tx.execute("insert into users (name) values ($1)", ["dee"]).unwrap()
+        tx.commit().unwrap()
+    print("committed:", count(db))
+    with db.transaction().unwrap() as tx:
+        tx.execute("insert into users (name) values ($1)", ["eve"]).unwrap()
+    # No commit: leaving the block rolls back.
+    print("rolled back:", count(db))
+    with db.transaction().unwrap() as tx:
+        tx.execute("insert into users (name) values ($1)", ["fay"]).unwrap()
+        _ = tx.execute("insert into users (name) values ($1)", ["ann"])
+        print("failed commit:", tx.commit().unwrap_err().code)
+    print("after failed commit:", count(db))
+
+    # Many tasks share one small pool.
+    small = postgres.connect(url + ("&" if "?" in url else "?") + "pool_max=4").unwrap()
+    tasks = [spawn worker(small, i) for i in range(40)]
+    total = sum([t.join() for t in tasks])
+    print("tasks:", total, small.query_row("select count(*) as n from hits").unwrap().unwrap().int("n").unwrap())
+
+    # The URL is postgres://user:password@...; swap the password.
+    at = url.split("@")
+    credentials = at[0].split(":")
+    bad = f"{credentials[0]}:{credentials[1]}:wrong@{at[1]}"
+    print("bad password:", postgres.connect(bad).unwrap_err().code)
+    print("bad table:", db.query("select * from nowhere").unwrap_err().code)
+
+    if len(os.args()) > 2:
+        secure = postgres.connect(os.args()[2]).unwrap()
+        print("tls:", secure.query_row("select ssl from pg_stat_ssl where pid = pg_backend_pid()").unwrap().unwrap().bool("ssl").unwrap())

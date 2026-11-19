@@ -241,6 +241,9 @@ impl Reader {
     fn message(&mut self, socket: &WebSocket) -> Result<(u8, Vec<u8>), Stop> {
         let max = MAX_MESSAGE.load(Ordering::Relaxed).max(125) as usize;
         let mut message: Option<(u8, Vec<u8>)> = None;
+        // How much of a fragmented text message is known to be valid UTF-8, so that invalid
+        // text fails the connection at the fragment that has it, not at the end (Autobahn 6.4).
+        let mut checked = 0;
         loop {
             let frame = self.frame(socket, max)?;
             match frame.opcode {
@@ -275,12 +278,22 @@ impl Reader {
                     data.extend_from_slice(&frame.payload);
                 }
             }
+            if !frame.fin
+                && let Some((OP_TEXT, data)) = &message
+            {
+                match std::str::from_utf8(&data[checked..]) {
+                    Ok(_) => checked = data.len(),
+                    // Only an incomplete character at the end may be finished by the next frame.
+                    Err(e) if e.error_len().is_none() => checked += e.valid_up_to(),
+                    Err(_) => return Err(Stop::Fail(CLOSE_INVALID_DATA)),
+                }
+            }
             // A final data frame completes the message (control frames may come in between).
             if frame.fin
                 && frame.opcode < OP_CLOSE
                 && let Some((opcode, data)) = message.take()
             {
-                if opcode == OP_TEXT && std::str::from_utf8(&data).is_err() {
+                if opcode == OP_TEXT && std::str::from_utf8(&data[checked..]).is_err() {
                     return Err(Stop::Fail(CLOSE_INVALID_DATA));
                 }
                 return Ok((opcode, data));
@@ -365,9 +378,9 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     out
 }
 
-const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+pub(crate) const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-fn base64(data: &[u8]) -> String {
+pub(crate) fn base64(data: &[u8]) -> String {
     let mut out = String::new();
     for chunk in data.chunks(3) {
         let n =

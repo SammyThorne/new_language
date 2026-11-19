@@ -24,6 +24,9 @@ import log
 @extern("lrt_http_listen")
 def listen_raw(address: str) -> int
 
+@extern("lrt_http_listen_tls")
+def listen_tls_raw(address: str, cert_file: str, key_file: str) -> int
+
 @extern("lrt_http_port")
 def port_raw(listener: int) -> int
 
@@ -516,7 +519,14 @@ impl Server:
     def bind(self, address: str) -> Result[int, HttpError]:
         """Start listening on `host:port` (`":8080"` for all interfaces, `":0"` for any free
         port). Returns the port. Then call `serve`."""
-        listener = listen_raw(address)
+        return self.bound(listen_raw(address))
+
+    def bind_tls(self, address: str, cert_file: str, key_file: str) -> Result[int, HttpError]:
+        """`bind` for HTTPS: `cert_file` is the PEM certificate chain (the server's certificate
+        first) and `key_file` its PEM private key. WebSockets on this server use TLS too."""
+        return self.bound(listen_tls_raw(address, cert_file, key_file))
+
+    def bound(self, listener: int) -> Result[int, HttpError]:
         if listener < 0:
             return Err(HttpError(500, last_error()))
         self.listener = listener
@@ -542,6 +552,12 @@ impl Server:
         """`bind` and `serve`."""
         port = self.bind(address)?
         log.info(f"listening on port {port}")
+        self.serve()
+
+    def listen_tls(self, address: str, cert_file: str, key_file: str) -> Result[None, HttpError]:
+        """`bind_tls` and `serve`."""
+        port = self.bind_tls(address, cert_file, key_file)?
+        log.info(f"listening on port {port} (https)")
         self.serve()
 
     def stop(self):
@@ -683,7 +699,8 @@ pub def upgrade(req: Request, handler: WsHandler) -> Result[Response]:
 
 pub struct ClientError:
     """A request that got no response: the host could not be reached, it closed the connection
-    early, it timed out (after 30 seconds), or the URL is not `http://`."""
+    early, it timed out (after 30 seconds), its TLS certificate is not trusted, or the URL is
+    not `http://` or `https://`."""
     url: str
     reason: str
 

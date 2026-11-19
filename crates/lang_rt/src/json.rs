@@ -748,6 +748,12 @@ pub unsafe extern "C-unwind" fn lrt_json_peek_tag(r: *mut Reader, ptr: *const u8
 pub unsafe extern "C-unwind" fn lrt_builder_push_json_str(b: *mut Builder, ptr: *const u8, len: i64) {
     let text = unsafe { Str::from_raw(ptr, len) }.as_bytes();
     let mut out = Vec::with_capacity(text.len() + 2);
+    push_json_string(&mut out, text);
+    unsafe { lrt_builder_push(b, out.as_ptr(), out.len() as i64) };
+}
+
+/// Append UTF-8 text to `out` as a JSON string literal.
+pub(crate) fn push_json_string(out: &mut Vec<u8>, text: &[u8]) {
     out.push(b'"');
     let mut start = 0;
     for (i, &c) in text.iter().enumerate() {
@@ -772,7 +778,6 @@ pub unsafe extern "C-unwind" fn lrt_builder_push_json_str(b: *mut Builder, ptr: 
     }
     out.extend_from_slice(&text[start..]);
     out.push(b'"');
-    unsafe { lrt_builder_push(b, out.as_ptr(), out.len() as i64) };
 }
 
 /// Append a float as a JSON number, the way Python writes it (`1.0`, `1e+100`). NaN and the

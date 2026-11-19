@@ -1,0 +1,29 @@
+# HTTPS and secure WebSockets, for crates/lang_cli/tests/tls.rs: the server runs from the
+# repository root and uses the test certificate in tests/data/tls.
+
+import http
+import io
+
+def hello(req: http.Request) -> Result[http.Response]:
+    return http.text(f"hello {req.query('name').unwrap_or('?')}")
+
+def echo_body(req: http.Request) -> Result[http.Response]:
+    return http.text(req.text()?)
+
+def echo(ws: http.WebSocket):
+    for msg in ws:
+        match msg:
+            case Text(body):
+                _ = ws.send(body)
+            case Binary(data):
+                _ = ws.send_bytes(data)
+
+def main():
+    server = http.Server()
+    server.max_message = 4194304
+    server.get("/hello", hello)
+    server.post("/echo", echo_body)
+    server.ws("/echo", echo)
+    port = server.bind_tls("127.0.0.1:0", "tests/data/tls/cert.pem", "tests/data/tls/key.pem").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()
