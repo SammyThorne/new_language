@@ -508,6 +508,9 @@ impl Checker<'_, '_> {
                 if name.starts_with("__json_") && self.in_json_module() {
                     return self.json_intrinsic(cx, name, args, span, expected);
                 }
+                if name == "__http_serve" && self.in_http_module() {
+                    return self.http_serve_intrinsic(cx, args, span);
+                }
                 if super::concurrency::SYNC_TYPES.contains(&name.as_str()) && name != "Task" {
                     return self.sync_constructor(cx, name, None, args, span, expected);
                 }
@@ -712,6 +715,23 @@ impl Checker<'_, '_> {
     ) -> hir::Expr {
         let callee = ast::Expr { kind: ast::ExprKind::None, span: callee_span };
         match global {
+            // An alias of a struct type constructs the struct.
+            Global::TypeAlias(index) => {
+                let ty = self.alias_type_of(index, callee_span);
+                match self.struct_of(ty) {
+                    Some(id) => self.construct(cx, id, args, span),
+                    None => {
+                        self.error(Diagnostic::error(
+                            codes::NOT_A_FUNCTION,
+                            format!("`{name}` is a type, not a function"),
+                            callee_span,
+                            "not callable",
+                        ));
+                        self.check_all(cx, args);
+                        error_expr(span)
+                    }
+                }
+            }
             Global::Function(id) => {
                 let signature = &self.signatures[id.0];
                 let (fname, def_span, params, ret) =
@@ -1143,6 +1163,9 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> hir::Expr {
         let ty = receiver.ty;
+        if name.name == "mount" && self.is_http_server(ty) {
+            return self.mount(cx, receiver, args, span);
+        }
         match self.types.kind(ty).clone() {
             TyKind::Struct(_) | TyKind::Enum(_) => {
                 let type_name = self.display(ty);
@@ -1160,7 +1183,11 @@ impl Checker<'_, '_> {
                         self.check_all(cx, args);
                         return error_expr(span);
                     }
-                    return self.call_func(cx, func, Some(receiver), args, span);
+                    let call = self.call_func(cx, func, Some(receiver), args, span);
+                    if self.is_http_server(ty) {
+                        self.check_registration(cx, &name.name, &call);
+                    }
+                    return call;
                 }
                 // A field holding a function: `self.handler(request)`.
                 if let Some(id) = self.struct_of(ty)
@@ -1309,7 +1336,7 @@ impl Checker<'_, '_> {
         args: &[ast::Arg],
         span: Span,
     ) -> hir::Expr {
-        if !self.check_constructible(id, span) {
+        if !self.check_constructible(id, args, span) {
             self.check_all_quietly(cx, args);
             return error_expr(span);
         }

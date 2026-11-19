@@ -381,6 +381,38 @@ Boehm needs `GC_allow_register_threads` before any other thread registers, and o
 
 `x[i]` on a struct or enum calls `get_index(self, i: int)` when the index is an `int`, and `get_item(self, key)` otherwise, if the type has them. That is how `data["user"]["name"]` and `data["items"][0]` work on `json.Value`, and it is open to any type. Where a `json.Value` is expected, `True`, numbers, strings, `None`, and list and dict literals become values, so `json.object({"ok": True, "tags": ["a"]})` needs no wrapping.
 
+### D49. The HTTP parser is hand-written, and the router is written in Weby
+
+docs/05 planned `httparse` for parsing and `matchit` for routing. Both are crates not yet on this machine, and adding them is a download, so the runtime has its own request-line, header and chunked-body parser (about 400 lines, with the limits and timeouts listed in docs/05), and the router lives in `stdlib/http.lang`: a list of routes tried in order, with `{name}` and trailing `{rest...}` segments. A path that matches a route under another method gets 405 with an `Allow` header. Trying routes in order is linear in the number of routes; a radix tree is an optimisation for when services have hundreds of routes. Writing the router in Weby now is where D10 planned to end up anyway.
+
+### D50. Stage 1 HTTP: a thread per connection, and a callback per request
+
+`lrt_http_serve` runs the accept loop on the calling thread and serves each connection on a thread registered with the collector, counted against the task cap. For each request it calls a compiled closure with an integer handle to the parsed request, which lives on the connection thread's stack and holds no collected objects; the closure reads what it needs through `lrt_http_req_*` (method, path, query, a header, the body) and leaves its response with `lrt_http_respond`. Only what the handler asks for becomes a Weby string. SIGINT and SIGTERM stop the accept loop, and `serve` returns once requests in progress have finished.
+
+### D51. `http.Error` is a function, and errors carry a status
+
+`http.Error(404, "...")` is a function returning an `HttpError` struct, because the prelude's `Error` trait owns the name `Error` in type position; a standard library module may define a value with the same name as a prelude type. The prelude's `Error` trait gained a default method `status(self) -> int` returning 500, which `HttpError` overrides and `json.JsonError` overrides with 400. The error mapping in `Server.handle` asks any error for its status, so a user's own error type can choose its response code by implementing `status`.
+
+### D52. Route adapters are generated as source code and checked like user code
+
+`server.mount(value)` generates, for each annotated method of the value's type, a nested function in the call style (shown in `check/http.rs`) plus the `server.route(...)` call, as source text. That text is parsed and type-checked in the scope of the `mount` call, with the types it names bound to temporary aliases so it works whatever the user imported. There is no special code generation for routes, and the generated code is exactly what docs/05 says annotations are sugar for. Generated files are exempt from the check that rejects registering an unshareable handler, since the mounted value itself is checked. A query parameter's default must be a literal, because it is copied into the generated code.
+
+### D53. Type aliases
+
+`type Handler = def(Request) -> Result[Response]` names a type; an alias can be `pub`, and types may be parenthesised, so `(def(int) -> str)?` is an optional function. Aliases cannot have type parameters.
+
+### D54. A local variable may shadow a function or constant
+
+A variable such as `sum` or `text` in a function body may now have the name of a built-in or a module-level function or constant; inside that function the name means the variable from its first assignment on. Before, it was an error, which made common names unusable once a module defined a function with that name (the `http` module defines `text` and `json`). A variable may still not shadow a type or a module.
+
+### D55. Logging
+
+`log.debug`, `info`, `warn` and `error` write one line to standard error with a timestamp and level. The level comes from `WEBY_LOG` (default `info`) or `log.set_level`. The runtime formats the whole line first and writes it while holding standard error's lock, so lines from concurrent tasks do not interleave.
+
+### D56. The HTTP Python baseline is the standard library server
+
+docs/07 compares against a Python framework. None is installed, and installing one is a download, so the baseline is `http.server.ThreadingHTTPServer` with Nagle's algorithm turned off. A framework such as FastAPI under uvicorn would be faster than this baseline but still well behind Weby; the comparison should be rerun with one when downloads are approved.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

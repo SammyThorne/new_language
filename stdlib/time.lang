@@ -28,3 +28,7 @@ pub def monotonic() -> float:
 pub def now() -> float:
     """Seconds since 1970-01-01 UTC."""
     return now_raw()
+
+pub def since(start: float) -> float:
+    """Seconds since `start`, a value from `now()`."""
+    return now_raw() - start

@@ -1,0 +1,35 @@
+# The HTTP benchmark server: a plain-text endpoint and a JSON endpoint, as in TechEmpower's
+# "plaintext" and "JSON" tests, plus a JSON list of records.
+
+import http
+import io
+import os
+
+@derive(Json)
+struct Message:
+    message: str
+
+@derive(Json)
+struct Item:
+    id: int
+    name: str
+    price: float
+    tags: list[str]
+
+def plaintext(req: http.Request) -> Result[http.Response]:
+    return http.text("Hello, World!")
+
+def message(req: http.Request) -> Result[http.Response]:
+    return http.json(Message("Hello, World!"))
+
+def items(req: http.Request) -> Result[http.Response]:
+    return http.json([Item(i, f"item {i}", float(i) * 1.5, ["a", "b"]) for i in range(20)])
+
+def main():
+    server = http.Server()
+    server.get("/plaintext", plaintext)
+    server.get("/json", message)
+    server.get("/items", items)
+    port = server.bind(f"127.0.0.1:{os.args()[1]}").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()

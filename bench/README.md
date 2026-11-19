@@ -22,7 +22,39 @@ python3 bench/run.py --runs 5
 
 The Go versions are written the way a Go programmer would write them. Where that changes the work done, the comment in the file says so. For example, `counts[key] = counts[key] + 1` is one map access in Go but two lookups in the other versions.
 
+## HTTP
+
+`bench/http/` holds the same small service three times: `server.wb`, `server.go` (`net/http`) and `server.py` (the standard library's `ThreadingHTTPServer`, since no Python web framework is installed and installing one is a download). Each answers three endpoints:
+
+| Endpoint | What it does |
+|---|---|
+| `/plaintext` | Returns a fixed string |
+| `/json` | Encodes a small struct to JSON |
+| `/items` | Builds and encodes a list of 100 structs, about 6 KB of JSON |
+
+`load.go` is a closed-loop load generator: N connections, each sending the next request as soon as the previous response arrives, over keep-alive. It runs on the same machine as the server.
+
+```bash
+python3 bench/http/run.py --seconds 5 --connections 64
+```
+
 ## Results
+
+### 2026-11-18, end of milestone 8: HTTP
+
+64 connections, 5 seconds per run, requests per second. Weby's server is stage 1: one OS thread per connection.
+
+| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go | Weby vs Python |
+|---|---|---|---|---|---|
+| `/plaintext` | 733,972 | 565,280 | 24,476 | 1.30x faster | 30.0x faster |
+| `/json` | 716,590 | 530,883 | 21,966 | 1.35x faster | 32.6x faster |
+| `/items` | 134,075 | 262,913 | 16,502 | 0.51x (Go is 1.96x faster) | 8.1x faster |
+
+Notes:
+
+- **Small responses are faster than Go.** With 64 connections on 12 hardware threads, a thread per connection costs little, and the request path allocates almost nothing: the request is parsed on the connection thread's stack, and only the method, path and body become Weby strings.
+- **`/items` is where the collector shows.** It allocates about 100 structs and a 6 KB string per request. Running it with a large initial heap (`WEBY_GC_INITIAL_HEAP=1000000000`) or `GC_FREE_SPACE_DIVISOR=1` raises it to about 195,000 requests per second (+50%), so about a third of the time is collection. Most of the rest is contention on Boehm's allocator across 64 threads.
+- **Gate 2** (docs/06, "Gates"): on the JSON endpoints Weby is ahead of Go for small responses and at half Go's speed for large ones. Collection is about a third of the `/items` time; the larger part is 64 threads contending for the allocator, which is the thread model. The gate's answer is therefore to proceed to stage 2 (fibers on one worker per core) and measure again at Gate 3; see docs/06.
 
 ### 2026-11-18, end of milestone 7
 

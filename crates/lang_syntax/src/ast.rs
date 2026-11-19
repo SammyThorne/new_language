@@ -21,6 +21,15 @@ pub enum Item {
     Impl(ImplDecl),
     Const(ConstDecl),
     Import(ImportDecl),
+    TypeAlias(TypeAliasDecl),
+}
+
+/// `type Handler = def(Request) -> Response`: another name for a type.
+#[derive(Debug)]
+pub struct TypeAliasDecl {
+    pub visibility: Visibility,
+    pub name: Ident,
+    pub ty: TypeExpr,
 }
 
 /// `import a.b`, `import a.b as c`, or `from a.b import x, y as z`.
@@ -57,6 +66,7 @@ pub struct AnnotationArg {
 pub enum AnnotationValue {
     Name(Ident),
     Str(String),
+    Int(i64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

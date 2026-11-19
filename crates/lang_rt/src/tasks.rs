@@ -36,7 +36,7 @@ unsafe extern "C" {
 /// multi-threaded mode, which makes every allocation about half again as slow, so it happens
 /// on the first `spawn` rather than at startup. The first `spawn` is always on the main thread,
 /// since no other thread exists before it, which is where the collector requires the call.
-fn allow_threads() {
+pub(crate) fn allow_threads() {
     static ALLOWED: std::sync::Once = std::sync::Once::new();
     // SAFETY: called on the main thread (see above), after `GC_init`.
     ALLOWED.call_once(|| unsafe { GC_allow_register_threads() });
@@ -58,8 +58,56 @@ fn max_tasks() -> i64 {
     max
 }
 
-fn stack_size() -> usize {
+pub(crate) fn stack_size() -> usize {
     std::env::var(lang_names::env_var("TASK_STACK")).ok().and_then(|v| v.parse().ok()).unwrap_or(8 * 1024 * 1024)
+}
+
+/// Wait until another task may start, then count it.
+pub(crate) fn acquire_slot() {
+    let mut live = LIVE.lock().unwrap_or_else(|p| p.into_inner());
+    while *live >= max_tasks() {
+        live = SLOT_FREED.wait(live).unwrap_or_else(|p| p.into_inner());
+    }
+    *live += 1;
+}
+
+/// A task has finished.
+pub(crate) fn release_slot() {
+    let mut live = LIVE.lock().unwrap_or_else(|p| p.into_inner());
+    *live -= 1;
+    SLOT_FREED.notify_one();
+}
+
+/// Register the calling thread with the collector, for a thread the runtime started.
+pub(crate) fn register_thread() {
+    let mut base = StackBase { mem_base: std::ptr::null_mut(), reg_base: std::ptr::null_mut() };
+    // SAFETY: registering the current thread, with its own stack base.
+    unsafe {
+        GC_get_stack_base(&mut base);
+        GC_register_my_thread(&base);
+    }
+}
+
+pub(crate) fn unregister_thread() {
+    // SAFETY: the thread registered itself with `register_thread`.
+    unsafe { GC_unregister_my_thread() };
+}
+
+/// Two words the collector treats as a root until [`free_roots`]: for handing collected
+/// pointers to a thread that is not registered yet, or keeping them alive while Rust holds them.
+pub(crate) fn roots(a: *mut u8, b: *mut u8) -> *mut *mut u8 {
+    // SAFETY: a plain allocation; the collector scans it until it is freed.
+    let roots = unsafe { GC_malloc_uncollectable(2 * std::mem::size_of::<*mut u8>()) as *mut *mut u8 };
+    unsafe {
+        roots.write(a);
+        roots.add(1).write(b);
+    }
+    roots
+}
+
+pub(crate) fn free_roots(roots: *mut *mut u8) {
+    // SAFETY: allocated by `roots`.
+    unsafe { GC_free(roots as *mut u8) };
 }
 
 // ---- tasks --------------------------------------------------------------------------------

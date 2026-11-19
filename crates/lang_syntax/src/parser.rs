@@ -253,6 +253,16 @@ impl Parser<'_> {
                     Ok(item) => items.push(item),
                     Err(Reported) => self.skip_statement(),
                 },
+                TokenKind::Name(word)
+                    if word == "type"
+                        && matches!(self.peek_nth(1), TokenKind::Name(_))
+                        && *self.peek_nth(2) == TokenKind::Assign =>
+                {
+                    match self.type_alias(Visibility::Default) {
+                        Ok(alias) => items.push(Item::TypeAlias(alias)),
+                        Err(Reported) => self.skip_statement(),
+                    }
+                }
                 TokenKind::Import | TokenKind::From => match self.import_decl() {
                     Ok(import) => items.push(Item::Import(import)),
                     Err(Reported) => self.skip_statement(),
@@ -286,6 +296,16 @@ impl Parser<'_> {
             }
         }
         Module { items, start }
+    }
+
+    /// `type Name = T`, after any `pub` or `priv`.
+    fn type_alias(&mut self, visibility: Visibility) -> PResult<TypeAliasDecl> {
+        self.bump();
+        let name = self.expect_name("a name for the type")?;
+        self.expect(TokenKind::Assign, "after the type's name")?;
+        let ty = self.type_expr()?;
+        self.end_of_statement()?;
+        Ok(TypeAliasDecl { visibility, name, ty })
     }
 
     /// A dotted module name: `a.b.c`.
@@ -393,7 +413,11 @@ impl Parser<'_> {
                 AnnotationValue::Str(text)
             }
             TokenKind::Name(_) => AnnotationValue::Name(self.expect_name("a name")?),
-            _ => return Err(self.unexpected("expected a name or a string")),
+            TokenKind::Int(value) => {
+                self.bump();
+                AnnotationValue::Int(i64::try_from(value).unwrap_or(i64::MAX))
+            }
+            _ => return Err(self.unexpected("expected a name, a string or a number")),
         };
         Ok(AnnotationArg { keyword, value, span: start.to(self.prev_span()) })
     }
@@ -412,6 +436,9 @@ impl Parser<'_> {
                 "not allowed here",
                 None,
             ));
+        }
+        if matches!(self.peek(), TokenKind::Name(word) if word == "type") && annotations.is_empty() {
+            return Ok(Item::TypeAlias(self.type_alias(visibility)?));
         }
         match self.peek() {
             TokenKind::Def => Ok(Item::Function(self.function_with(annotations, visibility, false)?)),
@@ -833,6 +860,13 @@ impl Parser<'_> {
             TokenKind::NoneKw => {
                 self.bump();
                 TypeExpr { kind: TypeExprKind::None, span: start }
+            }
+            TokenKind::LParen => {
+                // `(def(int) -> str)?`: parentheses group a type.
+                self.bump();
+                let inner = self.type_expr()?;
+                self.expect(TokenKind::RParen, "to close the parenthesised type")?;
+                TypeExpr { kind: inner.kind, span: start.to(self.prev_span()) }
             }
             TokenKind::Name(mut name) => {
                 self.bump();

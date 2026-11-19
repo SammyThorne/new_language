@@ -165,6 +165,7 @@ const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_mutex_unlock", "v", "p"),
     ("lrt_dict_copy", "p", "p"),
     ("lrt_dict_eq", "i", "ppp"),
+    ("lrt_http_serve", "v", "ippp"),
     ("lrt_json_reader_new", "p", "pi"),
     ("lrt_json_reader_free", "v", "p"),
     ("lrt_json_finish", "i", "p"),

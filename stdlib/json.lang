@@ -31,6 +31,10 @@ impl Error for JsonError:
             return self.message
         return f"{self.path}: {self.message}"
 
+    def status(self) -> int:
+        """Bad JSON from a client is the client's error."""
+        return 400
+
 impl Display for JsonError:
     def to_str(self) -> str:
         return Error.message(self)

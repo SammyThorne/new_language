@@ -23,6 +23,11 @@ fn fail(error: impl std::fmt::Display) {
     LAST_ERROR.with(|e| *e.borrow_mut() = error.to_string());
 }
 
+/// Record an error for `lrt_io_error`, from other parts of the runtime.
+pub(crate) fn record_error(error: impl std::fmt::Display) {
+    fail(error);
+}
+
 /// A message describing an I/O error, without Rust's "(os error N)" suffix.
 fn describe(error: std::io::Error) -> String {
     let text = error.to_string();

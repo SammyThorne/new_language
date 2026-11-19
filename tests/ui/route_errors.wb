@@ -1,0 +1,76 @@
+import http
+
+@derive(Json)
+struct Note:
+    text: str
+
+struct Plain:
+    x: int
+
+@frozen
+struct Api:
+    name: str
+
+impl Api:
+    @http.get("/notes/{id}")
+    def missing_param(self) -> str:
+        return "x"
+
+    @http.get("/notes/{id}")
+    def wrong_type(self, id: list[int]) -> str:
+        return "x"
+
+    @http.get("/notes")
+    def body_on_get(self, note: Note) -> str:
+        return note.text
+
+    @http.post("/notes")
+    def two_bodies(self, a: Note, b: Note) -> str:
+        return a.text + b.text
+
+    @http.post("/plain")
+    def unbound(self, p: Plain) -> str:
+        return "x"
+
+    @http.get("/bad-return")
+    def bad_return(self) -> Plain:
+        return Plain(1)
+
+    @http.get("/dup")
+    def first(self) -> str:
+        return "1"
+
+    @http.get("/dup")
+    def second(self) -> str:
+        return "2"
+
+    @http.get("no-slash")
+    def no_slash(self) -> str:
+        return "x"
+
+    @http.get("/query")
+    def query_default(self, limit: int = len("abc")) -> str:
+        return "x"
+
+struct Counter:
+    hits: int
+
+impl Counter:
+    @http.get("/hits")
+    def count(self) -> str:
+        return str(self.hits)
+
+def handler(req: http.Request) -> Result[http.Response]:
+    return http.text("x")
+
+def main():
+    server = http.Server()
+    server.mount(Api("a"))
+    server.mount(Counter(0))
+    seen: list[int] = []
+    def capture(req: http.Request) -> Result[http.Response]:
+        seen.append(1)
+        return http.text("x")
+    server.get("/capture", capture)
+    server.get("/ok", handler)
+    server.mount(handler)

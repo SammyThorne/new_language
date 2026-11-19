@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 pub struct LoadedModule {
     pub name: String,
     pub ast: ast::Module,
+    pub stdlib: bool,
 }
 
 enum State {
@@ -51,12 +52,12 @@ pub fn load(
         stack: Vec::new(),
         order: Vec::new(),
     };
-    loader.visit(main_name, main);
+    loader.visit(main_name, main, false);
     loader.order
 }
 
 impl Loader<'_> {
-    fn visit(&mut self, name: String, module: ast::Module) {
+    fn visit(&mut self, name: String, module: ast::Module, stdlib: bool) {
         self.states.insert(name.clone(), State::Loading);
         self.stack.push(name.clone());
         for item in &module.items {
@@ -66,7 +67,7 @@ impl Loader<'_> {
         }
         self.stack.pop();
         self.states.insert(name.clone(), State::Done);
-        self.order.push(LoadedModule { name, ast: module });
+        self.order.push(LoadedModule { name, ast: module, stdlib });
     }
 
     fn follow(&mut self, import: &ast::ImportDecl) {
@@ -105,6 +106,7 @@ impl Loader<'_> {
         }
         let relative: PathBuf = import.path.iter().map(|p| p.name.as_str()).collect::<PathBuf>();
         let path = self.root.join(relative).with_extension(SOURCE_EXTENSION);
+        let mut stdlib = false;
         let (display, text) = if path.is_file() {
             match fs::read_to_string(&path) {
                 Ok(text) => (path.display().to_string(), text),
@@ -119,6 +121,7 @@ impl Loader<'_> {
                 }
             }
         } else if let Some(source) = lang_sema::stdlib::source(&name) {
+            stdlib = true;
             (lang_sema::stdlib::display_name(&name), source.to_string())
         } else {
             self.diags.push(
@@ -139,6 +142,6 @@ impl Loader<'_> {
         let file = self.sources.add(display, text);
         let tokens = lang_syntax::lex(file, &self.sources.get(file).text, self.diags);
         let module = lang_syntax::parse(&tokens, self.diags);
-        self.visit(name, module);
+        self.visit(name, module, stdlib);
     }
 }

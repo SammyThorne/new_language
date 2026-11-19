@@ -42,6 +42,12 @@ impl<'ctx> Codegen<'ctx, '_> {
             let text = self.value(&args[0]);
             return Some(self.json_decode(expr.ty, text));
         }
+        if op == Builtin::HttpServe {
+            let listener = self.value(&args[0]);
+            let handler = self.value(&args[1]);
+            self.http_serve(args[1].ty, listener, handler);
+            return None;
+        }
         if op == Builtin::NumConvert {
             let value = self.value(&args[0]);
             return Some(self.num_convert(args[0].ty, expr.ty, value));
@@ -473,9 +479,12 @@ impl<'ctx> Codegen<'ctx, '_> {
                 });
                 self.b.build_load(self.cx.bool_type(), result, "").must()
             }
-            Builtin::ListSortBy | Builtin::Input | Builtin::NumConvert | Builtin::JsonEncode | Builtin::JsonDecode => {
-                unreachable!("handled above")
-            }
+            Builtin::ListSortBy
+            | Builtin::Input
+            | Builtin::NumConvert
+            | Builtin::JsonEncode
+            | Builtin::JsonDecode
+            | Builtin::HttpServe => unreachable!("handled above"),
             Builtin::Freeze => match self.kind(args[0].ty) {
                 TyKind::List(_) => self.call_rt("lrt_list_copy", &[values[0]]).unwrap(),
                 _ => self.call_rt("lrt_dict_copy", &[values[0]]).unwrap(),
@@ -626,6 +635,33 @@ impl<'ctx> Codegen<'ctx, '_> {
         self.b.build_store(counter, next).must();
         self.b.build_unconditional_branch(header).must();
         self.b.position_at_end(exit);
+    }
+
+    /// `__http_serve(listener, handler)`: a C-ABI entry function that calls the handler, then
+    /// the runtime's server loop.
+    fn http_serve(
+        &mut self,
+        handler_ty: lang_sema::types::Ty,
+        listener: BasicValueEnum<'ctx>,
+        handler: BasicValueEnum<'ctx>,
+    ) {
+        let ptr = self.ptr_type();
+        let entry_type = self.cx.void_type().fn_type(&[ptr.into(), ptr.into(), self.cx.i64_type().into()], false);
+        let entry = self.module.add_function("http.entry", entry_type, Some(inkwell::module::Linkage::Private));
+        entry.add_attribute(inkwell::attributes::AttributeLoc::Function, self.nounwind);
+        self.in_function(entry, |this| {
+            let code = entry.get_nth_param(0).unwrap();
+            let env = entry.get_nth_param(1).unwrap();
+            let request = entry.get_nth_param(2).unwrap();
+            let pair = this.make_dyn(code.into_pointer_value(), env.into_pointer_value());
+            this.call_function_value(handler_ty, pair, &[request]);
+            this.b.build_return(None).must();
+        });
+        let pair = handler.into_struct_value();
+        let code = self.b.build_extract_value(pair, 0, "").must();
+        let env = self.b.build_extract_value(pair, 1, "").must();
+        let entry_ptr = entry.as_global_value().as_pointer_value();
+        self.call_rt("lrt_http_serve", &[listener, entry_ptr.into(), code, env]);
     }
 
     /// Run `body` for each index below `count`.

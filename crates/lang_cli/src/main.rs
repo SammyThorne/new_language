@@ -152,8 +152,10 @@ fn frontend(file: &Path, emit: Option<Emit>) -> Result<Option<(hir::Program, Sou
     let program = if diags.has_errors() {
         None
     } else {
-        let inputs: Vec<lang_sema::ModuleInput> =
-            modules.iter().map(|m| lang_sema::ModuleInput { name: m.name.clone(), ast: &m.ast }).collect();
+        let inputs: Vec<lang_sema::ModuleInput> = modules
+            .iter()
+            .map(|m| lang_sema::ModuleInput { name: m.name.clone(), ast: &m.ast, stdlib: m.stdlib })
+            .collect();
         lang_sema::check_modules(&inputs, &mut sources, &mut diags)
     };
     report(&display, &sources, &diags)?;

@@ -14,6 +14,7 @@
 pub mod builder;
 pub mod dict;
 pub mod gc;
+pub mod http;
 pub mod json;
 pub mod list;
 pub mod num;

@@ -159,7 +159,7 @@ impl Checker<'_, '_> {
         let func_ty = self.types.func(signature.params.iter().map(|p| p.ty).collect(), signature.ret);
         let name = &function.name.name;
         if !cx.scope.contains_key(name)
-            && let Some(kind) = self.global_kind(name)
+            && let Some(kind) = self.local_conflict(name)
         {
             self.error(Diagnostic::error(
                 codes::DUPLICATE_DEFINITION,

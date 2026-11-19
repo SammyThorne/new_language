@@ -229,7 +229,9 @@ The mapping is overridable with `server.on_error(handler)`.
 
 ### Implementation
 
-Prototype (M8), inside the runtime:
+As built in M8 (D49, D50): the request parser, connection handling, limits and timeouts are in the runtime, written by hand rather than with `httparse`; the router, `Request`, `Response`, middleware and error mapping are written in Weby in `stdlib/http.lang`, with routes tried in order rather than through a radix tree. `http.Error(status, message)` is a function returning the struct `http.HttpError` (D51). `server.bind(addr)` and `server.serve()` split `listen` in two, so a program can learn its port (`":0"` picks a free one); `server.handle(req)` with `http.test_request(...)` answers a request without a socket, for tests.
+
+The original plan for the prototype, inside the runtime:
 
 - One accept loop. Each connection is handled by a task (stage 1: thread).
 - Request parsing with the `httparse` crate into a reusable per-connection buffer. Headers are exposed to Weby lazily: a header is turned into a Weby string only when asked for.

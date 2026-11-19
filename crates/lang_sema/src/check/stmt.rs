@@ -490,7 +490,7 @@ impl Checker<'_, '_> {
 
     fn bind_loop_name(&mut self, cx: &mut FnCx, name: &ast::Ident, ty: Ty) -> Option<LocalId> {
         if !cx.scope.contains_key(&name.name)
-            && let Some(kind) = self.global_kind(&name.name)
+            && let Some(kind) = self.local_conflict(&name.name)
         {
             self.error(Diagnostic::error(
                 codes::NOT_A_FUNCTION,
@@ -615,7 +615,7 @@ impl Checker<'_, '_> {
         value: &ast::Expr,
     ) -> Vec<hir::Stmt> {
         if !cx.scope.contains_key(&name.name)
-            && let Some(kind) = self.global_kind(&name.name)
+            && let Some(kind) = self.local_conflict(&name.name)
         {
             self.error(Diagnostic::error(
                 codes::NOT_A_FUNCTION,
@@ -720,7 +720,7 @@ impl Checker<'_, '_> {
     fn declare_failed_targets(&mut self, cx: &mut FnCx, targets: &[ast::Target]) {
         for target in targets {
             if let ast::TargetKind::Name(name) = &target.kind
-                && self.global_kind(&name.name).is_none()
+                && self.local_conflict(&name.name).is_none()
             {
                 let local = match cx.scope.get(&name.name) {
                     Some(&local) => local,
@@ -770,7 +770,7 @@ impl Checker<'_, '_> {
             match &target.kind {
                 ast::TargetKind::Name(name) => {
                     if !cx.scope.contains_key(&name.name)
-                        && let Some(kind) = self.global_kind(&name.name)
+                        && let Some(kind) = self.local_conflict(&name.name)
                     {
                         self.error(Diagnostic::error(
                             codes::NOT_A_FUNCTION,
@@ -954,7 +954,7 @@ impl Checker<'_, '_> {
                     return Vec::new();
                 }
                 if !cx.scope.contains_key(&name.name) {
-                    if let Some(kind) = self.global_kind(&name.name) {
+                    if let Some(kind) = self.local_conflict(&name.name) {
                         self.error(Diagnostic::error(
                             codes::NOT_A_FUNCTION,
                             format!("cannot assign to `{}`, which is {kind}", name.name),

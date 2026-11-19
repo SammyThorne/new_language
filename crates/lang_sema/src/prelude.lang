@@ -22,6 +22,10 @@ trait Copy:
 trait Error:
     def message(self) -> str
 
+    def status(self) -> int:
+        """The HTTP status of a response reporting this error: 500 unless the error says otherwise."""
+        return 500
+
 trait AddNumber:
     def add(self, other: Self) -> Self
 

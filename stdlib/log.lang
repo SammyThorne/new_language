@@ -1,0 +1,30 @@
+"""
+Levelled logging to standard error, one line per message with a UTC timestamp:
+
+    2026-11-18T12:00:00.123Z INFO  listening on port 8080
+
+The level is `info` unless the `LOG` environment variable (with the language's prefix) or `log.set_level` says
+`debug`, `warn`, `error` or `off`.
+"""
+
+@extern("lrt_log_write")
+def write(level: str, message: str)
+
+@extern("lrt_log_set_level")
+def set_level_raw(level: str)
+
+pub def debug(message: str):
+    write("debug", message)
+
+pub def info(message: str):
+    write("info", message)
+
+pub def warn(message: str):
+    write("warn", message)
+
+pub def error(message: str):
+    write("error", message)
+
+pub def set_level(level: str):
+    """The lowest level to write: `debug`, `info`, `warn`, `error` or `off`."""
+    set_level_raw(level)

@@ -22,6 +22,7 @@ mod closures;
 mod concurrency;
 mod expr;
 mod generics;
+mod http;
 mod items;
 mod json;
 mod modules;
@@ -71,6 +72,7 @@ const BUILTIN_FUNCTIONS: &[&str] = &[
     "frozendict",
     "__json_encode",
     "__json_decode",
+    "__http_serve",
 ];
 
 /// Constructors of the built-in enums.
@@ -128,6 +130,8 @@ const KNOWN_TYPES: &[&str] = &[
 pub struct ModuleInput<'a> {
     pub name: String,
     pub ast: &'a ast::Module,
+    /// A standard library module, which may reuse the prelude's names (`http.Error`).
+    pub stdlib: bool,
 }
 
 /// Check a single-file program together with the prelude, which is added to `sources`. Returns
@@ -138,7 +142,7 @@ pub fn check(
     module_name: &str,
     diags: &mut Diagnostics,
 ) -> Option<hir::Program> {
-    check_modules(&[ModuleInput { name: module_name.to_string(), ast: module }], sources, diags)
+    check_modules(&[ModuleInput { name: module_name.to_string(), ast: module, stdlib: false }], sources, diags)
 }
 
 /// Check a program made of several modules. The last module is the entry point, with `main`;
@@ -151,7 +155,8 @@ pub fn check_modules(inputs: &[ModuleInput], sources: &mut SourceMap, diags: &mu
     assert!(!prelude_diags.has_errors(), "the prelude does not parse");
 
     let errors_before = diags.error_count();
-    let mut checker = Checker::new(diags, prelude_file);
+    let mut checker = Checker::new(diags, prelude_file, sources);
+    checker.stdlib_modules = std::iter::once(true).chain(inputs.iter().map(|m| m.stdlib)).collect();
     let modules: Vec<(String, &ast::Module)> = std::iter::once((PRELUDE_NAME.to_string(), &prelude))
         .chain(inputs.iter().map(|m| (m.name.clone(), m.ast)))
         .collect();
@@ -167,10 +172,12 @@ pub fn check_modules(inputs: &[ModuleInput], sources: &mut SourceMap, diags: &mu
     }
     checker.import_all(&modules);
     checker.find_json_types();
+    checker.find_http_types();
     checker.resolve_declarations();
     checker.check_consts();
     checker.register_derives();
     checker.collect_functions();
+    checker.check_routes();
     checker.finish_generic_setup();
     checker.check_impl_requirements();
     checker.check_derives();
@@ -221,6 +228,8 @@ enum Global {
     GenericEnum(usize),
     /// An imported module, by index.
     Module(usize),
+    /// `type Name = T`, by index into the aliases.
+    TypeAlias(usize),
     /// A name whose lookup already failed and was reported.
     Missing,
 }
@@ -408,6 +417,8 @@ struct Checker<'a, 'm> {
     trait_items: Vec<(TraitId, &'m ast::TraitDecl)>,
     const_items: Vec<(usize, &'m ast::ConstDecl)>,
     fn_items: Vec<(&'m ast::Function, FnSlot)>,
+    /// Type aliases and what they stand for, once resolved (`Err(true)` while resolving).
+    aliases: Vec<(&'m ast::TypeAliasDecl, Result<Ty, bool>)>,
     impl_items: Vec<&'m ast::ImplDecl>,
     builtins: Option<hir::BuiltinTraits>,
     parse_error: Option<StructId>,
@@ -445,6 +456,19 @@ struct Checker<'a, 'm> {
     file_module: HashMap<FileId, usize>,
     /// `json.Value` and `json.JsonError`, when the program imports `json`.
     json: Option<hir::JsonTypes>,
+    /// For adding the source of generated code, such as the adapters of HTTP routes.
+    sources: &'a mut SourceMap,
+    /// By module index: whether it is part of the standard library.
+    stdlib_modules: Vec<bool>,
+    /// The `http` module's types, when the program imports it.
+    http: Option<http::HttpTypes>,
+    /// The `@http` routes of each type's methods, and of annotated functions.
+    routes: HashMap<Ty, Vec<http::Route>>,
+    function_routes: HashMap<FuncId, http::Route>,
+    /// A counter for names of generated code.
+    generated: usize,
+    /// The files of generated source.
+    generated_files: Vec<FileId>,
 }
 
 /// Per-function state while checking a body.
@@ -623,7 +647,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 }
 
 impl<'a, 'm> Checker<'a, 'm> {
-    fn new(diags: &'a mut Diagnostics, prelude_file: FileId) -> Self {
+    fn new(diags: &'a mut Diagnostics, prelude_file: FileId, sources: &'a mut SourceMap) -> Self {
         Checker {
             diags: Sink { out: diags, quiet: false, speculative: false, suppressed: None },
             types: Types::new(),
@@ -645,6 +669,7 @@ impl<'a, 'm> Checker<'a, 'm> {
             trait_items: Vec::new(),
             const_items: Vec::new(),
             fn_items: Vec::new(),
+            aliases: Vec::new(),
             impl_items: Vec::new(),
             builtins: None,
             parse_error: None,
@@ -668,6 +693,13 @@ impl<'a, 'm> Checker<'a, 'm> {
             exports: Vec::new(),
             file_module: HashMap::new(),
             json: None,
+            sources,
+            stdlib_modules: Vec::new(),
+            http: None,
+            routes: HashMap::new(),
+            function_routes: HashMap::new(),
+            generated: 0,
+            generated_files: Vec::new(),
         }
     }
 
@@ -944,6 +976,10 @@ impl<'a, 'm> Checker<'a, 'm> {
                     self.no_type_args(other, args, span);
                     self.enums[id.0].ty
                 }
+                Some(Global::TypeAlias(index)) => {
+                    self.no_type_args(other, args, span);
+                    self.alias_type_of(index, span)
+                }
                 Some(Global::GenericStruct(index) | Global::GenericEnum(index)) => {
                     let count = self.generic_types[index].params.len();
                     if args.len() != count {
@@ -989,6 +1025,30 @@ impl<'a, 'm> Checker<'a, 'm> {
                     Ty::ERROR
                 }
             },
+        }
+    }
+
+    /// What a type alias stands for, resolved in the alias's own module on first use.
+    fn alias_type_of(&mut self, index: usize, span: Span) -> Ty {
+        let (decl, state) = (self.aliases[index].0, self.aliases[index].1);
+        match state {
+            Ok(ty) => ty,
+            Err(true) => {
+                self.error(Diagnostic::error(
+                    codes::UNKNOWN_TYPE,
+                    format!("type `{}` is defined in terms of itself", decl.name.name),
+                    span,
+                    "circular",
+                ));
+                Ty::ERROR
+            }
+            Err(false) => {
+                self.aliases[index].1 = Err(true);
+                let module = self.module_of(decl.name.span);
+                let ty = self.in_module(module, |this| this.resolve_type(&decl.ty));
+                self.aliases[index].1 = Ok(ty);
+                ty
+            }
         }
     }
 
@@ -1315,6 +1375,15 @@ impl<'a, 'm> Checker<'a, 'm> {
         hir::Expr { kind: hir::ExprKind::Ok(Box::new(none)), ty: ret, span }
     }
 
+    /// What a global name is, if a local variable may not reuse it: types, traits, modules and
+    /// the built-in constructors. Functions and constants may be shadowed, as in Python.
+    fn local_conflict(&self, name: &str) -> Option<&'static str> {
+        match self.globals.get(name) {
+            Some((Global::Function(_) | Global::GenericFunction(_) | Global::Const(_) | Global::Missing, _)) => None,
+            _ => self.global_kind(name),
+        }
+    }
+
     /// What a top-level name is, for error messages.
     fn global_kind(&self, name: &str) -> Option<&'static str> {
         match self.globals.get(name) {
@@ -1327,6 +1396,7 @@ impl<'a, 'm> Checker<'a, 'm> {
             Some((Global::GenericStruct(_), _)) => Some("a struct"),
             Some((Global::GenericEnum(_), _)) => Some("an enum"),
             Some((Global::Module(_), _)) => Some("a module"),
+            Some((Global::TypeAlias(_), _)) => Some("a type"),
             Some((Global::Missing, _)) => Some("unknown"),
             // Built-in functions can be shadowed by local variables, as in Python.
             None if BUILTIN_CONSTRUCTORS.contains(&name) => Some("a built-in function"),

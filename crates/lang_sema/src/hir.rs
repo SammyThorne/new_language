@@ -612,4 +612,7 @@ pub enum Builtin {
     JsonEncode,
     /// Parse JSON text into the `Ok` type of the result type, or a `json.JsonError`.
     JsonDecode,
+    /// `__http_serve(listener, handler)`: serve connections, calling `handler` with each
+    /// request's handle, until shutdown.
+    HttpServe,
 }

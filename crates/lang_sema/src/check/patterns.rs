@@ -532,7 +532,7 @@ impl Checker<'_, '_> {
     /// Declare (or reuse) the local a pattern binds.
     fn bind(&mut self, cx: &mut FnCx, name: &ast::Ident, ty: Ty) -> Option<LocalId> {
         if !cx.scope.contains_key(&name.name)
-            && let Some(kind) = self.global_kind(&name.name)
+            && let Some(kind) = self.local_conflict(&name.name)
         {
             self.error(Diagnostic::error(
                 codes::BAD_PATTERN,

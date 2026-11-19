@@ -1,0 +1,490 @@
+"""
+An HTTP/1.1 server: routes with path parameters, middleware, groups, JSON helpers, and the
+mapping of errors to responses. Routes can be registered by calling methods (the "call style"
+below) or declared with `@http.get(...)` annotations and `server.mount(value)`.
+
+    import http
+
+    def hello(req: http.Request) -> Result[http.Response]:
+        return http.text(f"hello {req.param('name')}")
+
+    def main():
+        server = http.Server()
+        server.get("/hello/{name}", hello)
+        server.listen(":8080").unwrap()
+
+A handler returns `Result[http.Response]`. An error becomes a response: an `http.Error(404,
+"...")` keeps its status, a JSON decoding error is a 400, and anything else is a 500 that is
+logged, with a generic message for the client. `server.on_error(...)` replaces that mapping.
+"""
+
+import json as jsonlib
+import log
+
+@extern("lrt_http_listen")
+def listen_raw(address: str) -> int
+
+@extern("lrt_http_port")
+def port_raw(listener: int) -> int
+
+@extern("lrt_http_shutdown")
+def shutdown_raw()
+
+@extern("lrt_http_set_max_body")
+def set_max_body_raw(bytes: int)
+
+@extern("lrt_http_req_method")
+def req_method(handle: int) -> str
+
+@extern("lrt_http_req_path")
+def req_path(handle: int) -> str
+
+@extern("lrt_http_req_remote")
+def req_remote(handle: int) -> str
+
+@extern("lrt_http_req_query")
+def req_query(handle: int, name: str) -> str?
+
+@extern("lrt_http_req_header")
+def req_header(handle: int, name: str) -> str?
+
+@extern("lrt_http_req_body")
+def req_body(handle: int) -> str?
+
+@extern("lrt_http_respond")
+def respond_raw(handle: int, status: int, headers: str, body: str)
+
+@extern("lrt_io_error")
+def last_error() -> str
+
+# ---- errors -------------------------------------------------------------------------------
+
+pub struct HttpError:
+    """An error that becomes a response with its status: `Err(http.Error(404, "not found"))`."""
+    status: int
+    message: str
+
+impl Error for HttpError:
+    def message(self) -> str:
+        return self.message
+
+    def status(self) -> int:
+        return self.status
+
+impl Display for HttpError:
+    def to_str(self) -> str:
+        return f"{self.status} {self.message}"
+
+pub def Error(status: int, message: str) -> HttpError:
+    """An error with an HTTP status, for handlers to return."""
+    return HttpError(status, message)
+
+# ---- requests -----------------------------------------------------------------------------
+
+pub struct Request:
+    """
+    A request being handled. `method` and `path` are filled in; the rest is read from the
+    connection when asked for.
+    """
+    method: str
+    path: str
+    priv handle: int = -1
+    priv params: dict[str, str] = {}
+    priv body_text: str? = None
+
+impl Request:
+    def param(self, name: str) -> str:
+        """A `{name}` segment of the route's path, or `""`."""
+        return self.params.get_or(name, "")
+
+    def param_int(self, name: str) -> Result[int, HttpError]:
+        """A path segment as an `int`; a 400 error if it is not one."""
+        match int.parse(self.param(name)):
+            case Ok(value):
+                return value
+            case Err(_):
+                return Err(HttpError(400, f"path parameter `{name}` must be an integer"))
+
+    def param_float(self, name: str) -> Result[float, HttpError]:
+        match float.parse(self.param(name)):
+            case Ok(value):
+                return value
+            case Err(_):
+                return Err(HttpError(400, f"path parameter `{name}` must be a number"))
+
+    def param_bool(self, name: str) -> Result[bool, HttpError]:
+        return parse_bool(self.param(name), f"path parameter `{name}`")
+
+    def query(self, name: str) -> str?:
+        """A query parameter (`?name=value`), decoded, or `None`."""
+        if self.handle < 0:
+            return None
+        return req_query(self.handle, name)
+
+    def header(self, name: str) -> str?:
+        """A header's value, or `None`. Header names are case-insensitive."""
+        if self.handle < 0:
+            return None
+        return req_header(self.handle, name)
+
+    def text(self) -> Result[str, HttpError]:
+        """The body as text; a 400 error if it is not UTF-8."""
+        match self.body_text:
+            case Some(text):
+                return text
+            case None:
+                pass
+        if self.handle < 0:
+            return ""
+        match req_body(self.handle):
+            case Some(text):
+                self.body_text = text
+                return text
+            case None:
+                return Err(HttpError(400, "the request body is not UTF-8 text"))
+
+    def json(self) -> Result[jsonlib.Value, HttpError]:
+        """The body parsed as JSON of any shape; a 400 error if it is not JSON."""
+        text = self.text()?
+        match jsonlib.parse(text):
+            case Ok(value):
+                return value
+            case Err(error):
+                return Err(HttpError(400, f"invalid JSON body: {error.message()}"))
+
+    def remote_addr(self) -> str:
+        """The client's address and port."""
+        if self.handle < 0:
+            return ""
+        return req_remote(self.handle)
+
+pub def test_request(method: str, path: str, body: str = "") -> Request:
+    """A request that is not from a connection, for calling `server.handle(...)` in tests."""
+    request = Request(method, path)
+    request.body_text = body
+    return request
+
+def parse_bool(text: str, what: str) -> Result[bool, HttpError]:
+    lowered = text.lower()
+    if lowered == "true" or lowered == "1":
+        return True
+    if lowered == "false" or lowered == "0":
+        return False
+    return Err(HttpError(400, f"{what} must be `true` or `false`"))
+
+pub def body[T: FromJson](req: Request) -> Result[T, HttpError]:
+    """The body decoded as JSON into a `T`; a 400 error naming the problem if it does not fit."""
+    text = req.text()?
+    match jsonlib.decode[T](text):
+        case Ok(value):
+            return value
+        case Err(error):
+            return Err(HttpError(400, f"invalid JSON body: {error.message()}"))
+
+pub def query_str(req: Request, name: str) -> Result[str, HttpError]:
+    match req.query(name):
+        case Some(text):
+            return text
+        case None:
+            return Err(HttpError(400, f"missing query parameter `{name}`"))
+
+pub def query_str_opt(req: Request, name: str) -> Result[str?, HttpError]:
+    return Ok(req.query(name))
+
+pub def query_int(req: Request, name: str) -> Result[int, HttpError]:
+    text = query_str(req, name)?
+    match int.parse(text):
+        case Ok(value):
+            return value
+        case Err(_):
+            return Err(HttpError(400, f"query parameter `{name}` must be an integer"))
+
+pub def query_int_opt(req: Request, name: str) -> Result[int?, HttpError]:
+    match req.query(name):
+        case Some(_):
+            value = query_int(req, name)?
+            return Ok(Some(value))
+        case None:
+            return Ok(None)
+
+pub def query_float(req: Request, name: str) -> Result[float, HttpError]:
+    text = query_str(req, name)?
+    match float.parse(text):
+        case Ok(value):
+            return value
+        case Err(_):
+            return Err(HttpError(400, f"query parameter `{name}` must be a number"))
+
+pub def query_float_opt(req: Request, name: str) -> Result[float?, HttpError]:
+    match req.query(name):
+        case Some(_):
+            value = query_float(req, name)?
+            return Ok(Some(value))
+        case None:
+            return Ok(None)
+
+pub def query_bool(req: Request, name: str) -> Result[bool, HttpError]:
+    text = query_str(req, name)?
+    return parse_bool(text, f"query parameter `{name}`")
+
+pub def query_bool_opt(req: Request, name: str) -> Result[bool?, HttpError]:
+    match req.query(name):
+        case Some(text):
+            value = parse_bool(text, f"query parameter `{name}`")?
+            return Ok(Some(value))
+        case None:
+            return Ok(None)
+
+# ---- responses ----------------------------------------------------------------------------
+
+pub struct Response:
+    status: int = 200
+    body: str = ""
+    content_type: str = "text/plain; charset=utf-8"
+    headers: dict[str, str] = {}
+
+impl Response:
+    def with_header(self, name: str, value: str) -> Response:
+        """Add a header, and return the response for chaining."""
+        self.headers[name] = value
+        return self
+
+pub def text(body: str, status: int = 200) -> Response:
+    return Response(status, body, "text/plain; charset=utf-8")
+
+pub def html(body: str, status: int = 200) -> Response:
+    return Response(status, body, "text/html; charset=utf-8")
+
+pub def json[T: ToJson](value: T, status: int = 200) -> Response:
+    """A JSON response."""
+    return Response(status, jsonlib.encode(value), "application/json")
+
+pub def error(status: int, message: str) -> Response:
+    """A JSON error response: `{"error": message}`."""
+    return Response(status, jsonlib.encode({"error": message}), "application/json")
+
+pub def redirect(location: str, status: int = 302) -> Response:
+    return Response(status, "", "").with_header("Location", location)
+
+pub def no_content() -> Response:
+    return Response(204, "", "")
+
+# ---- routing ------------------------------------------------------------------------------
+
+pub type Handler = def(Request) -> Result[Response]
+"""A request handler: every route, and the rest of the chain that middleware calls."""
+
+pub type Middleware = def(Request, Handler) -> Result[Response]
+"""Code that runs around handlers: it gets the request and the next handler."""
+
+struct Route:
+    method: str
+    pattern: str
+    segments: list[str]
+    handler: Handler
+
+def split_path(path: str) -> list[str]:
+    return [part for part in path.split("/") if part != ""]
+
+def match_route(pattern: list[str], path: list[str]) -> dict[str, str]?:
+    """The path parameters if `path` fits the pattern's segments."""
+    params: dict[str, str] = {}
+    for i in range(len(pattern)):
+        part = pattern[i]
+        if part.starts_with("{") and part.ends_with("...}"):
+            params[part[1:len(part) - 4]] = "/".join(path[i:])
+            return params
+        if i >= len(path):
+            return None
+        if part.starts_with("{") and part.ends_with("}"):
+            params[part[1:len(part) - 1]] = path[i]
+        elif part != path[i]:
+            return None
+    if len(path) != len(pattern):
+        return None
+    return params
+
+def wrap(middleware: Middleware, next: Handler) -> Handler:
+    return lambda req: middleware(req, next)
+
+pub struct Server:
+    """
+    Routes, middleware and settings. Register routes, then call `listen`. Request handlers run
+    concurrently, one task per connection, so handlers and mounted values must be shareable.
+    """
+    max_body: int = 8388608
+    priv routes: list[Route] = []
+    priv middleware: list[Middleware] = []
+    priv error_handler: (def(Request, HttpError) -> Response)? = None
+    priv chain: Handler? = None
+    priv listener: int = -1
+
+impl Server:
+    def route(self, method: str, path: str, handler: Handler):
+        """Register a handler for a method and a path such as `/todos/{id}` or `/files/{rest...}`."""
+        self.routes.append(Route(method.upper(), path, split_path(path), handler))
+        self.chain = None
+
+    def get(self, path: str, handler: Handler):
+        self.route("GET", path, handler)
+
+    def post(self, path: str, handler: Handler):
+        self.route("POST", path, handler)
+
+    def put(self, path: str, handler: Handler):
+        self.route("PUT", path, handler)
+
+    def patch(self, path: str, handler: Handler):
+        self.route("PATCH", path, handler)
+
+    def delete(self, path: str, handler: Handler):
+        self.route("DELETE", path, handler)
+
+    def head(self, path: str, handler: Handler):
+        self.route("HEAD", path, handler)
+
+    def options(self, path: str, handler: Handler):
+        self.route("OPTIONS", path, handler)
+
+    def use(self, middleware: Middleware):
+        """Add middleware, which runs around every route, first added outermost."""
+        self.middleware.append(middleware)
+        self.chain = None
+
+    def group(self, prefix: str) -> Group:
+        """Routes under a common path prefix, with their own middleware."""
+        return Group(self, prefix)
+
+    def on_error(self, handler: def(Request, HttpError) -> Response):
+        """Replace how errors returned by handlers become responses."""
+        self.error_handler = handler
+
+    def dispatch(self, req: Request) -> Result[Response]:
+        segments = split_path(req.path)
+        allowed: list[str] = []
+        for route in self.routes:
+            match match_route(route.segments, segments):
+                case Some(params):
+                    if route.method == req.method or (req.method == "HEAD" and route.method == "GET"):
+                        req.params = params
+                        return route.handler(req)
+                    if route.method not in allowed:
+                        allowed.append(route.method)
+                case None:
+                    pass
+        if len(allowed) > 0:
+            return error(405, "method not allowed").with_header("Allow", ", ".join(allowed))
+        return error(404, "not found")
+
+    def handle(self, req: Request) -> Response:
+        """Answer one request: route it through the middleware and map errors to responses."""
+        handler = self.compose()
+        match handler(req):
+            case Ok(response):
+                return response
+            case Err(problem):
+                status = problem.status()
+                if status >= 500:
+                    log.error(f"{req.method} {req.path}: {problem.message()}")
+                message = problem.message() if status < 500 else "internal server error"
+                failure = HttpError(status, message)
+                match self.error_handler:
+                    case Some(custom):
+                        return custom(req, failure)
+                    case None:
+                        return error(status, message)
+
+    def compose(self) -> Handler:
+        match self.chain:
+            case Some(chain):
+                return chain
+            case None:
+                pass
+        server = self
+        handler: Handler = lambda req: server.dispatch(req)
+        for i in range(len(self.middleware) - 1, -1, -1):
+            handler = wrap(self.middleware[i], handler)
+        self.chain = handler
+        return handler
+
+    def bind(self, address: str) -> Result[int, HttpError]:
+        """Start listening on `host:port` (`":8080"` for all interfaces, `":0"` for any free
+        port). Returns the port. Then call `serve`."""
+        listener = listen_raw(address)
+        if listener < 0:
+            return Err(HttpError(500, last_error()))
+        self.listener = listener
+        set_max_body_raw(self.max_body)
+        return port_raw(listener)
+
+    def serve(self):
+        """Serve requests until the program is interrupted (SIGINT or SIGTERM) or `stop` is
+        called; requests in progress finish first."""
+        self.compose()
+        server = self
+        def serve_one(handle: int):
+            req = Request(req_method(handle), req_path(handle), handle)
+            response = server.handle(req)
+            headers = f"Content-Type: {response.content_type}\r\n" if response.content_type != "" else ""
+            for name, value in response.headers.items():
+                headers = headers + f"{name}: {value}\r\n"
+            respond_raw(handle, response.status, headers, response.body)
+        __http_serve(self.listener, serve_one)
+
+    def listen(self, address: str) -> Result[None, HttpError]:
+        """`bind` and `serve`."""
+        port = self.bind(address)?
+        log.info(f"listening on port {port}")
+        self.serve()
+
+    def stop(self):
+        """Ask `serve` to finish, as SIGTERM does."""
+        shutdown_raw()
+
+pub struct Group:
+    priv server: Server
+    priv prefix: str
+    priv middleware: list[Middleware] = []
+
+impl Group:
+    def route(self, method: str, path: str, handler: Handler):
+        wrapped = handler
+        for i in range(len(self.middleware) - 1, -1, -1):
+            wrapped = wrap(self.middleware[i], wrapped)
+        self.server.route(method, self.prefix + path, wrapped)
+
+    def get(self, path: str, handler: Handler):
+        self.route("GET", path, handler)
+
+    def post(self, path: str, handler: Handler):
+        self.route("POST", path, handler)
+
+    def put(self, path: str, handler: Handler):
+        self.route("PUT", path, handler)
+
+    def patch(self, path: str, handler: Handler):
+        self.route("PATCH", path, handler)
+
+    def delete(self, path: str, handler: Handler):
+        self.route("DELETE", path, handler)
+
+    def use(self, middleware: Middleware):
+        """Middleware for the routes registered on this group after this call."""
+        self.middleware.append(middleware)
+
+    def group(self, prefix: str) -> Group:
+        nested = Group(self.server, self.prefix + prefix)
+        for middleware in self.middleware:
+            nested.middleware.append(middleware)
+        return nested
+
+# ---- adapters for annotated routes --------------------------------------------------------
+
+pub def reply_json[T: ToJson](value: T, status: int) -> Result[Response]:
+    return Ok(json(value, status))
+
+pub def reply_text(value: str, status: int) -> Result[Response]:
+    return Ok(text(value, status))
+
+pub def reply_empty(status: int) -> Result[Response]:
+    return Ok(Response(status, "", ""))

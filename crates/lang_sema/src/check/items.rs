@@ -23,6 +23,12 @@ impl<'m> Checker<'_, 'm> {
             || BUILTIN_TYPES.contains(&name.name.as_str())
             || KNOWN_TYPES.contains(&name.name.as_str());
         let from_prelude = self.globals.get(&name.name).is_some_and(|(_, span)| span.file == self.prelude_file);
+        let stdlib = self.stdlib_modules.get(self.current_module).copied().unwrap_or(false) && self.current_module != 0;
+        if from_prelude && stdlib && !builtin {
+            // A standard library module may reuse a prelude name, as `http.Error` does.
+            self.globals.remove(&name.name);
+            return true;
+        }
         if builtin || from_prelude {
             self.error(Diagnostic::error(
                 codes::DUPLICATE_DEFINITION,
@@ -67,7 +73,8 @@ impl<'m> Checker<'_, 'm> {
                         span: decl.name.span,
                         ty,
                         fields: Vec::new(),
-                        frozen: false,
+                        // Known now, because sharing checks on field types need it.
+                        frozen: decl.annotations.iter().any(|a| a.name.name == "frozen"),
                         generic: false,
                         json_strict: false,
                     });
@@ -127,6 +134,15 @@ impl<'m> Checker<'_, 'm> {
                 ast::Item::Function(function) => self.declare_function(function),
                 ast::Item::Impl(imp) => self.impl_items.push(imp),
                 ast::Item::Import(_) => {}
+                ast::Item::TypeAlias(alias) => {
+                    if !self.claim_global(&alias.name) {
+                        continue;
+                    }
+                    let index = self.aliases.len();
+                    self.aliases.push((alias, Err(false)));
+                    self.globals.insert(alias.name.name.clone(), (Global::TypeAlias(index), alias.name.span));
+                    self.export(&alias.name, Global::TypeAlias(index), alias.visibility);
+                }
             }
         }
     }
@@ -588,7 +604,8 @@ impl<'m> Checker<'_, 'm> {
     /// Check a function's annotations; returns the C symbol for `@extern`.
     fn function_annotations(&mut self, function: &ast::Function, signature: &Signature) -> Option<String> {
         for annotation in &function.annotations {
-            if annotation.name.name != "extern" {
+            // Routes are checked once every signature is known.
+            if annotation.name.name != "extern" && !annotation.name.name.starts_with("http.") {
                 self.error(
                     Diagnostic::error(
                         codes::BAD_ANNOTATION,
@@ -601,6 +618,18 @@ impl<'m> Checker<'_, 'm> {
             }
         }
         self.extern_symbol(function, signature)
+    }
+
+    /// What a name in `impl Name for ...` refers to: a trait in scope, or else a prelude trait
+    /// whose name the module reuses for something else (`impl Error for HttpError` in `http`).
+    pub(super) fn trait_named(&self, name: &str) -> Option<Global> {
+        match self.globals.get(name) {
+            Some(&(global @ Global::Trait(_), _)) => Some(global),
+            other => match self.exports[0].get(name) {
+                Some(&(global @ Global::Trait(_), _, _)) => Some(global),
+                _ => other.map(|(g, _)| *g),
+            },
+        }
     }
 
     fn impl_target(&mut self, target: &ast::Ident) -> Option<Ty> {
@@ -663,8 +692,8 @@ impl<'m> Checker<'_, 'm> {
         let type_name = imp.target.name.clone();
         match &imp.trait_name {
             None => self.collect_inherent(imp, target, &type_name, &[], BodyMode::Normal),
-            Some(trait_name) => match self.globals.get(&trait_name.name) {
-                Some(&(Global::Trait(trait_id), _)) => {
+            Some(trait_name) => match self.trait_named(&trait_name.name) {
+                Some(Global::Trait(trait_id)) => {
                     self.collect_trait_impl(imp, trait_id, target, &type_name, &[], BodyMode::Normal)
                 }
                 _ => {
@@ -733,7 +762,7 @@ impl<'m> Checker<'_, 'm> {
             let mut signature = self.signature(method, &format!("{type_name}.{name}"), receiver);
             signature.private = method.visibility == ast::Visibility::Priv;
             self.self_ty = None;
-            if let Some(annotation) = method.annotations.first() {
+            if let Some(annotation) = method.annotations.iter().find(|a| !a.name.name.starts_with("http.")) {
                 self.error(Diagnostic::error(
                     codes::BAD_ANNOTATION,
                     format!("annotation `@{}` is not allowed on a method", annotation.name.name),

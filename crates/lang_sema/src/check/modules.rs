@@ -271,13 +271,28 @@ impl<'m> Checker<'_, 'm> {
         );
     }
 
-    /// Report constructing a struct with `priv` fields outside its file.
-    pub(super) fn check_constructible(&mut self, id: crate::types::StructId, span: Span) -> bool {
+    /// Report constructing a struct outside its file when a `priv` field would need a value:
+    /// one without a default, or one the arguments give.
+    pub(super) fn check_constructible(&mut self, id: crate::types::StructId, args: &[ast::Arg], span: Span) -> bool {
         let info = &self.structs[id.0];
         if self.module_of(info.span) == self.current_module {
             return true;
         }
-        let Some(field) = info.fields.iter().find(|f| f.private) else { return true };
+        let given = |index: usize, name: &str| {
+            args.iter().enumerate().any(|(i, a)| match &a.name {
+                Some(keyword) => keyword.name == name,
+                None => i == index,
+            })
+        };
+        let Some(field) = info
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(i, f)| f.private && (f.default.is_none() || given(*i, &f.name)))
+            .map(|(_, f)| f)
+        else {
+            return true;
+        };
         let (struct_name, field_name, field_span) = (info.name.clone(), field.name.clone(), field.span);
         let module = self.module_names[self.module_of(info.span)].clone();
         self.error(
@@ -444,7 +459,8 @@ impl<'m> Checker<'_, 'm> {
             | Global::Enum(_)
             | Global::Trait(_)
             | Global::GenericStruct(_)
-            | Global::GenericEnum(_) => {
+            | Global::GenericEnum(_)
+            | Global::TypeAlias(_) => {
                 let _ = cx;
                 let help = match global {
                     Global::Enum(_) | Global::GenericEnum(_) => {

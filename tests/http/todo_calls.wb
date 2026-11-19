@@ -1,0 +1,95 @@
+# Milestone 8 exit program: the same todo service in the call style, with handlers registered
+# by calling `server.get(...)` and friends, a route group, and custom error handling.
+
+import http
+import io
+import json
+
+@derive(Json)
+@frozen
+struct Todo:
+    id: int
+    title: str
+    done: bool = False
+
+@derive(Json)
+@frozen
+struct NewTodo:
+    title: str
+
+@derive(Json)
+@frozen
+struct Update:
+    title: str?
+    done: bool?
+
+@frozen
+struct Store:
+    todos: Mutex[dict[int, Todo]]
+    next_id: Atomic
+
+impl Store:
+    def list(self, req: http.Request) -> Result[http.Response]:
+        limit = http.query_int_opt(req, "limit")?.unwrap_or(50)
+        done = http.query_bool_opt(req, "done")?
+        with self.todos.lock() as todos:
+            matching = [t for t in todos.values() if done is None or t.done == done]
+            return http.json(matching[:limit])
+
+    def create(self, req: http.Request) -> Result[http.Response]:
+        body = http.body[NewTodo](req)?
+        if body.title.strip() == "":
+            return Err(http.Error(422, "the title is empty"))
+        todo = Todo(id=self.next_id.increment(), title=body.title)
+        with self.todos.lock() as todos:
+            todos[todo.id] = todo
+        return http.json(todo, 201)
+
+    def get(self, req: http.Request) -> Result[http.Response]:
+        id = req.param_int("id")?
+        with self.todos.lock() as todos:
+            match todos.get(id):
+                case Some(todo):
+                    return http.json(todo)
+                case None:
+                    return Err(http.Error(404, "todo not found"))
+
+    def update(self, req: http.Request) -> Result[http.Response]:
+        id = req.param_int("id")?
+        body = http.body[Update](req)?
+        with self.todos.lock() as todos:
+            match todos.get(id):
+                case Some(old):
+                    updated = Todo(id, body.title.unwrap_or(old.title), body.done.unwrap_or(old.done))
+                    todos[id] = updated
+                    return http.json(updated)
+                case None:
+                    return Err(http.Error(404, "todo not found"))
+
+    def remove(self, req: http.Request) -> Result[http.Response]:
+        id = req.param_int("id")?
+        with self.todos.lock() as todos:
+            todos.pop(id)
+        return http.no_content()
+
+def health(req: http.Request) -> Result[http.Response]:
+    return http.text("ok")
+
+def echo(req: http.Request) -> Result[http.Response]:
+    return http.text(f"{req.method} {req.param('rest')} from {req.header('User-Agent').unwrap_or('?')}")
+
+def main():
+    store = Store(todos=Mutex({}), next_id=Atomic(0))
+    server = http.Server()
+    api = server.group("/api")
+    api.get("/todos", store.list)
+    api.post("/todos", store.create)
+    api.get("/todos/{id}", store.get)
+    api.patch("/todos/{id}", store.update)
+    api.delete("/todos/{id}", store.remove)
+    server.get("/health", health)
+    server.get("/echo/{rest...}", echo)
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()
+    io.eprint("stopped")
