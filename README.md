@@ -2,9 +2,16 @@
 
 A compiled, Python-shaped language for web backends: indentation syntax, structs and traits instead of classes, an LLVM backend, and HTTP, TLS, WebSocket, JSON, PostgreSQL and concurrency support in the standard library.
 
+**New to the language?** Start with **[Weby by example](docs/examples.md)**. It has twenty-five short sections, from "hello" to a JSON web service with tests. Every program in it is compiled and run by the test suite.
+
 ## Status
 
-The prototype is complete and milestones 0 to 11 are done. Milestone 12 (performance and ecosystem) is ongoing by design and has so far added TLS, a PostgreSQL driver, an HTTP client and regular expressions. The WebSocket server passes the Autobahn conformance suite and the JSON parser passes JSONTestSuite. See the [roadmap](docs/06-roadmap.md#progress).
+The prototype is complete and milestones 0 to 11 are done. Milestone 12 (performance and ecosystem) is ongoing by design. So far it has added:
+
+- TLS, an HTTP client, a PostgreSQL driver and regular expressions;
+- the first phase of the [performance plan](docs/09-performance-plan.md), after which sorting and list-heavy code run faster than Go.
+
+The WebSocket server passes the Autobahn conformance suite, and the JSON parser passes JSONTestSuite. See the [roadmap](docs/06-roadmap.md#progress).
 
 Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime. The runtime uses the Boehm garbage collector and runs tasks as fibers on one worker thread per core.
 
@@ -89,34 +96,108 @@ def main():
     server.listen_tls(":8443", "cert.pem", "key.pem").unwrap()
 ```
 
-The compiler checks the routes against the handlers: `id` must parse as an `int` or the request gets a 400, and the body must decode as a `NewTodo`. An error from the database becomes a 500, `http.Error(404, ...)` a 404, and a panic in a handler a 500 while the server carries on.
+The compiler checks the routes against the handlers. `id` must parse as an `int`, or the request gets a 400; the body must decode as a `NewTodo`. Errors become responses:
 
-| Works now | Not yet |
-|---|---|
-| Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | |
-| An HTTP client (`http.get`, `http.post`, `http.fetch`) for `http://` and `https://`; header and cookie parameters in typed handlers; regular expressions (`re`) | Connection reuse and redirects in the client |
-| A PostgreSQL client (`postgres`): a shared connection pool, parameters, rows decoded into `@derive(Json)` structs, transactions with `with`, SCRAM authentication and TLS | Prepared-statement caching, `COPY`, `LISTEN`/`NOTIFY` |
-| An HTTP/1.1 server: `@http.get("/todos/{id}")` route annotations with typed path, query and JSON-body parameters checked at compile time, or call-style routes, middleware, groups, graceful shutdown, HTTPS (`listen_tls`); the `log` module | HTTP/2 |
-| WebSockets: `@http.ws("/chat")` endpoints or `server.ws(...)`, `for msg in ws`, sends from any task, pings, fragmentation and the closing handshake handled by the runtime, secure WebSockets on an HTTPS server; passes the Autobahn suite; a `bytes` type | WebSocket compression (`permessage-deflate`) |
-| JSON: `@derive(Json)` with generated encoders and decoders, `@json(name=...)`, error paths, and dynamic `json.Value`; passes JSONTestSuite | |
-| `spawn`, `Task`, `Channel`, `Mutex`, `Atomic`, `time.sleep`; the compiler rejects sharing mutable data between tasks. Tasks and connections are fibers on one worker thread per core with an epoll poller; a panic ends only its task | Preemption of CPU-bound tasks |
-| Immutable collections `tuple[T, ...]` and `frozendict[K, V]` | |
-| `int` (wrapping), `float` (printed exactly as Python prints it), `bool`, `str`, sized numbers (`i32`, `u8`, `f32`, ...) | |
-| Modules: `import a.b as c`, `from a import x`, `pub` and `priv`; the `io` and `os` standard modules (files, stdin, stderr, arguments, environment) | |
-| `with` blocks that close files on every way out; C functions bound with `@extern("name")` | |
-| Structs, enums, methods, traits with default methods, trait objects | Sets, generic traits, methods with their own type parameters |
-| Generic functions, structs, enums and `impl` blocks with bounds (`T: Ord`), inferred type arguments | |
-| Lambdas, nested functions with captured variables, functions and bound methods as values | |
-| List and dict comprehensions; `for` over user iterators (`next`) and iterables (`iter`) | |
-| `match` with exhaustiveness checking; `Result`, `?`, `int.parse`; narrowing after `x is not None` | |
-| `@derive(Eq, Hash, Display, Copy, Ord)`, `@frozen`, operator traits | |
-| `list`, `dict`, tuples, optionals (`T?`), f-strings with Python's format specs | |
-| `min`, `max`, `sum`, `sorted` and `sort` with `key=` and `reverse=`, `enumerate`, `zip`, `any`, `all` | |
-| Panics with source locations and backtraces; diagnostics with source snippets; debug information for `gdb` and `perf` | Variables in the debugger (line tables and function names only) |
-| Tooling: `weby test`, `weby fmt`, `weby lsp` (diagnostics, hover, go to definition, formatting), git and path dependencies with a lock file | |
-| Editors: a Zed extension (Tree-sitter grammar, outline, run buttons, language server), VS Code and Vim syntax, and setup for Neovim and Helix ([editors/README.md](editors/README.md)) | A VS Code client extension for the language server |
+- an error from the database becomes a 500;
+- `http.Error(404, ...)` becomes a 404;
+- a panic in a handler becomes a 500, and the server carries on.
 
-Constructs from the design that are not implemented are rejected with an error saying they are not supported yet.
+Tasks share data only in forms the compiler can prove safe:
+
+```python
+@frozen
+struct Job:
+    id: int
+    value: int
+
+def worker(jobs: Channel[Job], results: Channel[int]):
+    for job in jobs:
+        results.send(job.value * job.value)
+
+def main():
+    jobs = Channel[Job](16)
+    results = Channel[int](16)
+    workers = [spawn worker(jobs, results) for _ in range(4)]
+    ...
+```
+
+`Job` is `@frozen`, so it can cross between tasks. Passing a mutable struct or a plain `list` to `spawn` is a compile error that suggests `@frozen`, `Mutex(...)` or an immutable `tuple`.
+
+## Features
+
+[Weby by example](docs/examples.md) shows each of these in a runnable program.
+
+**The language**
+
+- Python's syntax for the parts it shares: indentation, `if`/`elif`/`else`, `for`, `while`, comprehensions, f-strings with Python's format specs, slicing, tuple unpacking, default and keyword arguments, lambdas and nested functions.
+- Static types with local inference. `int` (64-bit, wrapping), `float`, `bool`, `str`, `bytes`, sized numbers (`i32`, `u8`, `f32`, ...), `list`, `dict`, tuples, and the immutable `tuple[T, ...]` and `frozendict[K, V]`.
+- `struct`, `enum` with data in its variants, `impl` blocks, and traits with default methods, required traits and trait objects. Operators are traits.
+- `@derive(Eq, Hash, Ord, Display, Copy, Json)` writes the standard implementations; `@frozen` makes a struct immutable.
+- Generic functions, structs, enums and `impl` blocks, with bounds (`T: Ord`) and inferred type arguments, compiled once per type.
+- Optional types (`T?`) instead of a `None` that fits anywhere, narrowed by `if x is not None:`.
+- `Result[T]` and `?` instead of exceptions; `match` with guards, alternatives and tuple patterns.
+- `for` over your own types through `next` and `iter` methods.
+- `with` blocks that run an `exit` method on every way out of the block.
+- Modules with `import a.b as c` and `from a import x`, `pub` and `priv`; `const`; `type` aliases.
+- C functions bound with `@extern("name")`.
+
+**What the compiler catches**
+
+- Type errors, including mixing `int` with `float`, and `if items:` (conditions must be `bool`).
+- A `match` that misses a case, and `None` used where a value is needed.
+- An ignored `Result`, a variable read before it is certainly assigned, a missing `return`, unreachable code.
+- Mutable data shared between tasks, and a mutex's contents escaping their lock.
+- Route handlers whose parameters don't fit their route.
+- Python habits, with a hint: `class`, `try`, statements at the top level of a file.
+
+Messages show the source line and usually a fix. Constructs from the design that aren't implemented yet are rejected with an error saying so.
+
+**Concurrency**
+
+- `spawn f(x)` starts a task and returns a `Task` to `join`.
+- Tasks are fibers spread over one worker thread per core, with an epoll poller. A task waiting on the network, a channel or a lock costs no thread.
+- `Channel[T]` (buffered or not, closable, iterable), `Mutex[T]`, `Atomic` and `time.sleep`.
+- A panic ends only its task, and releases the locks it held.
+
+**For web services**
+
+- **HTTP/1.1 server:**
+  - typed routes declared with `@http.get("/todos/{id}")` and friends, or registered by calling `server.get(...)`;
+  - path, query, JSON body, header and cookie parameters, checked at compile time;
+  - middleware, route groups, custom error mapping, graceful shutdown on SIGTERM;
+  - HTTPS with `listen_tls`;
+  - `server.handle(http.test_request(...))` for testing routes without a socket.
+- **WebSockets:** `@http.ws("/chat/{room}")`, `for msg in ws`, sends from any task, and secure WebSockets. The runtime handles pings, fragmentation and the closing handshake, and the server passes the Autobahn suite.
+- **JSON:** encoders and decoders generated by `@derive(Json)`, with `@json(name=...)`, defaults, optional fields, tagged enums and precise error paths, plus a dynamic `json.Value`. Passes JSONTestSuite.
+- **HTTP client:** `http.get`, `http.post` and `http.fetch`, for `http://` and `https://`, with the Mozilla root certificates built in.
+- **PostgreSQL:** a client built into the runtime, with no `libpq`:
+  - a connection pool shared by every task;
+  - parameters kept separate from the SQL;
+  - rows decoded into `@derive(Json)` structs;
+  - transactions that roll back unless committed;
+  - SCRAM authentication and TLS.
+- **Other standard modules:** `re` (linear-time regular expressions), `log`, `time`, `io` (files, standard input and error) and `os` (arguments, environment, exit status).
+
+**Tooling**
+
+- `weby test` runs `@test` functions, each in its own task, with `assert`.
+- `weby fmt` formats code.
+- `weby lsp` is a language server with diagnostics, hover, go to definition and formatting.
+- Dependencies come from git or a local path, with a lock file.
+- Panics print source locations and a backtrace. Programs carry debug line information for `gdb` and `perf`.
+- Editor support:
+  - a Zed extension with a Tree-sitter grammar, outline, run buttons and the language server;
+  - syntax highlighting for VS Code and Vim;
+  - setup instructions for Neovim and Helix ([editors/README.md](editors/README.md)).
+
+**Not yet**
+
+- Sets, generic traits, and methods with their own type parameters.
+- Preemption of CPU-bound tasks.
+- HTTP/2, WebSocket compression, and connection reuse and redirects in the HTTP client.
+- Prepared-statement caching, `COPY` and `LISTEN`/`NOTIFY` in the PostgreSQL client.
+- Printing variables in the debugger: debug information is line tables and function names only.
+- A VS Code extension for the language server.
 
 ## Performance
 
@@ -177,7 +258,7 @@ Tests:
 cargo test --workspace
 ```
 
-The end-to-end tests compile every program in `tests/run` and compare its output with the `# expect:` comments in the file. Each program runs in debug mode, in release mode, and with the collector running before every allocation. They also check every program in `tests/ui` against the expected compiler messages in its `.stderr` file. After an intended change to a message, regenerate those files with `WEBY_BLESS=1 cargo test -p lang_cli --test programs` and review the diff.
+The end-to-end tests compile every program in `tests/run` and compare its output with the `# expect:` comments in the file. Each program runs in debug mode, in release mode, and with the collector running before every allocation. The programs in [docs/examples.md](docs/examples.md) are compiled too, and run where the page shows their output. The tests also check every program in `tests/ui` against the expected compiler messages in its `.stderr` file. After an intended change to a message, regenerate those files with `WEBY_BLESS=1 cargo test -p lang_cli --test programs` and review the diff.
 
 The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real sockets. The PostgreSQL test runs only when `WEBY_TEST_DATABASE_URL` names a database it may use ([tests/db/README.md](tests/db/README.md)). The Autobahn and JSONTestSuite conformance runs are manual, because each needs a download ([tests/conformance/README.md](tests/conformance/README.md)).
 
@@ -185,6 +266,7 @@ The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real socke
 
 | Document | What it covers |
 |---|---|
+| [docs/examples.md](docs/examples.md) | Learning the language: short programs for every feature, with their output |
 | [docs/00-overview.md](docs/00-overview.md) | Goals, non-goals, the plan in one page, confirmed decisions |
 | [docs/01-language-design.md](docs/01-language-design.md) | Syntax and semantics, with example programs |
 | [docs/02-type-system-and-traits.md](docs/02-type-system-and-traits.md) | Types, generics, traits, dispatch |
