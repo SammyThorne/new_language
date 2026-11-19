@@ -11,7 +11,7 @@ repository = "https://github.com/SammyThorne/new_language"
 # that points at your checkout instead.
 [grammars.weby]
 repository = "https://github.com/SammyThorne/new_language"
-rev = "GRAMMAR_REV"
+rev = "702a1b8be63c8c3bf9355339929c5d4507da363f"
 path = "editors/tree-sitter-weby"
 
 [language_servers.weby]
