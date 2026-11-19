@@ -581,6 +581,19 @@ impl<'ctx> Codegen<'ctx, '_> {
         }
         let l = self.value(lhs);
         let r = self.value(rhs);
+        self.binary_values(op, l, r, operand_ty, rhs.ty, span)
+    }
+
+    /// A binary operation on values already computed.
+    pub(crate) fn binary_values(
+        &mut self,
+        op: BinaryOp,
+        l: BasicValueEnum<'ctx>,
+        r: BasicValueEnum<'ctx>,
+        operand_ty: Ty,
+        rhs_ty: Ty,
+        span: Span,
+    ) -> BasicValueEnum<'ctx> {
         let b = &self.b;
         let int = |v: BasicValueEnum<'ctx>| v.into_int_value();
         let float = |v: BasicValueEnum<'ctx>| v.into_float_value();
@@ -649,7 +662,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.build_int_compare(predicate, a, c, "").must().into()
             }
             BinaryOp::In | BinaryOp::NotIn => {
-                let found = self.contains(l, operand_ty, r, rhs.ty);
+                let found = self.contains(l, operand_ty, r, rhs_ty);
                 if op == BinaryOp::NotIn { self.b.build_not(found, "").must().into() } else { found.into() }
             }
         }

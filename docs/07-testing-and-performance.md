@@ -128,3 +128,5 @@ Ordered by expected payoff for web workloads. None of this is prototype work exc
 11. ThinLTO across the runtime boundary, if LLVM versions of `rustc` and the compiler can be aligned.
 12. Profile-guided optimisation as a build option.
 13. A precise, generational collector.
+
+Done in M12: a dict update written `d[k] = d.get_or(k, default) + x` or `d[k] = d[k] + x` takes one lookup instead of two (the "entry API" the M2 notes asked for, recognised by the compiler instead of added as a method); HTTP responses are serialised once, straight from the handler's strings (part of item 3); and the collector's heap is allowed to grow to twice the live data before collecting, as Go's is (D73).

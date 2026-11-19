@@ -289,8 +289,10 @@ pub struct Request {
     body: Vec<u8>,
     remote: String,
     head: bool,
-    /// Status, header lines, and body.
-    response: Option<(i64, String, Vec<u8>)>,
+    /// The whole response, ready to write, once the handler has given it.
+    response: Option<Vec<u8>>,
+    /// Whether the connection stays open after this request.
+    keep_alive: bool,
     /// The connection the request came on, while the handler runs.
     connection: *mut Connection,
     /// The WebSocket id, once the handler has upgraded the connection.
@@ -461,6 +463,7 @@ impl Connection {
             body,
             remote: remote.to_string(),
             response: None,
+            keep_alive: false,
             connection: std::ptr::null_mut(),
             upgraded: None,
         };
@@ -642,6 +645,7 @@ fn serve_connection(stream: TcpStream, remote: String, entry: Entry, roots: *mut
         // SAFETY: `roots` holds the function value for the server's lifetime.
         let (code, env) = unsafe { (roots.read(), roots.add(1).read()) };
         request.connection = &mut connection;
+        request.keep_alive = keep_alive && !SHUTDOWN.load(Ordering::SeqCst);
         let handle = &mut request as *mut Request as i64;
         // A panicking handler ends only this request, with a 500; the panic was reported
         // where it happened. Mutexes it held are released.
@@ -659,26 +663,14 @@ fn serve_connection(stream: TcpStream, remote: String, entry: Entry, roots: *mut
             crate::ws::forget(id);
             break;
         }
-        let keep_alive = keep_alive && !panicked && !SHUTDOWN.load(Ordering::SeqCst);
-        let (status, header_lines, body) = request.response.take().unwrap_or_else(|| {
-            (500, "Content-Type: text/plain; charset=utf-8\r\n".to_string(), b"internal server error\n".to_vec())
-        });
-        let mut out = Vec::with_capacity(256 + body.len());
-        out.extend_from_slice(format!("HTTP/1.1 {status} {}\r\n", reason(status)).as_bytes());
-        out.extend_from_slice(header_lines.as_bytes());
-        out.extend_from_slice(format!("Date: {}\r\n", http_date()).as_bytes());
-        out.extend_from_slice(format!("Server: {}\r\n", lang_names::CLI_NAME).as_bytes());
-        if status != 204 && status != 304 {
-            out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-        }
-        out.extend_from_slice(if keep_alive {
-            b"Connection: keep-alive\r\n\r\n"
-        } else {
-            b"Connection: close\r\n\r\n"
-        });
-        if !request.head && status != 204 && status != 304 {
-            out.extend_from_slice(&body);
-        }
+        let (out, keep_alive) = match request.response.take() {
+            Some(out) => (out, request.keep_alive),
+            None => {
+                let body = b"internal server error\n";
+                let head = "Content-Type: text/plain; charset=utf-8\r\n";
+                (response_bytes(500, head, body, false, request.head), false)
+            }
+        };
         if connection.socket.write_all(&out).is_err() || !keep_alive {
             break;
         }
@@ -779,9 +771,35 @@ pub unsafe extern "C-unwind" fn lrt_http_respond(
     body: *const u8,
     body_len: i64,
 ) {
-    let headers = unsafe { Str::from_raw(headers, headers_len) }.to_string();
-    let body = unsafe { Str::from_raw(body, body_len) }.as_bytes().to_vec();
-    unsafe { request(handle) }.response = Some((status, headers, body));
+    let headers = unsafe { Str::from_raw(headers, headers_len) };
+    let body = unsafe { Str::from_raw(body, body_len) }.as_bytes();
+    let request = unsafe { request(handle) };
+    // The response is serialised here, while the body is still reachable, so the body is
+    // copied once, straight into what is written.
+    request.response = Some(response_bytes(status, headers, body, request.keep_alive, request.head));
+}
+
+/// A complete HTTP/1.1 response: status line, the handler's header lines, the automatic
+/// headers, and the body (left out for `HEAD`, 204 and 304).
+fn response_bytes(status: i64, headers: &str, body: &[u8], keep_alive: bool, head: bool) -> Vec<u8> {
+    use std::io::Write as _;
+    let has_body = status != 204 && status != 304;
+    let mut out = Vec::with_capacity(160 + headers.len() + if head { 0 } else { body.len() });
+    let _ = write!(
+        out,
+        "HTTP/1.1 {status} {}\r\n{headers}Date: {}\r\nServer: {}\r\n",
+        reason(status),
+        http_date(),
+        lang_names::CLI_NAME
+    );
+    if has_body {
+        let _ = write!(out, "Content-Length: {}\r\n", body.len());
+    }
+    out.extend_from_slice(if keep_alive { b"Connection: keep-alive\r\n\r\n" } else { b"Connection: close\r\n\r\n" });
+    if !head && has_body {
+        out.extend_from_slice(body);
+    }
+    out
 }
 
 // ---- logging ----------------------------------------------------------------------------

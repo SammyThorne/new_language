@@ -163,7 +163,29 @@ Each parameter is matched against these rules in order, at compile time. A param
 | 5 | Type derives `Json`, or is a `list` or `dict` of such | The JSON request body. At most one per handler | 400, with the JSON path of the problem |
 | 6 | `int`, `float`, `bool` or `str` whose name is not in the path | The query parameter of that name. Required unless the type is `T?` or the parameter has a default | 400 |
 
-Headers and cookies are read from an `http.Request` parameter in the prototype.
+| 7 | Type `http.Header` or `http.Header?` (M12) | The request header named after the parameter: `user_agent` is `User-Agent` | 400 if missing, unless `T?` |
+| 8 | Type `http.Cookie` or `http.Cookie?` (M12) | The cookie with the parameter's name | 400 if missing, unless `T?` |
+
+`http.Header` and `http.Cookie` are frozen structs with a `value: str` field and `Display`. Other request details are read from an `http.Request` parameter; `req.cookie(name)` reads a cookie.
+
+### The client (M12)
+
+```python
+resp = http.get("http://inventory:8080/items?limit=5")?           # Result[http.ClientResponse, http.ClientError]
+if resp.ok():
+    items = http.decode_json[list[Item]](resp)?
+resp = http.post("http://audit/log", json.encode(entry))?        # content type JSON by default
+resp = http.fetch("PUT", url, body, {"Authorization": token})?    # any method, any headers
+```
+
+| Item | Shape |
+|---|---|
+| `http.get(url)`, `http.post(url, body, content_type="application/json")`, `http.fetch(method, url, body="", headers={})` | Send a request and wait for the whole response. A task waiting here parks; it does not hold a worker |
+| `http.ClientResponse` | `status`, `body: bytes`, `ok()`, `header(name) -> str?`, `text() -> Result[str]`, `json() -> Result[json.Value]` |
+| `http.decode_json[T](response)` | The body decoded into `T` |
+| `http.ClientError` | No response: unreachable host, timeout (30 seconds), connection closed early, or a URL that is not `http://`. Returned from a handler with `?`, it becomes a 502 |
+
+One request per connection, HTTP/1.1, `http://` only: TLS is not in the runtime yet (D77).
 
 ### What a handler may return
 
@@ -300,6 +322,24 @@ The plan:
 - Stage 1 uses one task (thread) per connection, which caps practical connection counts in the low thousands. Stage 2 fibers remove that cap without API changes.
 - Extensions (`permessage-deflate`) are not in the prototype.
 - Conformance is checked with the Autobahn test suite ([07](07-testing-and-performance.md#protocol-conformance)).
+
+## Regular expressions (M12)
+
+```python
+import re
+
+word = re.compile("\\b(?P<first>\\w)(\\w*)").unwrap()
+print(word.replace_all("hello there", "${first}."))      # h. t.
+for m in word.find_all("one two"):
+    print(m.start, m.text)
+```
+
+| Item | Shape |
+|---|---|
+| `re.compile(pattern) -> Result[re.Regex, re.RegexError]` | Perl-like syntax without look-around or backreferences; matching time is linear in the text's length (D76) |
+| `regex.is_match(text)`, `regex.find(text, start=0) -> re.Match?`, `regex.find_all(text) -> list[re.Match]`, `regex.split(text) -> list[str]`, `regex.replace(text, rep)`, `regex.replace_all(text, rep)` | `$1` and `${name}` in a replacement insert groups |
+| `re.Match` | `text`, `start`, `end` (byte offsets), `group(i) -> str?`, `named(name) -> str?` |
+| `re.Regex` | Frozen: one compiled pattern can be shared by every task |
 
 ## JSON
 

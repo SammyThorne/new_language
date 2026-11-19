@@ -203,6 +203,7 @@ version = "0.1.0"
 dependencies = [
  "lang_format",
  "lang_names",
+ "regex-lite",
 ]
 
 [[package]]

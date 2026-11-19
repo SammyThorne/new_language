@@ -39,6 +39,8 @@ pub(super) struct HttpTypes {
     request: Ty,
     response: Ty,
     websocket: Ty,
+    header: Ty,
+    cookie: Ty,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +77,16 @@ enum Binding {
     Request,
     /// The connection, in a WebSocket handler.
     Socket,
+    /// `user_agent: http.Header`: the header `User-Agent`.
+    Header {
+        name: String,
+        optional: bool,
+    },
+    /// `session: http.Cookie`: the cookie `session`.
+    Cookie {
+        name: String,
+        optional: bool,
+    },
     Path {
         name: String,
         kind: Scalar,
@@ -125,16 +137,18 @@ impl<'m> Checker<'_, 'm> {
             Some((Global::Struct(id), _, _)) => Some(this.structs[id.0].ty),
             _ => None,
         };
-        let (Some(server), Some(group), Some(request), Some(response), Some(websocket)) = (
+        let (Some(server), Some(group), Some(request), Some(response), Some(websocket), Some(header), Some(cookie)) = (
             struct_ty(self, "Server"),
             struct_ty(self, "Group"),
             struct_ty(self, "Request"),
             struct_ty(self, "Response"),
             struct_ty(self, "WebSocket"),
+            struct_ty(self, "Header"),
+            struct_ty(self, "Cookie"),
         ) else {
             return;
         };
-        self.http = Some(HttpTypes { module, server, group, request, response, websocket });
+        self.http = Some(HttpTypes { module, server, group, request, response, websocket, header, cookie });
     }
 
     pub(super) fn in_http_module(&self) -> bool {
@@ -299,6 +313,37 @@ impl<'m> Checker<'_, 'm> {
                     return None;
                 }
                 Binding::Socket
+            } else if let Some((cookie, optional)) = self.http.and_then(|h| {
+                let inner = self.types.option_inner(param.ty);
+                [(h.header, false), (h.cookie, true)].into_iter().find_map(|(ty, cookie)| {
+                    if param.ty == ty {
+                        Some((cookie, false))
+                    } else if inner == Some(ty) {
+                        Some((cookie, true))
+                    } else {
+                        None
+                    }
+                })
+            }) {
+                if cookie {
+                    Binding::Cookie { name: param.name.clone(), optional }
+                } else {
+                    // `user_agent` is the header `User-Agent`.
+                    let name = param
+                        .name
+                        .split('_')
+                        .filter(|w| !w.is_empty())
+                        .map(|w| {
+                            let mut chars = w.chars();
+                            chars
+                                .next()
+                                .map(|c| c.to_ascii_uppercase().to_string() + chars.as_str())
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("-");
+                    Binding::Header { name, optional }
+                }
             } else if names.contains(&param.name) {
                 used_names.push(param.name.clone());
                 match Scalar::of(param.ty) {
@@ -360,7 +405,7 @@ impl<'m> Checker<'_, 'm> {
                 let help = if matches!(self.types.kind(param.ty), TyKind::Struct(_) | TyKind::Enum(_)) {
                     format!("to read it from the JSON body, add `@derive(Json)` to `{shown}`")
                 } else {
-                    "a parameter is the request (`http.Request`), a `{name}` in the path, a JSON body, or a query parameter of type `int`, `float`, `bool` or `str`".to_string()
+                    "a parameter is the request (`http.Request`), a `{name}` in the path, a JSON body, a header (`http.Header`), a cookie (`http.Cookie`), or a query parameter of type `int`, `float`, `bool` or `str`".to_string()
                 };
                 self.route_error(
                     format!("cannot tell where parameter `{}` comes from", param.name),
@@ -591,6 +636,12 @@ impl<'m> Checker<'_, 'm> {
                     Binding::Socket => {
                         args.push("__ws".to_string());
                         continue;
+                    }
+                    Binding::Header { name, optional } => {
+                        format!("__http.header_param{}(__req, {name:?})?", if *optional { "_opt" } else { "" })
+                    }
+                    Binding::Cookie { name, optional } => {
+                        format!("__http.cookie_param{}(__req, {name:?})?", if *optional { "_opt" } else { "" })
                     }
                     Binding::Path { name, kind: Scalar::Str } => format!("__req.param({name:?})"),
                     Binding::Path { name, kind } => format!("__req.param_{}({name:?})?", kind.suffix()),

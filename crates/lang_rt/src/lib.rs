@@ -13,6 +13,7 @@
 
 pub mod builder;
 pub mod bytes;
+pub mod client;
 pub mod dict;
 pub mod fiber;
 pub mod gc;
@@ -23,6 +24,7 @@ pub mod num;
 pub mod out;
 pub mod panic;
 pub mod poll;
+pub mod re;
 pub mod strings;
 pub mod sys;
 pub mod tasks;

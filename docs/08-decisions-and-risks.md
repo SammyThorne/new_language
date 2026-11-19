@@ -480,6 +480,30 @@ A test is a `@test` function; `weby test` appends a generated runner to the file
 
 A TextMate grammar (`editors/vscode/`) covers VS Code and the many editors that read that format, and a Vim syntax file covers Vim and Neovim; both are maintained by hand against the keyword list. Neovim and Helix can start `weby lsp` with a few lines of configuration (`editors/README.md`). A VS Code extension that starts the language server needs `vscode-languageclient` from npm, a download, and is not included.
 
+### D73. The collector grows the heap to about twice the live data
+
+Boehm's default free-space divisor of 3 starts a collection when about a third of the heap has been allocated since the last one, which is far more often than Go's default (`GOGC=100`: collect when the heap has doubled). Setting the divisor to 1 matches Go's policy. It made the allocation-heavy HTTP endpoint 54% faster (with the response change below) and batch benchmarks 3% to 7% faster, for 10% to 25% more memory (`binary_trees`: 72 MB against 57 MB). `WEBY_GC_FREE_SPACE_DIVISOR` still overrides it; a memory-tight deployment can set 2 or 3.
+
+### D74. The compiler recognises single-lookup dict updates
+
+`d[k] = d.get_or(k, default) OP x` and `d[k] = d[k] OP x`, where `d` and `k` are variables and `x` and `default` are variables or constants, compile to one lookup: the runtime's find-or-insert returns the value's slot, the dict's length says whether it was inserted, and the new value is stored into the slot. The conditions guarantee nothing between the lookup and the store can change the dict. This is the idiom programs already use, so they get faster unchanged; an `entry` method would have needed closures or a mutable reference type the language does not have. `word_count` went from 1.25 s to 0.78 s.
+
+### D75. Responses are serialised in the call that gives them
+
+`lrt_http_respond` used to copy the body into a buffer, which the connection then copied again into the bytes it wrote. It now writes the status line, headers and body into the final buffer directly, while the handler's strings are still reachable. Whether the connection stays open is decided before the handler runs; a server shutting down in between still closes the connection after the response.
+
+### D76. Regular expressions use `regex-lite`
+
+`re` is backed by the `regex-lite` crate, which was already in the local Cargo cache (no download), has no dependencies, and guarantees linear-time matching, so a pattern from a user cannot make a server spin. It has no Unicode classes beyond what its syntax lists and is slower than the full `regex` crate on large texts; switching later changes no program. Compiled patterns are kept for the life of the program, which suits compiling them once at startup; a program compiling patterns in a loop grows. Patterns are ordinary strings, since the language has no raw strings yet.
+
+### D77. The HTTP client is plain HTTP/1.1, one request per connection
+
+`http.fetch` connects, sends `Connection: close`, and reads the whole response (sized, chunked, or to the end of the stream), with a 30-second deadline, over the same non-blocking socket as the server, so a waiting task parks. Name resolution uses the system resolver, which blocks the worker for its duration (there is no blocking pool, D66). There is no TLS, no connection reuse, no redirects and no streaming; `https://` URLs are an error that says so. A `ClientError` returned from a handler maps to 502.
+
+### D78. Headers and cookies bind by type
+
+A handler parameter of type `http.Header` is the header named after the parameter (`user_agent` is `User-Agent`), and `http.Cookie` the cookie of that name; `T?` makes either optional, and otherwise a missing one is a 400 naming it. Binding by type keeps the rule table fixed and readable (R11): the parameter's type says where the value comes from, as it does for bodies.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

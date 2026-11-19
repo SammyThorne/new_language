@@ -57,6 +57,15 @@ def respond_raw(handle: int, status: int, headers: str, body: str)
 @extern("lrt_io_error")
 def last_error() -> str
 
+@extern("lrt_http_client")
+def client_raw(method: str, url: str, headers: str, body: str) -> int
+
+@extern("lrt_http_client_headers")
+def client_headers() -> str
+
+@extern("lrt_http_client_body")
+def client_body() -> str
+
 @extern("lrt_ws_accept")
 def ws_accept(handle: int) -> int
 
@@ -187,6 +196,67 @@ impl Request:
         if self.handle < 0:
             return ""
         return req_remote(self.handle)
+
+    def cookie(self, name: str) -> str?:
+        """A cookie sent with the request (from its `Cookie` header), or `None`."""
+        match self.header("Cookie"):
+            case Some(text):
+                for pair in text.split(";"):
+                    parts = pair.strip().split("=")
+                    if len(parts) >= 2 and parts[0] == name:
+                        return "=".join(parts[1:])
+                return None
+            case None:
+                return None
+
+@frozen
+pub struct Header:
+    """A handler parameter bound from the request header named after it:
+    `user_agent: http.Header` is the `User-Agent` header. A 400 if it is missing, unless the
+    parameter is `http.Header?`."""
+    value: str
+
+impl Display for Header:
+    def to_str(self) -> str:
+        return self.value
+
+@frozen
+pub struct Cookie:
+    """A handler parameter bound from the cookie with its name: `session: http.Cookie`. A 400
+    if it is missing, unless the parameter is `http.Cookie?`."""
+    value: str
+
+impl Display for Cookie:
+    def to_str(self) -> str:
+        return self.value
+
+pub def header_param(req: Request, name: str) -> Result[Header, HttpError]:
+    match req.header(name):
+        case Some(value):
+            return Header(value)
+        case None:
+            return Err(HttpError(400, f"missing header `{name}`"))
+
+pub def header_param_opt(req: Request, name: str) -> Result[Header?, HttpError]:
+    match req.header(name):
+        case Some(value):
+            return Ok(Some(Header(value)))
+        case None:
+            return Ok(None)
+
+pub def cookie_param(req: Request, name: str) -> Result[Cookie, HttpError]:
+    match req.cookie(name):
+        case Some(value):
+            return Cookie(value)
+        case None:
+            return Err(HttpError(400, f"missing cookie `{name}`"))
+
+pub def cookie_param_opt(req: Request, name: str) -> Result[Cookie?, HttpError]:
+    match req.cookie(name):
+        case Some(value):
+            return Ok(Some(Cookie(value)))
+        case None:
+            return Ok(None)
 
 pub def test_request(method: str, path: str, body: str = "") -> Request:
     """A request that is not from a connection, for calling `server.handle(...)` in tests."""
@@ -608,6 +678,88 @@ pub def upgrade(req: Request, handler: WsHandler) -> Result[Response]:
     handler(ws)
     ws_finish(id)
     return Ok(Response(101, "", ""))
+
+# ---- the client ----------------------------------------------------------------------------
+
+pub struct ClientError:
+    """A request that got no response: the host could not be reached, it closed the connection
+    early, it timed out (after 30 seconds), or the URL is not `http://`."""
+    url: str
+    reason: str
+
+impl Error for ClientError:
+    def message(self) -> str:
+        return f"{self.url}: {self.reason}"
+
+    def status(self) -> int:
+        """Returned from a handler, a failed call to another service is a 502 Bad Gateway."""
+        return 502
+
+pub struct ClientResponse:
+    """A response from another server."""
+    status: int
+    body: bytes
+    priv headers: dict[str, str] = {}
+    priv url: str = ""
+
+impl ClientResponse:
+    def ok(self) -> bool:
+        """Whether the status is 2xx."""
+        return self.status >= 200 and self.status < 300
+
+    def header(self, name: str) -> str?:
+        """A response header; names are case-insensitive."""
+        return self.headers.get(name.lower())
+
+    def text(self) -> Result[str, ClientError]:
+        """The body as text; an error if it is not UTF-8."""
+        match self.body.decode():
+            case Some(text):
+                return text
+            case None:
+                return Err(ClientError(self.url, "the response body is not UTF-8 text"))
+
+    def json(self) -> Result[jsonlib.Value, ClientError]:
+        """The body parsed as JSON of any shape."""
+        text = self.text()?
+        match jsonlib.parse(text):
+            case Ok(value):
+                return value
+            case Err(error):
+                return Err(ClientError(self.url, f"invalid JSON: {error.message()}"))
+
+pub def decode_json[T: FromJson](response: ClientResponse) -> Result[T, ClientError]:
+    """The body decoded as JSON into a `T`."""
+    text = response.text()?
+    match jsonlib.decode[T](text):
+        case Ok(value):
+            return value
+        case Err(error):
+            return Err(ClientError(response.url, f"invalid JSON: {error.message()}"))
+
+pub def fetch(method: str, url: str, body: str = "", headers: dict[str, str] = {}) -> Result[ClientResponse, ClientError]:
+    """Send a request and wait for the whole response. A task waiting here does not hold a
+    worker. Only `http://` URLs are supported for now."""
+    lines = ""
+    for name, value in headers.items():
+        lines = lines + f"{name}: {value}\r\n"
+    status = client_raw(method, url, lines, body)
+    if status < 0:
+        return Err(ClientError(url, last_error()))
+    parsed: dict[str, str] = {}
+    for line in client_headers().split("\n"):
+        parts = line.split(": ")
+        if len(parts) >= 2:
+            parsed[parts[0]] = ": ".join(parts[1:])
+    return ClientResponse(status, __bytes(client_body()), parsed, url)
+
+pub def get(url: str) -> Result[ClientResponse, ClientError]:
+    """`GET url`."""
+    return fetch("GET", url)
+
+pub def post(url: str, body: str, content_type: str = "application/json") -> Result[ClientResponse, ClientError]:
+    """`POST url` with a body."""
+    return fetch("POST", url, body, {"Content-Type": content_type})
 
 # ---- adapters for annotated routes --------------------------------------------------------
 

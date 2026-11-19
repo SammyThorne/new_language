@@ -1,0 +1,72 @@
+# The HTTP client, against a server started in the same program.
+# expect: 200 True text/plain; charset=utf-8 hello ann
+# expect: 201 ping 4
+# expect: 404 False
+# expect: 7
+# expect: k1 tester abc==
+# expect: k2 weby no session
+# expect: 400 {"error":"missing header `Api-Key`"}
+# expect: client error: no host in `http://`
+# expect: https is not supported yet
+
+import http
+import json
+
+@derive(Json)
+struct Echo:
+    echo: str
+    size: int
+
+def hello(req: http.Request) -> Result[http.Response]:
+    return http.text(f"hello {req.query('name').unwrap_or('?')}")
+
+def echo(req: http.Request) -> Result[http.Response]:
+    text = req.text()?
+    return http.json(Echo(text, len(text)), 201)
+
+@http.get("/whoami")
+def whoami(api_key: http.Header, user_agent: http.Header, session: http.Cookie?) -> str:
+    match session:
+        case Some(cookie):
+            return f"{api_key} {user_agent} {cookie}"
+        case None:
+            return f"{api_key} {user_agent} no session"
+
+def serve(ports: Channel[int]):
+    server = http.Server()
+    server.mount(whoami)
+    server.get("/hello", hello)
+    server.post("/echo", echo)
+    ports.send(server.bind("127.0.0.1:0").unwrap())
+    server.serve()
+
+def main():
+    ports: Channel[int] = Channel(1)
+    server = spawn serve(ports)
+    port = ports.recv().unwrap()
+    base = f"http://127.0.0.1:{port}"
+    r = http.get(f"{base}/hello?name=ann").unwrap()
+    print(r.status, r.ok(), r.header("Content-Type").unwrap(), r.text().unwrap())
+    r = http.post(f"{base}/echo", "ping", "text/plain").unwrap()
+    e = http.decode_json[Echo](r).unwrap()
+    print(r.status, e.echo, e.size)
+    r = http.get(f"{base}/nowhere").unwrap()
+    print(r.status, r.ok())
+    counts = [spawn fetch_length(f"{base}/hello?name=x") for _ in range(4)]
+    print(sum([t.join() for t in counts]) // 4)
+    headers = {"Api-Key": "k1", "User-Agent": "tester", "Cookie": "theme=dark; session=abc=="}
+    print(http.fetch("GET", f"{base}/whoami", "", headers).unwrap().text().unwrap())
+    print(http.fetch("GET", f"{base}/whoami", "", {"Api-Key": "k2"}).unwrap().text().unwrap())
+    r = http.get(f"{base}/whoami").unwrap()
+    print(r.status, r.text().unwrap())
+    match http.get("http://"):
+        case Ok(_):
+            print("unexpected")
+        case Err(error):
+            print("client error:", error.message().split(": ")[1])
+    print(http.get("https://example.com").unwrap_err().message().split(": ")[1].split(";")[0])
+    http.Server().stop()
+    server.join()
+
+def fetch_length(url: str) -> int:
+    return len(http.get(url).unwrap().body)

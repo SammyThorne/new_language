@@ -10,7 +10,9 @@
 //! - `GC_STRESS`: collect before every allocation, to make missing roots crash immediately.
 //! - `GC_INITIAL_HEAP`: bytes to reserve at startup.
 //! - `GC_FREE_SPACE_DIVISOR`: Boehm's heap growth control; lower values grow the heap faster and
-//!   collect less often.
+//!   collect less often. The default is 1, which lets the heap grow to about twice the live data
+//!   before collecting, like Go's default `GOGC=100`; Boehm's own default, 3, collects about
+//!   three times as often (docs/08, D73).
 
 use crate::TypeDesc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,10 +39,9 @@ pub fn init() {
     unsafe { GC_init() };
     let stress = std::env::var(lang_names::env_var("GC_STRESS")).is_ok_and(|v| !v.is_empty() && v != "0");
     STRESS.store(stress, Ordering::Relaxed);
-    if let Some(divisor) = env_number("GC_FREE_SPACE_DIVISOR").filter(|&d| d > 0) {
-        // SAFETY: plain configuration call.
-        unsafe { GC_set_free_space_divisor(divisor) };
-    }
+    let divisor = env_number("GC_FREE_SPACE_DIVISOR").filter(|&d| d > 0).unwrap_or(1);
+    // SAFETY: plain configuration call.
+    unsafe { GC_set_free_space_divisor(divisor) };
     if let Some(bytes) = env_number("GC_INITIAL_HEAP") {
         // SAFETY: plain configuration call; failure only means the heap grows later.
         unsafe { GC_expand_hp(bytes) };

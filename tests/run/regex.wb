@@ -1,0 +1,32 @@
+# The `re` module.
+# expect: True False
+# expect: 2026-11 2026 11 None
+# expect: ['3', '14', '159']
+# expect: ['a', 'b', 'c', '']
+# expect: 11/2026 and 01/2027
+# expect: X-11 and 2027-01
+# expect: invalid pattern `(`
+# expect: 3
+
+import re
+
+def main():
+    date = re.compile("(?P<year>\\d{4})-(?P<month>\\d{2})(-(\\d{2}))?").unwrap()
+    print(date.is_match("due 2026-11-18"), date.is_match("no date"))
+    m = date.find("from 2026-11 on").unwrap()
+    print(m.text, m.named("year"), m.group(2).unwrap(), m.group(4))
+    digits = re.compile("[0-9]+").unwrap()
+    print([x.text for x in digits.find_all("3, 14 and 159")])
+    print(re.compile("[,;] *").unwrap().split("a, b;c;"))
+    print(date.replace_all("2026-11 and 2027-01", "$month/$year"))
+    print(date.replace("2026-11 and 2027-01", "X-$month"))
+    match re.compile("("):
+        case Ok(_):
+            print("compiled?")
+        case Err(error):
+            print(error.message().split(":")[0])
+    shared = spawn count_words(re.compile("\\w+").unwrap(), "one two three")
+    print(shared.join())
+
+def count_words(words: re.Regex, text: str) -> int:
+    return len(words.find_all(text))

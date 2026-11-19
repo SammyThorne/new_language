@@ -12,3 +12,4 @@ crate-type = ["staticlib"]
 [dependencies]
 lang_names.workspace = true
 lang_format.workspace = true
+regex-lite = "0.1.9"

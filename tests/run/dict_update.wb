@@ -1,0 +1,31 @@
+# `d[k] = d.get_or(k, default) OP x` and `d[k] = d[k] OP x` are compiled to one lookup; the
+# results must be the same as two.
+# expect: {'a': 3, 'b': 1}
+# expect: {'x': 'hello world'}
+# expect: {1: 2.5}
+# expect: {'a': 30, 'b': 1}
+# expect: 2
+# expect-exit: 101
+# expect-stderr: key 'zzz' is not in the dict
+
+def main():
+    counts: dict[str, int] = {}
+    for word in ["a", "b", "a", "a"]:
+        counts[word] = counts.get_or(word, 0) + 1
+    print(counts)
+    texts: dict[str, str] = {}
+    key = "x"
+    sep = " world"
+    texts[key] = texts.get_or(key, "hello") + sep
+    print(texts)
+    totals: dict[int, float] = {}
+    k = 1
+    totals[k] = totals.get_or(k, 2.0) + 0.5
+    print(totals)
+    ten = 10
+    name = "a"
+    counts[name] = counts[name] * ten
+    print(counts)
+    print(len(counts))
+    missing = "zzz"
+    counts[missing] = counts[missing] + 1

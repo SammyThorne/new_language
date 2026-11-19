@@ -7,7 +7,7 @@
 use crate::{Codegen, Must};
 use inkwell::IntPredicate;
 use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
-use lang_sema::hir::{Expr, LocalId, LoopSource, LoopTarget, Place, Stmt};
+use lang_sema::hir::{Builtin, Expr, ExprKind, LocalId, LoopSource, LoopTarget, Place, Stmt};
 use lang_sema::types::{Ty, TyKind};
 
 impl<'ctx> Codegen<'ctx, '_> {
@@ -48,6 +48,9 @@ impl<'ctx> Codegen<'ctx, '_> {
     fn stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Assign { place, value } => {
+                if self.dict_update(place, value) {
+                    return;
+                }
                 let value = self.expr(value);
                 self.store(place, value);
             }
@@ -183,6 +186,62 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.build_store(ptr, value).must();
             }
         }
+    }
+
+    /// `d[k] = d.get_or(k, default) OP x` and `d[k] = d[k] OP x`, where `d` and `k` are
+    /// variables and `x` and `default` are variables or constants: updated with one lookup
+    /// instead of two (docs/07, optimisation backlog). Returns false for anything else.
+    fn dict_update(&mut self, place: &Place, value: &Expr) -> bool {
+        let Place::Index { container, index, span } = place else { return false };
+        let (ExprKind::Local(dict_local), ExprKind::Local(key_local)) = (&container.kind, &index.kind) else {
+            return false;
+        };
+        let TyKind::Dict(key_ty, _) = *self.kind(container.ty) else { return false };
+        let ExprKind::Binary { op, lhs, rhs } = &value.kind else { return false };
+        let simple = |e: &Expr| {
+            matches!(
+                e.kind,
+                ExprKind::Local(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_)
+            )
+        };
+        let is = |e: &Expr, local: LocalId| matches!(e.kind, ExprKind::Local(l) if l == local);
+        if !simple(rhs) {
+            return false;
+        }
+        let default = match &lhs.kind {
+            ExprKind::Builtin { op: Builtin::DictGetOr, args }
+                if is(&args[0], *dict_local) && is(&args[1], *key_local) && simple(&args[2]) =>
+            {
+                Some(&args[2])
+            }
+            ExprKind::Index { container: c, index: i } if is(c, *dict_local) && is(i, *key_local) => None,
+            _ => return false,
+        };
+        let dict = self.value(container).into_pointer_value();
+        let key = self.value(index);
+        let value_type = self.value_type(lhs.ty);
+        let (slot, old) = match default {
+            Some(default) => {
+                // The slot is inserted (zeroed) if absent; the length says whether it was.
+                let len_ptr = self.b.build_struct_gep(self.dict_type, dict, 1, "len").must();
+                let before = self.b.build_load(self.cx.i64_type(), len_ptr, "").must().into_int_value();
+                let key_ptr = self.spill(key);
+                let slot = self.call_rt("lrt_dict_slot", &[dict.into(), key_ptr.into()]).unwrap().into_pointer_value();
+                let after = self.b.build_load(self.cx.i64_type(), len_ptr, "").must().into_int_value();
+                let inserted = self.b.build_int_compare(IntPredicate::NE, before, after, "").must();
+                let default = self.value(default);
+                let current = self.b.build_load(value_type, slot, "").must();
+                (slot, self.b.build_select(inserted, default, current, "").must())
+            }
+            None => {
+                let slot = self.dict_lookup(dict, key, key_ty, *span);
+                (slot, self.b.build_load(value_type, slot, "").must())
+            }
+        };
+        let r = self.value(rhs);
+        let new = self.binary_values(*op, old, r, lhs.ty, rhs.ty, value.span);
+        self.b.build_store(slot, new).must();
+        true
     }
 
     /// Address of a struct field.

@@ -4,7 +4,7 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 
 ## Status
 
-The prototype is complete, and milestones 0 to 11 of the [roadmap](docs/06-roadmap.md#progress) are done. Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
+The prototype is complete, milestones 0 to 11 are done, and the first part of milestone 12 (performance and libraries) is in. See the [roadmap](docs/06-roadmap.md#progress). Source is lexed, parsed, type-checked and compiled to native code through LLVM 19, then linked with a Rust runtime that uses the Boehm garbage collector.
 
 ```python
 trait Shape(Display):
@@ -45,6 +45,7 @@ def main():
 | Works now | Not yet |
 |---|---|
 | Functions with type hints, default and keyword arguments, `if`/`elif`/`else`, `while`, `for`, `break`, `continue`, `pass` | Variables in the debugger (line tables and function names only); a VS Code client extension for the language server |
+| An HTTP client (`http.get`, `http.post`, `http.fetch`); header and cookie parameters in typed handlers; regular expressions (`re`) | TLS (`https`), a PostgreSQL driver |
 | An HTTP/1.1 server: `@http.get("/todos/{id}")` route annotations with typed path, query and JSON-body parameters checked at compile time, or call-style routes, middleware, groups, graceful shutdown; the `log` module | TLS, HTTP/2, an HTTP client |
 | WebSockets: `@http.ws("/chat")` endpoints or `server.ws(...)`, `for msg in ws`, sends from any task, pings, fragmentation and the closing handshake handled by the runtime; a `bytes` type | WebSocket compression (`permessage-deflate`) |
 | JSON: `@derive(Json)` with generated encoders and decoders, `@json(name=...)`, error paths, and dynamic `json.Value` | |
@@ -65,7 +66,7 @@ def main():
 
 Constructs from the design that are not implemented are rejected with an error saying they are not supported yet.
 
-Compiled programs run between 1.2x and 1.7x Go's time on allocation, collections, strings and dynamic dispatch, and faster than Go on plain function calls, on sorting with a key function, and on typed JSON. The HTTP server answers small requests faster than Go's `net/http`, and large JSON responses at half its rate. Against CPython they are 11x to 35x faster, except about 2x on string-and-dict-heavy code; see [bench/README.md](bench/README.md).
+Compiled programs run between 1.1x and 1.8x Go's time on allocation, list indexing and dynamic dispatch, and faster than Go on plain function calls, string-keyed counting, sorting with a key function, and typed JSON. The HTTP server answers small requests 1.5x faster than Go's `net/http` and a JSON list of 20 records at 0.72x its rate; 50,000 idle WebSocket connections take 11 KiB each. Against CPython programs are 3x to 33x faster; see [bench/README.md](bench/README.md).
 
 ## Building and running
 

@@ -31,7 +31,7 @@ The Go versions are written the way a Go programmer would write them. Where that
 |---|---|
 | `/plaintext` | Returns a fixed string |
 | `/json` | Encodes a small struct to JSON |
-| `/items` | Builds and encodes a list of 100 structs, about 6 KB of JSON |
+| `/items` | Builds and encodes a list of 20 records, each with a formatted name and a list of tags: 1.1 KB of JSON |
 
 `load.go` is a closed-loop load generator: N connections, each sending the next request as soon as the previous response arrives, over keep-alive. It runs on the same machine as the server.
 
@@ -50,6 +50,37 @@ python3 bench/ws_idle/run.py --connections 50000
 `spawn` (in the main suite) starts 10,000 tasks that each add two numbers, joins them, twenty times. Go uses goroutines with a result channel each; Python a pool of 64 threads.
 
 ## Results
+
+### 2026-11-18, milestone 12, first part
+
+A quieter machine than for milestones 10 and 11 (Go's and CPython's times are back to the milestone 7 levels). Best of 3 runs.
+
+| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+|---|---|---|---|---|---|---|
+| binary_trees | 0.882 s | 0.795 s | 19.900 s | 1.11x the time | 22.6x faster | 72 / 40 / 56 MB |
+| dispatch | 0.047 s | 0.027 s | 0.512 s | 1.76x the time | 10.9x faster | 13 / 13 / 13 MB |
+| fib | 0.019 s | 0.031 s | 0.613 s | 1.68x faster | 33.1x faster | 13 / 13 / 13 MB |
+| json_orders | 0.479 s | 0.540 s | 3.240 s | 1.13x faster | 6.8x faster | 81 / 58 / 130 MB |
+| sieve | 0.072 s | 0.058 s | 1.801 s | 1.25x the time | 25.0x faster | 60 / 65 / 161 MB |
+| sort | 0.696 s | 1.110 s | 2.071 s | 1.59x faster | 3.0x faster | 186 / 81 / 302 MB |
+| spawn | 0.146 s | 0.045 s | 0.926 s | 3.26x the time | 6.4x faster | 13 / 14 / 47 MB |
+| word_count | 0.605 s | 0.698 s | 2.027 s | 1.15x faster | 3.4x faster | 13 / 13 / 13 MB |
+
+HTTP at 256 connections, requests per second (median / p99 latency in ms):
+
+| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+|---|---|---|---|---|
+| `/plaintext` | 815,528 (0.24 / 1.16) | 545,193 (0.30 / 2.21) | 15,765 | 1.50x faster |
+| `/json` | 767,318 (0.26 / 1.18) | 519,676 (0.31 / 2.28) | 16,647 | 1.48x faster |
+| `/items` | 218,610 (1.11 / 2.54) | 303,226 (0.39 / 5.51) | 11,007 | 0.72x |
+
+What changed (docs/08, D73 to D75):
+
+- **`word_count`**: `counts[key] = counts.get_or(key, 0) + 1` now compiles to one dict lookup instead of two: 1.25 s to 0.61 s, from 1.47x Go's time to faster than Go.
+- **The collector's growth policy**: the heap may grow to about twice the live data before a collection, like Go's default, instead of Boehm's default of a third. Allocation-heavy programs got 3% to 7% faster and use 10% to 25% more memory (`binary_trees`, 57 MB to 72 MB); the HTTP server gained much more, because it collected very often with a small live heap.
+- **Responses** are serialised once, straight from the handler's strings.
+- Together these took `/items` from 114,000 to 219,000 requests per second (0.42x to 0.72x Go) and the small-response endpoints from 1.2x to 1.5x Go's rate. Go's median latency on `/items` is still a third of Weby's: the remaining cost is allocation, which is what escape analysis is for.
+- **`spawn`** is unchanged for Weby (0.146 s here, on the quieter machine); Go's time dropped further, so the ratio moved from 2.7x to 3.3x.
 
 ### 2026-11-18, end of milestone 11: frame pointers and debug information
 
@@ -103,7 +134,7 @@ Idle WebSockets: 50,000 connections opened in 3.1 s, all still echoing afterward
 Notes:
 
 - **Small responses** stay ahead of Go, and Weby's 99th-percentile latency is lower than Go's on every endpoint at both connection counts.
-- **`/items`** (100 structs and 6 KB of JSON per request) is where the collector shows, as at Gate 2. It improved slightly at 64 connections (0.51x to 0.56x), since 12 workers contend for Boehm's allocator less than 64 threads did, but at 256 connections Weby's median latency is five times Go's. This is Gate 3's open item; see docs/06.
+- **`/items`** (20 records and 1.1 KB of JSON per request, about a hundred allocations) is where the collector shows, as at Gate 2. It improved slightly at 64 connections (0.51x to 0.56x), since 12 workers contend for Boehm's allocator less than 64 threads did, but at 256 connections Weby's median latency is five times Go's. This is Gate 3's open item; see docs/06.
 - **`spawn`** costs about 0.9 µs per task against Go's 0.3 µs: a stack from the pool, the fiber record, registering it with the collector under its lock, and a queue. Keeping up to 16,384 stacks for reuse (instead of 1,024) took it from 0.22 s to 0.175 s, since most stacks then skip `mmap` and fresh page faults.
 
 ### 2026-11-18, end of milestone 8: HTTP
@@ -119,7 +150,7 @@ Notes:
 Notes:
 
 - **Small responses are faster than Go.** With 64 connections on 12 hardware threads, a thread per connection costs little, and the request path allocates almost nothing: the request is parsed on the connection thread's stack, and only the method, path and body become Weby strings.
-- **`/items` is where the collector shows.** It allocates about 100 structs and a 6 KB string per request. Running it with a large initial heap (`WEBY_GC_INITIAL_HEAP=1000000000`) or `GC_FREE_SPACE_DIVISOR=1` raises it to about 195,000 requests per second (+50%), so about a third of the time is collection. Most of the rest is contention on Boehm's allocator across 64 threads.
+- **`/items` is where the collector shows.** It allocates 20 records, their names and tag lists, and a 1.1 KB string per request: about a hundred allocations. Running it with a large initial heap (`WEBY_GC_INITIAL_HEAP=1000000000`) or `GC_FREE_SPACE_DIVISOR=1` raises it to about 195,000 requests per second (+50%), so about a third of the time is collection. Most of the rest is contention on Boehm's allocator across 64 threads.
 - **Gate 2** (docs/06, "Gates"): on the JSON endpoints Weby is ahead of Go for small responses and at half Go's speed for large ones. Collection is about a third of the `/items` time; the larger part is 64 threads contending for the allocator, which is the thread model. The gate's answer is therefore to proceed to stage 2 (fibers on one worker per core) and measure again at Gate 3; see docs/06.
 
 ### 2026-11-18, end of milestone 7

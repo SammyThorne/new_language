@@ -1,0 +1,127 @@
+"""
+Regular expressions: Perl-like syntax without look-around or backreferences. Matching takes time
+linear in the length of the text, whatever the pattern, so patterns from users are safe.
+
+    import re
+
+    date = re.compile("(?P<year>\\d{4})-(?P<month>\\d{2})").unwrap()
+    match date.find("due 2026-11-18"):
+        case Some(m):
+            print(m.text, m.named("year"))       # 2026-11 2026
+        case None:
+            print("no date")
+    print(date.replace_all("2026-11 and 2027-01", "$month/$year"))
+
+Patterns are ordinary strings, so a backslash is written twice: `"\\d+"`. Positions are byte
+offsets, like string indexing.
+"""
+
+@extern("lrt_re_compile")
+def compile_raw(pattern: str) -> int
+
+@extern("lrt_re_is_match")
+def is_match_raw(id: int, text: str) -> int
+
+@extern("lrt_re_find")
+def find_raw(id: int, text: str, start: int) -> int
+
+@extern("lrt_re_find_all")
+def find_all_raw(id: int, text: str) -> int
+
+@extern("lrt_re_split")
+def split_raw(id: int, text: str) -> int
+
+@extern("lrt_re_span")
+def span(index: int, end: int) -> int
+
+@extern("lrt_re_group_index")
+def group_index(id: int, name: str) -> int
+
+@extern("lrt_re_replace")
+def replace_raw(id: int, text: str, replacement: str, all: int) -> str
+
+@extern("lrt_io_error")
+def last_error() -> str
+
+pub struct RegexError:
+    """A pattern that does not compile."""
+    pattern: str
+    reason: str
+
+impl Error for RegexError:
+    def message(self) -> str:
+        return f"invalid pattern `{self.pattern}`: {self.reason}"
+
+pub struct Match:
+    """One match: the text matched, where it is, and what its groups matched."""
+    text: str
+    start: int
+    end: int
+    priv groups: list[str?] = []
+    priv regex: Regex? = None
+
+impl Match:
+    def group(self, index: int) -> str?:
+        """What group `index` matched (0 is the whole match), or `None` if it took no part."""
+        if index < 0 or index >= len(self.groups):
+            return None
+        return self.groups[index]
+
+    def named(self, name: str) -> str?:
+        """What the group `(?P<name>...)` matched."""
+        match self.regex:
+            case Some(regex):
+                return self.group(group_index(regex.id, name))
+            case None:
+                return None
+
+@frozen
+pub struct Regex:
+    """A compiled pattern. It can be shared between tasks."""
+    pattern: str
+    priv id: int
+
+pub def compile(pattern: str) -> Result[Regex, RegexError]:
+    id = compile_raw(pattern)
+    if id < 0:
+        return Err(RegexError(pattern, last_error()))
+    return Regex(pattern, id)
+
+impl Regex:
+    def is_match(self, text: str) -> bool:
+        """Whether the pattern matches anywhere in `text`."""
+        return is_match_raw(self.id, text) == 1
+
+    def find(self, text: str, start: int = 0) -> Match?:
+        """The first match at or after byte `start`, with its groups."""
+        count = find_raw(self.id, text, start)
+        if count == 0:
+            return None
+        groups: list[str?] = []
+        for i in range(count):
+            a = span(i, 0)
+            groups.append(None if a < 0 else text[a:span(i, 1)])
+        return Match(text[span(0, 0):span(0, 1)], span(0, 0), span(0, 1), groups, self)
+
+    def find_all(self, text: str) -> list[Match]:
+        """Every non-overlapping match, left to right (without their groups)."""
+        count = find_all_raw(self.id, text)
+        matches: list[Match] = []
+        for i in range(count):
+            a = span(i, 0)
+            b = span(i, 1)
+            matches.append(Match(text[a:b], a, b))
+        return matches
+
+    def split(self, text: str) -> list[str]:
+        """The pieces of `text` between matches."""
+        count = split_raw(self.id, text)
+        return [text[span(i, 0):span(i, 1)] for i in range(count)]
+
+    def replace(self, text: str, replacement: str) -> str:
+        """Replace the first match. `$1` or `${name}` in `replacement` insert a group."""
+        return replace_raw(self.id, text, replacement, 0)
+
+    def replace_all(self, text: str, replacement: str) -> str:
+        """Replace every match."""
+        return replace_raw(self.id, text, replacement, 1)
