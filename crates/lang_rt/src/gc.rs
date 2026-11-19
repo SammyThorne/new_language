@@ -14,7 +14,6 @@
 //!   before collecting, like Go's default `GOGC=100`; Boehm's own default, 3, collects about
 //!   three times as often (docs/08, D73).
 
-use crate::TypeDesc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[link(name = "libgc.so.1", kind = "dylib", modifiers = "+verbatim")]
@@ -83,20 +82,10 @@ pub fn alloc_atomic(size: usize) -> *mut u8 {
     ptr
 }
 
-/// Allocate an object whose first word is its type descriptor. Used for structs.
-///
-/// # Safety
-/// `size` must be at least one word.
-#[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn lrt_alloc(size: i64, desc: *const TypeDesc) -> *mut u8 {
-    let ptr = alloc(size as usize);
-    // SAFETY: the allocation is at least one word and suitably aligned.
-    unsafe { *(ptr as *mut *const TypeDesc) = desc };
-    ptr
-}
-
-/// Allocate zeroed, scanned memory with no descriptor: the cells of captured variables and the
-/// environments of closures.
+/// Allocate zeroed, scanned memory: structs and enum variants (whose descriptor the generated
+/// code then stores in the first word), the cells of captured variables, and the environments of
+/// closures. The code generator declares this as an allocator to LLVM (fresh, zeroed, 16-byte
+/// aligned, no other effects, never unwinds), so it must stay exactly that.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_alloc_raw(size: i64) -> *mut u8 {
     alloc(size as usize)

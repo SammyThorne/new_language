@@ -178,7 +178,6 @@ fn symbol_name(module: &str, function: &str) -> String {
 /// The runtime's C-ABI functions: name, return type, parameter types. Type letters: `p` pointer,
 /// `i` i64, `f` double, `s` the `{ ptr, i64 }` string pair, `v` void.
 const RUNTIME: &[(&str, &str, &str)] = &[
-    ("lrt_alloc", "p", "ip"),
     ("lrt_alloc_raw", "p", "i"),
     ("lrt_task_new", "p", "i"),
     ("lrt_task_result", "p", "p"),
@@ -199,7 +198,7 @@ const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_dict_eq", "i", "ppp"),
     ("lrt_http_serve", "v", "ippp"),
     ("lrt_json_reader_new", "p", "pi"),
-    ("lrt_json_reader_free", "v", "p"),
+    ("lrt_json_reader_free", "v", "pp"),
     ("lrt_json_finish", "i", "p"),
     ("lrt_json_failed", "i", "p"),
     ("lrt_json_error_message", "s", "p"),
@@ -232,7 +231,7 @@ const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_panic_index", "v", "iipi"),
     ("lrt_int_pow", "i", "iipi"),
     ("lrt_float_to_int", "i", "fpi"),
-    ("lrt_builder_new", "p", ""),
+    ("lrt_builder_reserve", "v", "pi"),
     ("lrt_builder_push", "v", "ppi"),
     ("lrt_builder_push_int", "v", "pi"),
     ("lrt_builder_push_float", "v", "pf"),
@@ -377,6 +376,8 @@ struct Codegen<'ctx, 'a> {
     strings: HashMap<String, PointerValue<'ctx>>,
     descs: HashMap<Ty, PointerValue<'ctx>>,
     helpers: HashMap<(Helper, Ty), FunctionValue<'ctx>>,
+    /// Type-based alias analysis access tags, by name (see [`Codegen::tbaa`]).
+    tbaa: HashMap<String, inkwell::values::MetadataValue<'ctx>>,
     unwind_table: Attribute,
     frame_pointer: Attribute,
     state: Option<FnState<'ctx>>,
@@ -437,6 +438,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             strings: HashMap::new(),
             descs: HashMap::new(),
             helpers: HashMap::new(),
+            tbaa: HashMap::new(),
             unwind_table: cx.create_enum_attribute(Attribute::get_named_enum_kind_id("uwtable"), 2),
             frame_pointer: cx.create_string_attribute("frame-pointer", "all"),
             state: None,
@@ -736,13 +738,123 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         };
         let function = self.module.add_function(name, fn_type, Some(Linkage::External));
         function.add_attribute(AttributeLoc::Function, self.unwind_table);
-        if name.starts_with("lrt_panic") {
-            for attr in ["noreturn", "cold"] {
-                let attribute = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id(attr), 0);
-                function.add_attribute(AttributeLoc::Function, attribute);
-            }
-        }
+        self.add_runtime_attributes(name, function);
         function
+    }
+
+    /// What LLVM may assume about a runtime function, so that it can remove, merge and move
+    /// calls (docs/09, phase 1). Only claims that hold for the Rust code are made: a function
+    /// marked `nounwind` never panics, and one with `memory(...)` touches nothing else.
+    fn add_runtime_attributes(&self, name: &str, function: FunctionValue<'ctx>) {
+        let enum_attr =
+            |kind: &str, value: u64| self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id(kind), value);
+        let on_fn = |attribute| function.add_attribute(AttributeLoc::Function, attribute);
+        // `memory(...)` packs two bits (read 1, write 2) per location: argument memory, memory
+        // the program cannot reach, and everything else.
+        const ARG_READ: u64 = 1;
+        const INACCESSIBLE_RW: u64 = 3 << 2;
+        if name.starts_with("lrt_panic") {
+            on_fn(enum_attr("noreturn", 0));
+            on_fn(enum_attr("cold", 0));
+            return;
+        }
+        let memory = match name {
+            // The collector's allocation: fresh, zeroed, 16-byte aligned memory that nothing
+            // else points to. Telling LLVM this lets it delete allocations whose objects never
+            // escape, and drop the zeroing that used to follow each one.
+            "lrt_alloc_raw" => {
+                for kind in ["noalias", "nonnull", "noundef"] {
+                    function.add_attribute(AttributeLoc::Return, enum_attr(kind, 0));
+                }
+                function.add_attribute(AttributeLoc::Return, enum_attr("align", 16));
+                // AllocFnKind: Alloc (1) | Zeroed (16).
+                on_fn(enum_attr("allockind", 1 | 16));
+                // allocsize(0): the size is argument 0; no element-count argument (all ones).
+                on_fn(enum_attr("allocsize", 0xFFFF_FFFF));
+                on_fn(self.cx.create_string_attribute("alloc-family", "lang_rt_gc"));
+                INACCESSIBLE_RW
+            }
+            "lrt_str_cmp" | "lrt_str_find" | "lrt_str_starts_with" | "lrt_str_ends_with" => ARG_READ,
+            "lrt_str_concat" => ARG_READ | INACCESSIBLE_RW,
+            _ => return,
+        };
+        on_fn(enum_attr("memory", memory));
+        on_fn(enum_attr("nounwind", 0));
+        on_fn(enum_attr("willreturn", 0));
+    }
+
+    // ---- alias information ---------------------------------------------------------------
+
+    /// The type-based alias analysis (TBAA) access tag named `name`. Memory reached through
+    /// different tags never overlaps, which lets LLVM keep a list's length and data pointer in
+    /// registers across stores to its elements or to struct fields (docs/09, phase 1). The tags:
+    ///
+    /// - `list.len`, `list.cap`, `list.data`: the fields of a list object;
+    /// - `list.elem`: the elements in any list's buffer;
+    /// - `field.S.N`: field `N` of struct `S`.
+    ///
+    /// Every location is accessed through at most one tag; other accesses (runtime calls,
+    /// `memcpy`, helpers that do not tag) carry none, and LLVM treats those as possibly aliasing
+    /// anything.
+    fn tbaa(&mut self, name: &str) -> inkwell::values::MetadataValue<'ctx> {
+        if let Some(&tag) = self.tbaa.get(name) {
+            return tag;
+        }
+        let root = match self.tbaa.get("") {
+            Some(&root) => root,
+            None => {
+                let root = self.cx.metadata_node(&[self.cx.metadata_string("generated code").into()]);
+                self.tbaa.insert(String::new(), root);
+                root
+            }
+        };
+        let zero = self.cx.i64_type().const_zero();
+        let node = self.cx.metadata_node(&[self.cx.metadata_string(name).into(), root.into(), zero.into()]);
+        let tag = self.cx.metadata_node(&[node.into(), node.into(), zero.into()]);
+        self.tbaa.insert(name.to_string(), tag);
+        tag
+    }
+
+    /// Attach the access tag `name` to a load or store.
+    fn tag_access(&mut self, access: inkwell::values::InstructionValue<'ctx>, name: &str) {
+        let tag = self.tbaa(name);
+        let kind = self.cx.get_kind_id("tbaa");
+        access.set_metadata(tag, kind).must();
+    }
+
+    /// A load carrying the access tag `tag`.
+    pub(crate) fn load_tagged(
+        &mut self,
+        ty: impl BasicType<'ctx>,
+        ptr: PointerValue<'ctx>,
+        tag: &str,
+        name: &str,
+    ) -> BasicValueEnum<'ctx> {
+        let value = self.b.build_load(ty, ptr, name).must();
+        let instruction = value.as_instruction_value().expect("a load is an instruction");
+        self.tag_access(instruction, tag);
+        value
+    }
+
+    /// A store carrying the access tag `tag`.
+    pub(crate) fn store_tagged(&mut self, ptr: PointerValue<'ctx>, value: BasicValueEnum<'ctx>, tag: &str) {
+        let store = self.b.build_store(ptr, value).must();
+        self.tag_access(store, tag);
+    }
+
+    /// The access tag for field `index` of the struct type `ty`.
+    pub(crate) fn field_tag(&self, ty: Ty, index: usize) -> String {
+        let TyKind::Struct(id) = *self.kind(ty) else { unreachable!("field of a non-struct") };
+        format!("field.{}.{index}", id.0)
+    }
+
+    /// A new collected object of `size` bytes whose first word is the descriptor `desc`, the
+    /// rest zeroed. The descriptor is stored here rather than by the runtime, so that LLVM sees
+    /// every write to the object.
+    pub(crate) fn alloc_object(&mut self, size: IntValue<'ctx>, desc: PointerValue<'ctx>) -> PointerValue<'ctx> {
+        let object = self.call_rt("lrt_alloc_raw", &[size.into()]).unwrap().into_pointer_value();
+        self.b.build_store(object, desc).must();
+        object
     }
 
     fn call_rt(&mut self, name: &str, args: &[BasicValueEnum<'ctx>]) -> Option<BasicValueEnum<'ctx>> {

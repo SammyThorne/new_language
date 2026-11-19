@@ -1,5 +1,9 @@
 //! A growable string buffer in collected memory. Generated code uses it for f-strings, `str(x)`
 //! and `print`: create, push pieces, then finish into a `str` or print it.
+//!
+//! The `Builder` record itself lives on the generated function's stack (zeroed, then optionally
+//! given a capacity with `lrt_builder_reserve`); only its buffer is collected memory. The stack
+//! is scanned, so the buffer stays alive while the builder is in use.
 
 use crate::{Str, gc};
 
@@ -11,17 +15,20 @@ pub struct Builder {
 }
 
 impl Builder {
+    fn grow_to(&mut self, cap: usize) {
+        let data = gc::alloc_atomic(cap);
+        if self.len > 0 {
+            // SAFETY: both regions are at least `len` bytes and do not overlap.
+            unsafe { std::ptr::copy_nonoverlapping(self.data, data, self.len as usize) };
+        }
+        self.data = data;
+        self.cap = cap as i64;
+    }
+
     pub fn push(&mut self, bytes: &[u8]) {
         let needed = self.len as usize + bytes.len();
         if needed > self.cap as usize {
-            let cap = needed.max(self.cap as usize * 2).max(32);
-            let data = gc::alloc_atomic(cap);
-            if self.len > 0 {
-                // SAFETY: both regions are at least `len` bytes and do not overlap.
-                unsafe { std::ptr::copy_nonoverlapping(self.data, data, self.len as usize) };
-            }
-            self.data = data;
-            self.cap = cap as i64;
+            self.grow_to(needed.max(self.cap as usize * 2).max(32));
         }
         // SAFETY: capacity was ensured above.
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.data.add(self.len as usize), bytes.len()) };
@@ -71,6 +78,42 @@ pub extern "C-unwind" fn lrt_builder_new() -> *mut Builder {
     gc::alloc(std::mem::size_of::<Builder>()) as *mut Builder
 }
 
+/// Make room for at least `additional` more bytes, so that pieces up to that size are written
+/// without growing. Generated code calls this once per f-string with an estimate of its length.
+///
+/// # Safety
+/// `b` points to a builder.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_builder_reserve(b: *mut Builder, additional: i64) {
+    let b = unsafe { builder(b) };
+    let needed = b.len as usize + additional.max(0) as usize;
+    if needed > b.cap as usize {
+        b.grow_to(needed);
+    }
+}
+
+/// The decimal digits of `value`, written into the end of `buffer`; returns where they start.
+fn format_u64(mut value: u64, buffer: &mut [u8; 20]) -> usize {
+    let mut at = buffer.len();
+    loop {
+        at -= 1;
+        buffer[at] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            return at;
+        }
+    }
+}
+
+fn push_i64(b: &mut Builder, value: i64) {
+    let mut buffer = [0u8; 20];
+    let at = format_u64(value.unsigned_abs(), &mut buffer);
+    if value < 0 {
+        b.push(b"-");
+    }
+    b.push(&buffer[at..]);
+}
+
 /// # Safety
 /// `b` comes from `lrt_builder_new`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
@@ -82,7 +125,7 @@ pub unsafe extern "C-unwind" fn lrt_builder_push(b: *mut Builder, ptr: *const u8
 /// `b` comes from `lrt_builder_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_builder_push_int(b: *mut Builder, value: i64) {
-    unsafe { builder(b).push(value.to_string().as_bytes()) };
+    push_i64(unsafe { builder(b) }, value);
 }
 
 /// Append an unsigned 64-bit integer (a `u64`).
@@ -91,7 +134,9 @@ pub unsafe extern "C-unwind" fn lrt_builder_push_int(b: *mut Builder, value: i64
 /// `b` comes from `lrt_builder_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_builder_push_uint(b: *mut Builder, value: i64) {
-    unsafe { builder(b).push((value as u64).to_string().as_bytes()) };
+    let mut buffer = [0u8; 20];
+    let at = format_u64(value as u64, &mut buffer);
+    unsafe { builder(b).push(&buffer[at..]) };
 }
 
 /// # Safety
@@ -177,6 +222,18 @@ pub unsafe extern "C-unwind" fn lrt_builder_print(b: *mut Builder) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integers_format_like_to_string() {
+        for value in [0, 1, -1, 9, 10, -10, 1234567890, i64::MAX, i64::MIN] {
+            let mut b = Builder { data: std::ptr::null_mut(), len: 0, cap: 0 };
+            push_i64(&mut b, value);
+            assert_eq!(b.bytes(), value.to_string().as_bytes());
+        }
+        let mut buffer = [0u8; 20];
+        let at = format_u64(u64::MAX, &mut buffer);
+        assert_eq!(&buffer[at..], u64::MAX.to_string().as_bytes());
+    }
 
     #[test]
     fn repr_matches_python() {

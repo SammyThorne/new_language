@@ -526,6 +526,28 @@ Not done: statement caching (each query is parsed each time; a cache keyed by SQ
 
 JSONTestSuite and the Autobahn WebSocket suite are run by hand (`tests/conformance/README.md`), against programs that live in the repository. Autobahn's suite only runs on Python 2; it was installed into a portable PyPy 2.7 with its TLS dependency left out (the fuzzing client does not use it). Neither suite is vendored, and CI does not run them, because each needs a download and Autobahn takes minutes. Results are recorded in [07](07-testing-and-performance.md#protocol-conformance).
 
+### D82. The compiler tells LLVM what the runtime does (performance plan, phase 1)
+
+LLVM could not optimise around runtime calls, because it knew nothing about them ([09](09-performance-plan.md)). Phase 1 gives it that information instead of changing any layout:
+
+- **Allocation.** Structs, enum variants, captured-variable cells and closure environments are allocated by `lrt_alloc_raw`, which is declared as an allocator:
+  - `allockind("alloc,zeroed")`, `allocsize(0)` and an allocation family;
+  - a `noalias`, 16-byte aligned result;
+  - `memory(inaccessiblemem: readwrite)`, `nounwind`, `willreturn`.
+
+  Generated code now stores the descriptor word itself, so the "zeroed" claim holds. LLVM removes allocations whose objects never escape once inlining exposes them: a loop building 50 million temporary structs went from 0.345 s to 0.001 s. It also drops the zeroing that used to follow every allocation.
+- **Side effects of runtime functions.** A few string functions declare their memory effects: comparison, `find`, `starts_with` and `ends_with` read only their arguments, and `concat` also allocates. Only functions that cannot panic are marked `nounwind`.
+- **Alias metadata (TBAA)** separates a list's length, capacity and data pointer, list elements, and each struct field. Loops keep the length and data pointer in registers across element and field stores. Accesses without a tag (runtime calls, `memcpy`, helpers) still alias everything, so a missed tag costs speed, never correctness.
+- **`append`** is inline when the buffer has room: a compare, a store and a length update.
+- **String `==`** is inline: lengths, then `memcmp`, which LLVM expands for constant strings.
+- **String builders** for f-strings, `str(x)` and `print` are stack slots, not collected objects. Each f-string reserves its estimated length once. Integers are formatted without a Rust heap allocation.
+
+**Rejected.** `-O3` and `-mcpu=native`: measured, no gain. Writing these fast paths in the runtime: the runtime is built by `rustc`'s LLVM 23, which LLVM 19 cannot read, so nothing in it can be inlined into generated code.
+
+**Found on the way.** The JSON reader is Rust heap memory holding a pointer to the text it reads, which the "Rust heap rule" in `lang_rt` forbids. Generated code had kept the text alive by chance; once string comparison was inlined, a release build under collector stress freed the text mid-parse. `lrt_json_reader_free` now takes the text as an argument, which keeps it alive until then. No other runtime object holds a collected pointer from the Rust heap. Programs now also run as release builds under collector stress in `tests/run`, since that combination is what exposed it.
+
+**A caveat on memory figures.** With a conservative collector, peak memory can move by a fifth on unrelated changes. One choice of f-string size estimate left a stale word that looked like a pointer to a tree, and `binary_trees` peaked at 90 MB instead of 73 MB. Every other estimate tried gave 73 MB. Compare memory across several builds before attributing a change to it.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

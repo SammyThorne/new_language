@@ -356,10 +356,13 @@ pub unsafe extern "C-unwind" fn lrt_json_reader_new(ptr: *const u8, len: i64) ->
     Box::into_raw(Box::new(Reader { input, pos: 0, frames: Vec::new(), path: Vec::new(), error: None }))
 }
 
+/// Free the reader. `_input` is the text it read: the reader lives on the Rust heap, which the
+/// collector does not scan, so generated code passes the text here to keep it alive until now.
+///
 /// # Safety
 /// `r` comes from `lrt_json_reader_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn lrt_json_reader_free(r: *mut Reader) {
+pub unsafe extern "C-unwind" fn lrt_json_reader_free(r: *mut Reader, _input: *const u8) {
     drop(unsafe { Box::from_raw(r) });
 }
 

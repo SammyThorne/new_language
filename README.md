@@ -122,14 +122,14 @@ Constructs from the design that are not implemented are rejected with an error s
 
 | Compared with Go | Result |
 |---|---|
-| Plain function calls, string-keyed counting, sorting with a key function, typed JSON | Faster than Go |
-| Allocation, list indexing, dynamic dispatch | 1.1x to 1.8x Go's time |
+| Plain function calls, list building and indexing, string-keyed counting, sorting with a key function (2.4x), typed JSON | Faster than Go |
+| Allocation, dynamic dispatch | 1.1x to 1.7x Go's time |
 | Starting tasks | About 3x Go's time |
 | HTTP server, small responses | 1.5x to 1.6x Go's `net/http` throughput |
 | HTTP server, a JSON list of 20 records | 0.7x to 0.8x Go's throughput |
 | Idle WebSocket connections | 11 KiB each, measured with 50,000 |
 
-Programs are 3x to 33x faster than the same programs in CPython. The numbers and how they were measured are in [bench/README.md](bench/README.md). Allocation is the remaining gap with Go; escape analysis is the planned next step.
+Programs are 3x to 42x faster than the same programs in CPython. The numbers and how they were measured are in [bench/README.md](bench/README.md). Allocation is the remaining gap with Go; [docs/09](docs/09-performance-plan.md) is the plan for closing it, and its first phase is done.
 
 ## Building and running
 
@@ -194,6 +194,7 @@ The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real socke
 | [docs/06-roadmap.md](docs/06-roadmap.md) | Milestones with exit criteria |
 | [docs/07-testing-and-performance.md](docs/07-testing-and-performance.md) | Test strategy, benchmarks, performance targets |
 | [docs/08-decisions-and-risks.md](docs/08-decisions-and-risks.md) | Decision log with rejected alternatives, risks, open questions |
+| [docs/09-performance-plan.md](docs/09-performance-plan.md) | Where the time goes today, and the phased plan to close the gaps to Go |
 | [bench/README.md](bench/README.md) | Benchmarks against Go and CPython |
 | [editors/README.md](editors/README.md) | Editor support and the language server |
 

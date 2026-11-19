@@ -165,15 +165,18 @@ impl<'ctx> Codegen<'ctx, '_> {
                 }
             }
             Place::Field { object, index } => {
+                let tag = self.field_tag(object.ty, *index);
                 let ptr = self.field_ptr(object, *index);
-                self.b.build_store(ptr, value).must();
+                self.store_tagged(ptr, value, &tag);
             }
             Place::Index { container, index, span } => {
                 let container_value = self.value(container).into_pointer_value();
                 let index_value = self.value(index);
                 let ptr = match self.kind(container.ty) {
                     TyKind::List(elem) => {
-                        self.list_elem_ptr(container_value, index_value.into_int_value(), *elem, *span)
+                        let ptr = self.list_elem_ptr(container_value, index_value.into_int_value(), *elem, *span);
+                        self.store_tagged(ptr, value, "list.elem");
+                        return;
                     }
                     TyKind::Dict(..) => {
                         let key = self.spill(index_value);

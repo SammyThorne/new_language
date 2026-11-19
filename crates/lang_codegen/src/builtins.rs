@@ -375,10 +375,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let struct_type = self.struct_types[id.0];
                 let size = self.td.get_abi_size(&struct_type);
                 let desc = self.desc(args[0].ty);
-                let copy = self
-                    .call_rt("lrt_alloc", &[self.i64(size as i64).into(), desc.into()])
-                    .unwrap()
-                    .into_pointer_value();
+                let copy = self.alloc_object(self.i64(size as i64), desc);
                 self.b.build_memcpy(copy, 8, values[0].into_pointer_value(), 8, self.i64(size as i64)).must();
                 copy.into()
             }

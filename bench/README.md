@@ -51,6 +51,38 @@ python3 bench/ws_idle/run.py --connections 50000
 
 ## Results
 
+### 2026-11-19, performance plan phase 1
+
+Phase 1 of [docs/09](../docs/09-performance-plan.md): allocator and alias information for LLVM, inline `append` and string equality, builders on the stack (docs/08, D82). Best of 3 runs.
+
+| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+|---|---|---|---|---|---|---|
+| binary_trees | 0.933 s | 0.840 s | 19.410 s | 1.11x the time | 20.8x faster | 73 / 40 / 56 MB |
+| dispatch | 0.049 s | 0.028 s | 0.564 s | 1.72x the time | 11.5x faster | 13 / 13 / 13 MB |
+| fib | 0.022 s | 0.033 s | 0.601 s | 1.51x faster | 27.5x faster | 13 / 13 / 13 MB |
+| json_orders | 0.498 s | 0.580 s | 3.246 s | 1.16x faster | 6.5x faster | 81 / 60 / 130 MB |
+| sieve | 0.049 s | 0.057 s | 2.059 s | 1.16x faster | 41.8x faster | 59 / 54 / 161 MB |
+| sort | 0.467 s | 1.106 s | 2.032 s | 2.37x faster | 4.3x faster | 147 / 81 / 302 MB |
+| spawn | 0.148 s | 0.044 s | 0.956 s | 3.38x the time | 6.5x faster | 13 / 16 / 47 MB |
+| word_count | 0.665 s | 0.747 s | 2.156 s | 1.12x faster | 3.2x faster | 13 / 13 / 13 MB |
+
+HTTP at 256 connections, requests per second (median / p99 latency in ms), second of two runs:
+
+| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+|---|---|---|---|---|
+| `/plaintext` | 928,678 (0.20 / 1.02) | 618,199 (0.27 / 1.91) | 21,944 | 1.50x faster |
+| `/json` | 846,318 (0.21 / 1.12) | 583,292 (0.29 / 2.04) | 20,646 | 1.45x faster |
+| `/items` | 228,440 (1.02 / 2.25) | 308,806 (0.38 / 5.34) | 14,172 | 0.74x |
+
+What changed:
+
+- **`sieve`** went from 1.20x Go's time to faster than Go (0.067 s to 0.049 s). The `append` fast path is inline, and alias information keeps the list's length and data pointer in registers through the marking loop. On its own, 20 million appends take 15 ms, against 33 ms before and Go's 18 ms.
+- **`sort`** went from 0.71 s to 0.47 s (1.57x to 2.37x faster than Go). Building the list of keys is appends, and the comparison loop reads elements without reloading the list's fields.
+- **Temporary structs** that do not escape after inlining are no longer allocated at all. No benchmark here builds them in a hot loop, but request handlers do.
+- The `binary_trees` row is the same program and the same memory as before (73 MB, 0.93 s). The machine was slower for this run, as Go's 0.840 s against 0.769 s yesterday shows. The ratio, 1.11x, is unchanged within noise.
+- **`/items`** moved only from 0.72x to 0.74x Go. Its allocations are mostly in the router, the response and the JSON body, which phases 2 and 3 address. The two HTTP runs differed by up to 15% on `/json` for both servers, so the small-response rows are noise-level changes.
+- **`dispatch`** and **`spawn`** are untouched by phase 1; they are phase 4 and phase 3 work.
+
 ### 2026-11-18, milestone 12, first part
 
 A quieter machine than for milestones 10 and 11 (Go's and CPython's times are back to the milestone 7 levels). Best of 3 runs.

@@ -58,7 +58,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         let variant_type = self.variant_types[enum_index][index];
         let desc = self.desc(ty);
         let size = self.i64(self.td.get_abi_size(&variant_type) as i64);
-        let object = self.call_rt("lrt_alloc", &[size.into(), desc.into()]).unwrap().into_pointer_value();
+        let object = self.alloc_object(size, desc);
         let tag = self.b.build_struct_gep(variant_type, object, 1, "").must();
         self.b.build_store(tag, self.i64(index as i64)).must();
         for (i, value) in values.into_iter().enumerate() {
@@ -405,7 +405,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         let struct_type = self.struct_types[id.0];
         let size = self.i64(self.td.get_abi_size(&struct_type) as i64);
         let desc = self.desc(ty);
-        let object = self.call_rt("lrt_alloc", &[size.into(), desc.into()]).unwrap().into_pointer_value();
+        let object = self.alloc_object(size, desc);
         for (index, value) in values.iter().enumerate() {
             let ptr = self.b.build_struct_gep(struct_type, object, index as u32 + 1, "").must();
             self.b.build_store(ptr, *value).must();
@@ -419,7 +419,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         let ty = self.program.structs[id.0].ty;
         let size = self.i64(self.td.get_abi_size(&struct_type) as i64);
         let desc = self.desc(ty);
-        let object = self.call_rt("lrt_alloc", &[size.into(), desc.into()]).unwrap().into_pointer_value();
+        let object = self.alloc_object(size, desc);
         let expected = self.str_const(expected);
         for (index, value) in [text, expected.as_basic_value_enum()].into_iter().enumerate() {
             let ptr = self.b.build_struct_gep(struct_type, object, index as u32 + 1, "").must();

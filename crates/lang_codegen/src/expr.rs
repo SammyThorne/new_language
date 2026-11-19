@@ -88,16 +88,18 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let size = self.i64(self.td.get_abi_size(&struct_type) as i64);
                 let desc = self.desc(expr.ty);
                 let values: Vec<BasicValueEnum> = fields.iter().map(|f| self.value(f)).collect();
-                let object = self.call_rt("lrt_alloc", &[size.into(), desc.into()]).unwrap().into_pointer_value();
+                let object = self.alloc_object(size, desc);
                 for (index, value) in values.into_iter().enumerate() {
                     let ptr = self.b.build_struct_gep(struct_type, object, index as u32 + 1, "").must();
-                    self.b.build_store(ptr, value).must();
+                    let tag = self.field_tag(expr.ty, index);
+                    self.store_tagged(ptr, value, &tag);
                 }
                 object.into()
             }
             ExprKind::Field { object, index } => {
+                let tag = self.field_tag(object.ty, *index);
                 let ptr = self.field_ptr(object, *index);
-                self.b.build_load(self.value_type(expr.ty), ptr, "").must()
+                self.load_tagged(self.value_type(expr.ty), ptr, &tag, "")
             }
             ExprKind::List(items) => {
                 let desc = self.desc(expr.ty);
@@ -135,7 +137,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 match *self.kind(container.ty) {
                     TyKind::List(elem) => {
                         let ptr = self.list_elem_ptr(container_value, index_value.into_int_value(), elem, expr.span);
-                        self.b.build_load(self.value_type(elem), ptr, "").must()
+                        self.load_tagged(self.value_type(elem), ptr, "list.elem", "")
                     }
                     TyKind::Dict(key, _) => {
                         let ptr = self.dict_lookup(container_value, index_value, key, expr.span);
@@ -165,7 +167,7 @@ impl<'ctx> Codegen<'ctx, '_> {
                 }
             }
             ExprKind::FString(parts) => {
-                let builder = self.builder_new();
+                let builder = self.builder_with_capacity(self.fstring_estimate(parts));
                 for part in parts {
                     match part {
                         FPart::Literal(text) => self.push_text(builder, text),
@@ -492,7 +494,7 @@ impl<'ctx> Codegen<'ctx, '_> {
 
     pub(crate) fn list_len(&mut self, list: PointerValue<'ctx>) -> IntValue<'ctx> {
         let ptr = self.b.build_struct_gep(self.list_type, list, 1, "").must();
-        self.b.build_load(self.cx.i64_type(), ptr, "len").must().into_int_value()
+        self.load_tagged(self.cx.i64_type(), ptr, "list.len", "len").into_int_value()
     }
 
     pub(crate) fn dict_len(&mut self, dict: PointerValue<'ctx>) -> IntValue<'ctx> {
@@ -502,7 +504,7 @@ impl<'ctx> Codegen<'ctx, '_> {
 
     fn list_data(&mut self, list: PointerValue<'ctx>) -> PointerValue<'ctx> {
         let ptr = self.b.build_struct_gep(self.list_type, list, 3, "").must();
-        self.b.build_load(self.ptr_type(), ptr, "data").must().into_pointer_value()
+        self.load_tagged(self.ptr_type(), ptr, "list.data", "data").into_pointer_value()
     }
 
     pub(crate) fn list_elem_unchecked(
@@ -515,7 +517,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         let elem_type = self.value_type(elem);
         // SAFETY (LLVM): the caller has checked that `index` is within the list.
         let ptr = unsafe { self.b.build_in_bounds_gep(elem_type, data, &[index], "").must() };
-        self.b.build_load(elem_type, ptr, "").must()
+        self.load_tagged(elem_type, ptr, "list.elem", "")
     }
 
     /// Address of `list[index]`, with Python's negative indexing and a bounds check.
@@ -541,9 +543,36 @@ impl<'ctx> Codegen<'ctx, '_> {
         unsafe { self.b.build_in_bounds_gep(self.value_type(elem), data, &[adjusted], "").must() }
     }
 
+    /// Append `value`. When the buffer has room, this is inline: a compare, a store and a
+    /// length update; otherwise `lrt_list_push` grows the buffer and returns the new slot.
     pub(crate) fn list_push(&mut self, list: PointerValue<'ctx>, value: BasicValueEnum<'ctx>) {
-        let slot = self.call_rt("lrt_list_push", &[list.into()]).unwrap().into_pointer_value();
-        self.b.build_store(slot, value).must();
+        let i64_type = self.cx.i64_type();
+        let len_ptr = self.b.build_struct_gep(self.list_type, list, 1, "").must();
+        let cap_ptr = self.b.build_struct_gep(self.list_type, list, 2, "").must();
+        let len = self.load_tagged(i64_type, len_ptr, "list.len", "len").into_int_value();
+        let cap = self.load_tagged(i64_type, cap_ptr, "list.cap", "cap").into_int_value();
+        let has_room = self.b.build_int_compare(IntPredicate::SLT, len, cap, "").must();
+        let fast = self.block("push.fast");
+        let slow = self.block("push.slow");
+        let join = self.block("push.join");
+        self.b.build_conditional_branch(has_room, fast, slow).must();
+
+        self.b.position_at_end(fast);
+        let data = self.list_data(list);
+        // SAFETY (LLVM): `len < cap`, so the slot is inside the buffer.
+        let fast_slot = unsafe { self.b.build_in_bounds_gep(value.get_type(), data, &[len], "").must() };
+        let next = self.b.build_int_add(len, self.i64(1), "").must();
+        self.store_tagged(len_ptr, next.into(), "list.len");
+        self.b.build_unconditional_branch(join).must();
+
+        self.b.position_at_end(slow);
+        let slow_slot = self.call_rt("lrt_list_push", &[list.into()]).unwrap().into_pointer_value();
+        self.b.build_unconditional_branch(join).must();
+
+        self.b.position_at_end(join);
+        let slot = self.b.build_phi(self.ptr_type(), "slot").must();
+        slot.add_incoming(&[(&fast_slot as &dyn BasicValue, fast), (&slow_slot, slow)]);
+        self.store_tagged(slot.as_basic_value().into_pointer_value(), value, "list.elem");
     }
 
     /// Address of the value for `key`; panics, showing the key, if it is absent.
@@ -731,8 +760,7 @@ impl<'ctx> Codegen<'ctx, '_> {
             TyKind::Str => {
                 let [ap, al] = self.str_parts(a);
                 let [bp, bl] = self.str_parts(b);
-                let eq = self.call_rt("lrt_str_eq", &[ap, al, bp, bl]).unwrap().into_int_value();
-                self.b.build_int_compare(IntPredicate::NE, eq, self.i64(0), "").must()
+                self.str_eq(ap, al, bp, bl)
             }
             TyKind::None => self.bool(true),
             TyKind::Sized(kind) if kind.is_float() => {
@@ -846,8 +874,72 @@ impl<'ctx> Codegen<'ctx, '_> {
 
     // ---- text ---------------------------------------------------------------------------
 
+    /// String equality, inline: equal lengths, then `memcmp` of the bytes, which LLVM expands
+    /// into a few compares when one side is a constant.
+    pub(crate) fn str_eq(
+        &mut self,
+        ap: BasicValueEnum<'ctx>,
+        al: BasicValueEnum<'ctx>,
+        bp: BasicValueEnum<'ctx>,
+        bl: BasicValueEnum<'ctx>,
+    ) -> IntValue<'ctx> {
+        let memcmp = self.module.get_function("memcmp").unwrap_or_else(|| {
+            let ptr = self.ptr_type();
+            let fn_type = self.cx.i32_type().fn_type(&[ptr.into(), ptr.into(), self.cx.i64_type().into()], false);
+            self.module.add_function("memcmp", fn_type, Some(inkwell::module::Linkage::External))
+        });
+        let same_len = self.b.build_int_compare(IntPredicate::EQ, al.into_int_value(), bl.into_int_value(), "").must();
+        let start = self.b.get_insert_block().expect("inside a block");
+        let compare = self.block("streq.bytes");
+        let done = self.block("streq.done");
+        self.b.build_conditional_branch(same_len, compare, done).must();
+        self.b.position_at_end(compare);
+        let order = self.b.build_call(memcmp, &[ap.into(), bp.into(), al.into()], "").must();
+        let order = order.try_as_basic_value().basic().expect("memcmp returns a value").into_int_value();
+        let bytes_equal = self.b.build_int_compare(IntPredicate::EQ, order, self.cx.i32_type().const_zero(), "").must();
+        let compare_end = self.b.get_insert_block().expect("inside a block");
+        self.b.build_unconditional_branch(done).must();
+        self.b.position_at_end(done);
+        let phi = self.b.build_phi(self.cx.bool_type(), "streq").must();
+        phi.add_incoming(&[(&self.bool(false) as &dyn BasicValue, start), (&bytes_equal, compare_end)]);
+        phi.as_basic_value().into_int_value()
+    }
+
+    /// A new, empty string builder (`lang_rt::builder::Builder`: data, length, capacity). It lives
+    /// in this function's frame, not on the heap: each use site gets its own slot, cleared here,
+    /// and a builder never outlives the expression that creates it.
     pub(crate) fn builder_new(&mut self) -> PointerValue<'ctx> {
-        self.call_rt("lrt_builder_new", &[]).unwrap().into_pointer_value()
+        let i64_type = self.cx.i64_type();
+        let builder_type = self.cx.struct_type(&[self.ptr_type().into(), i64_type.into(), i64_type.into()], false);
+        let slot = self.alloca(builder_type.into(), "builder");
+        self.b.build_store(slot, builder_type.const_zero()).must();
+        slot
+    }
+
+    /// A builder with room for `capacity` bytes, when that is a useful guess.
+    pub(crate) fn builder_with_capacity(&mut self, capacity: u64) -> PointerValue<'ctx> {
+        let builder = self.builder_new();
+        if capacity > 0 {
+            self.call_rt("lrt_builder_reserve", &[builder.into(), self.i64(capacity as i64).into()]);
+        }
+        builder
+    }
+
+    /// A guess at an f-string's length: its literal text, plus a typical width per value. A low
+    /// guess costs a reallocation; a high one, unused bytes in the string.
+    fn fstring_estimate(&self, parts: &[FPart]) -> u64 {
+        parts
+            .iter()
+            .map(|part| match part {
+                FPart::Literal(text) => text.len() as u64,
+                FPart::Value { expr, .. } => match self.kind(expr.ty) {
+                    TyKind::Int | TyKind::Sized(_) => 10,
+                    TyKind::Float => 12,
+                    TyKind::Bool => 5,
+                    _ => 16,
+                },
+            })
+            .sum()
     }
 
     pub(crate) fn push_text(&mut self, builder: PointerValue<'ctx>, text: &str) {

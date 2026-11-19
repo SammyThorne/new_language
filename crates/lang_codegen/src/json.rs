@@ -267,8 +267,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         let constant = self.str_const(text);
         let [a, al] = self.str_parts(value);
         let [b, bl] = self.str_parts(constant.into());
-        let eq = self.call_rt("lrt_str_eq", &[a, al, b, bl]).unwrap();
-        self.nonzero(eq)
+        self.str_eq(a, al, b, bl)
     }
 
     fn push_key(&mut self, reader: PointerValue<'ctx>, key: &str) {
@@ -749,7 +748,10 @@ impl<'ctx> Codegen<'ctx, '_> {
                 Some(this.make_result(result_ty, false, Some(error.into())))
             },
         );
-        self.call_rt("lrt_json_reader_free", &[reader.into()]);
+        // The reader is Rust heap memory, which the collector does not scan, so its pointer to
+        // the text does not keep the text alive. Passing the text to `free` does: it stays in a
+        // scanned register or stack slot until the reader is gone.
+        self.call_rt("lrt_json_reader_free", &[reader.into(), ptr]);
         result.expect("a result value")
     }
 }
