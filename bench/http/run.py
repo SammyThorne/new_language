@@ -1,6 +1,6 @@
 """Run the HTTP benchmark: each server (Weby, Go, Python) under the same load on each endpoint.
 
-Usage: python3 bench/http/run.py [--seconds N] [--connections N[,N...]] [--runs N] [--no-pin]
+Usage: python3 bench/http/run.py [--seconds N] [--connections N[,N...]] [--runs N] [--no-pin] [--browser]
 
 For each endpoint and connection count, each server is started fresh and loaded `--runs` times
 (default 3); the run with the median throughput is reported, with its median and 99th-percentile
@@ -11,6 +11,9 @@ executable.
 The load generator (load.go) runs on the same machine. Unless `--no-pin` is given, the server is
 pinned to three physical cores (CPUs 0-2 and their SMT siblings 6-8) and the load generator to
 the other three, so the two do not compete for the same cores; each server sees six CPUs.
+
+With `--browser`, every request carries the dozen headers a browser sends (load.go, --browser)
+instead of only Host.
 """
 
 import os
@@ -96,7 +99,7 @@ def load(out: Path, port: int, path: str, extra: list[str], connections: str, se
     sampler.start()
     try:
         fields = subprocess.run(
-            pinned([str(out / "load"), str(port), path, connections, seconds, *extra], LOAD_CPUS),
+            pinned([str(out / "load"), *BROWSER, str(port), path, connections, seconds, *extra], LOAD_CPUS),
             capture_output=True,
             text=True,
             check=True,
@@ -184,5 +187,6 @@ def main() -> None:
 
 
 PIN = "--no-pin" not in sys.argv
+BROWSER = ["--browser"] if "--browser" in sys.argv else []
 if __name__ == "__main__":
     main()

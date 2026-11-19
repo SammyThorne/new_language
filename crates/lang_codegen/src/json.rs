@@ -16,6 +16,10 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use lang_sema::types::{Ty, TyKind};
 
+/// The stack space reserved for the runtime's JSON reader: `READER_BYTES` in `lang_rt`'s
+/// `json.rs`, which asserts that the reader fits.
+const JSON_READER_BYTES: u64 = 512;
+
 /// A string as a JSON string literal, for keys known when compiling.
 fn json_literal(text: &str) -> String {
     let mut out = String::from("\"");
@@ -404,7 +408,8 @@ impl<'ctx> Codegen<'ctx, '_> {
                 let (header, body, exit) = (self.block("loop"), self.block("body"), self.block("end"));
                 self.b.build_unconditional_branch(header).must();
                 self.b.position_at_end(header);
-                let key = self.object_key(reader, fail, body, exit);
+                // The key is stored in the dict, so it must be a copy.
+                let key = self.object_key(reader, fail, body, exit, false);
                 self.b.position_at_end(body);
                 let [kp, kl] = self.str_parts(key);
                 self.call_rt("lrt_json_push_key", &[r, kp, kl]);
@@ -515,14 +520,18 @@ impl<'ctx> Codegen<'ctx, '_> {
 
     /// Read the next key of the open object: branch to `body` with the key, or to `exit` at the
     /// end of the object, or to `fail`. Leaves the builder in `body`'s predecessor; returns the key.
+    /// With `view`, the key may point into the input instead of being a copy: only for keys
+    /// that are compared and then dropped, never stored.
     fn object_key(
         &mut self,
         reader: PointerValue<'ctx>,
         fail: BasicBlock<'ctx>,
         body: BasicBlock<'ctx>,
         exit: BasicBlock<'ctx>,
+        view: bool,
     ) -> BasicValueEnum<'ctx> {
-        let key = self.call_rt("lrt_json_object_key", &[reader.into()]).unwrap();
+        let function = if view { "lrt_json_object_key_view" } else { "lrt_json_object_key" };
+        let key = self.call_rt(function, &[reader.into()]).unwrap();
         let ptr = self.b.build_extract_value(key.into_struct_value(), 0, "").must().into_pointer_value();
         let present = self.b.build_is_not_null(ptr, "").must();
         let end = self.block("object_end");
@@ -562,7 +571,8 @@ impl<'ctx> Codegen<'ctx, '_> {
         let (header, body, exit) = (self.block("loop"), self.block("key"), self.block("end"));
         self.b.build_unconditional_branch(header).must();
         self.b.position_at_end(header);
-        let key = self.object_key(reader, fail, body, exit);
+        // The key is only compared with the field names (and quoted in an error message).
+        let key = self.object_key(reader, fail, body, exit, true);
         self.b.position_at_end(body);
         for (index, (name, field_ty)) in fields.iter().enumerate() {
             let matches = self.str_is(key, name);
@@ -726,7 +736,9 @@ impl<'ctx> Codegen<'ctx, '_> {
     pub(crate) fn json_decode(&mut self, result_ty: Ty, text: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
         let TyKind::Result(target, _) = *self.kind(result_ty) else { unreachable!("decoding gives a Result") };
         let [ptr, len] = self.str_parts(text);
-        let reader = self.call_rt("lrt_json_reader_new", &[ptr, len]).unwrap().into_pointer_value();
+        let words = self.cx.i64_type().array_type((JSON_READER_BYTES / 8) as u32);
+        let reader = self.alloca(words.into(), "json_reader");
+        self.call_rt("lrt_json_reader_init", &[reader.into(), ptr, len]);
         let slot = self.alloca(self.llty(target).unwrap_or(self.cx.i64_type().into()), "decoded");
         let decoded = self.decode_json(reader, target, slot);
         let finished = self.call_rt("lrt_json_finish", &[reader.into()]).unwrap();
@@ -748,9 +760,9 @@ impl<'ctx> Codegen<'ctx, '_> {
                 Some(this.make_result(result_ty, false, Some(error.into())))
             },
         );
-        // The reader is Rust heap memory, which the collector does not scan, so its pointer to
-        // the text does not keep the text alive. Passing the text to `free` does: it stays in a
-        // scanned register or stack slot until the reader is gone.
+        // Passing the text to `free` keeps it in a scanned register or stack slot until the
+        // reader is gone, whatever the optimiser makes of the reader's own copy of the pointer:
+        // keys returned as views point into it.
         self.call_rt("lrt_json_reader_free", &[reader.into(), ptr]);
         result.expect("a result value")
     }

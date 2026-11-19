@@ -19,3 +19,10 @@ lang_codegen = { path = "crates/lang_codegen" }
 # links the system libLLVM-19.so instead of the static archives.
 inkwell = { version = "0.11", default-features = false, features = ["llvm19-1-prefer-dynamic", "target-x86"] }
 clap = { version = "4", features = ["derive"] }
+
+# Fat LTO in one unit lets `lang_format` and the runtime's own helpers inline into the runtime
+# functions that programs call: 6.5% on `json_orders`, 2% to 4% on HTTP endpoints, and a third
+# off every executable, for about 9 s more on a clean release build (docs/08, D87).
+[profile.release]
+lto = "fat"
+codegen-units = 1

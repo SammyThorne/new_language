@@ -1,0 +1,59 @@
+# The JSON reader's edge cases (docs/10, milestone 1): error paths deeper than the reader keeps
+# inline, keys with escapes matched against field names, empty keys, unfinished escapes, lone
+# surrogates, and integers at the limits of `int`.
+# expect: children[1].children[1].children[1].children[1].children[1].children[1].children[1].children[1].children[1].children[1].children[1].children[1].children[1].children[1].children[1].children[1].children[1].children[1].value: expected an integer, found a string
+# expect: Person(id=2, name='Bo')
+# expect: Person(id=3, name='')
+# expect: unknown key ''
+# expect: the string has no closing quote
+# expect: an unpaired surrogate in a `\u` escape
+# expect: an unpaired surrogate in a `\u` escape
+# expect: invalid escape `\x`
+# expect: ['a\nbé😀/']
+# expect: [9223372036854775807, -9223372036854775808, 0, 0, 12]
+# expect: expected an integer, found 9223372036854775808
+# expect: expected an integer, found -9223372036854775809
+# expect: [9.223372036854776e+18, 100.0, -0.5, 1.8446744073709552e+19]
+# expect: a number cannot have a leading zero
+# expect: {'a\tb': 1, '': 2}
+
+import json
+
+@derive(Json, Display)
+struct Person:
+    id: int
+    name: str
+
+@derive(Json)
+struct Node:
+    value: int
+    children: list[Node] = []
+
+@json(strict)
+@derive(Json, Display)
+struct Strict:
+    id: int
+
+def show[T](result: Result[T, json.JsonError]) -> str:
+    match result:
+        case Ok(_):
+            return "ok"
+        case Err(error):
+            return error.message()
+
+def main():
+    print(show(json.decode[Node]('{"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": 1, "children": [{"value": 2}, {"value": "x"}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}')))
+    print(json.decode[Person]('{"n\\u0061me": "Bo", "id": 2}').unwrap())
+    print(json.decode[Person]('{"": 1, "id": 3, "name": "", "\\"": [1]}').unwrap())
+    print(show(json.decode[Strict]('{"id": 1, "": 2}')))
+    print(show(json.decode[str]('"abc\\')))
+    print(show(json.decode[str]('"\\ud800"')))
+    print(show(json.decode[str]('"\\ud800\\u0041"')))
+    print(show(json.decode[str]('"\\x"')))
+    print([json.decode[str]('"a\\nb\\u00e9\\ud83d\\ude00\\/"').unwrap()])
+    print(json.decode[list[int]]('[9223372036854775807, -9223372036854775808, 0, -0, 12]').unwrap())
+    print(show(json.decode[int]('9223372036854775808')))
+    print(show(json.decode[int]('-9223372036854775809')))
+    print(json.decode[list[float]]('[9223372036854775808, 1e2, -0.5, 18446744073709551616]').unwrap())
+    print(show(json.decode[int]('012')))
+    print(json.decode[dict[str, int]]('{"a\\tb": 1, "": 2}').unwrap())

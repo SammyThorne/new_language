@@ -335,11 +335,16 @@ pub unsafe extern "C-unwind" fn lrt_str_join(sep: *const u8, sep_len: i64, items
     let total = (0..count).map(|i| part(i).len()).sum::<usize>() + sep.len() * (count - 1);
     let ptr = gc::alloc_atomic(total);
     let mut at = 0;
-    for i in 0..count {
-        let piece = if i == 0 { part(i).to_string() } else { format!("{sep}{}", part(i)) };
+    let mut copy = |bytes: &[u8]| {
         // SAFETY: the total size was computed from the same pieces.
-        unsafe { std::ptr::copy_nonoverlapping(piece.as_ptr(), ptr.add(at), piece.len()) };
-        at += piece.len();
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(at), bytes.len()) };
+        at += bytes.len();
+    };
+    for i in 0..count {
+        if i > 0 {
+            copy(sep.as_bytes());
+        }
+        copy(part(i).as_bytes());
     }
     Str { ptr, len: total as i64 }
 }

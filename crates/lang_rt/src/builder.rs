@@ -25,11 +25,16 @@ impl Builder {
         self.cap = cap as i64;
     }
 
-    pub fn push(&mut self, bytes: &[u8]) {
-        let needed = self.len as usize + bytes.len();
+    /// Make room for `additional` more bytes, growing as `push` would.
+    pub fn reserve(&mut self, additional: usize) {
+        let needed = self.len as usize + additional;
         if needed > self.cap as usize {
             self.grow_to(needed.max(self.cap as usize * 2).max(32));
         }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.reserve(bytes.len());
         // SAFETY: capacity was ensured above.
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.data.add(self.len as usize), bytes.len()) };
         self.len += bytes.len() as i64;
@@ -46,25 +51,49 @@ impl Builder {
 
 /// Python's `repr` of a string: quoted, with escapes.
 pub fn str_repr(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') { '"' } else { '\'' };
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push(quote);
-    for c in text.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
+    let mut out = Vec::with_capacity(text.len() + 2);
+    write_str_repr(text, |bytes| out.extend_from_slice(bytes));
+    // Escapes are ASCII and the rest is copied from valid UTF-8 at character boundaries.
+    String::from_utf8(out).expect("valid UTF-8")
+}
+
+/// Write Python's `repr` of a string through `put`, copying runs that need no escape whole.
+/// Every byte that needs one is ASCII, so scanning bytes never splits a character.
+fn write_str_repr(text: &str, mut put: impl FnMut(&[u8])) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let quote = if text.contains('\'') && !text.contains('"') { b'"' } else { b'\'' };
+    let bytes = text.as_bytes();
+    put(&[quote]);
+    let mut start = 0;
+    for (i, &c) in bytes.iter().enumerate() {
+        let escape: &[u8] = match c {
+            b'\\' => b"\\\\",
+            b'\n' => b"\\n",
+            b'\r' => b"\\r",
+            b'\t' => b"\\t",
             c if c == quote => {
-                out.push('\\');
-                out.push(c);
+                if quote == b'"' {
+                    b"\\\""
+                } else {
+                    b"\\'"
+                }
             }
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\x{:02x}", c as u32)),
-            c => out.push(c),
-        }
+            c if c < 0x20 || c == 0x7f => &[b'\\', b'x', HEX[usize::from(c >> 4)], HEX[usize::from(c & 15)]],
+            _ => continue,
+        };
+        put(&bytes[start..i]);
+        put(escape);
+        start = i + 1;
     }
-    out.push(quote);
-    out
+    put(&bytes[start..]);
+    put(&[quote]);
+}
+
+impl std::fmt::Write for Builder {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.push(s.as_bytes());
+        Ok(())
+    }
 }
 
 /// # Safety
@@ -143,14 +172,17 @@ pub unsafe extern "C-unwind" fn lrt_builder_push_uint(b: *mut Builder, value: i6
 /// `b` comes from `lrt_builder_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_builder_push_float(b: *mut Builder, value: f64) {
-    unsafe { builder(b).push(lang_format::float_repr(value).as_bytes()) };
+    let mut text = [0; lang_format::FLOAT_REPR_MAX];
+    let len = lang_format::write_float_repr(value, &mut text);
+    unsafe { builder(b).push(&text[..len]) };
 }
 
 /// # Safety
 /// `b` comes from `lrt_builder_new`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_builder_push_str_repr(b: *mut Builder, ptr: *const u8, len: i64) {
-    unsafe { builder(b).push(str_repr(Str::from_raw(ptr, len)).as_bytes()) };
+    let b = unsafe { builder(b) };
+    write_str_repr(unsafe { Str::from_raw(ptr, len) }, |bytes| b.push(bytes));
 }
 
 /// The compiler validated the spec, so parsing cannot fail here.
@@ -169,7 +201,13 @@ pub unsafe extern "C-unwind" fn lrt_builder_push_format_int(
     spec_ptr: *const u8,
     spec_len: i64,
 ) {
-    unsafe { builder(b).push(lang_format::format_int(value, &spec(spec_ptr, spec_len)).as_bytes()) };
+    let b = unsafe { builder(b) };
+    let spec = unsafe { spec(spec_ptr, spec_len) };
+    if spec.is_plain() && matches!(spec.kind, None | Some('d')) {
+        push_i64(b, value);
+    } else {
+        b.push(lang_format::format_int(value, &spec).as_bytes());
+    }
 }
 
 /// # Safety
@@ -181,7 +219,19 @@ pub unsafe extern "C-unwind" fn lrt_builder_push_format_float(
     spec_ptr: *const u8,
     spec_len: i64,
 ) {
-    unsafe { builder(b).push(lang_format::format_float(value, &spec(spec_ptr, spec_len)).as_bytes()) };
+    use std::fmt::Write;
+    let b = unsafe { builder(b) };
+    let spec = unsafe { spec(spec_ptr, spec_len) };
+    match (spec.kind, spec.precision) {
+        // The common `{x:.2f}`: written straight into the builder, as `format_float` would.
+        (Some('f'), Some(precision)) if spec.is_plain() && value.is_finite() => {
+            if value.is_sign_negative() {
+                b.push(b"-");
+            }
+            let _ = write!(b, "{:.precision$}", value.abs());
+        }
+        _ => b.push(lang_format::format_float(value, &spec).as_bytes()),
+    }
 }
 
 /// # Safety

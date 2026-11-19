@@ -677,6 +677,55 @@ The other benchmarks are unchanged. `WEBY_GC_FREE_SPACE_DIVISOR=1` restores the 
 - `json_orders` 71 MB against 59 MB.
 - Every benchmark is still at or ahead of Go. `/items` is level with Go (1.01x), and the other HTTP endpoints are 1.8x to 2.1x faster.
 
+### D87. Formatting and JSON without the Rust heap; LTO for the runtime (final plan, milestone 1)
+
+Milestone 1 of the [final optimisation plan](10-final-optimization-plan.md). Profiles showed the runtime's use of Rust `String`s and `Vec`s on hot paths: 155 `malloc` calls per `/items` request, most of them formatting 20 floats, and 62 per `POST /orders`.
+
+**What was done.**
+- **Measuring tools** (`bench/README.md`, "Measuring a change"): `bench/http/counts.py` with the `bench/profile/count.c` shim, for exact calls and bytes per request; `bench/ab.py` for interleaved A/B runs; `WEBY_ALLOC_STATS`; a `--browser` load mode with a dozen realistic request headers.
+- **LTO.** `[profile.release]` now links with fat LTO in one code-generation unit, so `lang_format` and the runtime's helpers inline into the functions programs call. A clean release build takes about 9 s longer (13 s to 22 s). Executables are a third smaller (`bench/http/server.wb`: 7.6 to 5.2 MB).
+- **Floats.** `lang_format::write_float_repr` writes Python's `repr` of a float into a 32-byte stack buffer, which the builder and the JSON writer copy from. Short decimals (`|x|` from 1e-4 to 1e15 with at most nine decimals: prices, measurements) take an exact fast path: the smallest `k` for which `round(|x| * 10^k) / 10^k == |x|`. The rest go through `core::fmt`'s shortest `{:e}` into a stack buffer. The old implementation is kept in the tests, which compare the two on five million values, including the fast path's edges.
+- **JSON encoding.** Strings are escaped straight into the builder, eight bytes at a time; no intermediate `Vec`.
+- **JSON decoding.**
+  - The reader is a 512-byte record in the generated function's frame (`lrt_json_reader_init`) instead of a `Box`. Open containers are a bit set, and the error path keeps 16 parts inline as pointers to the keys, not copies.
+  - A string without escapes is copied once, from the input into collected memory, with no `Vec` and no UTF-8 check (the input is already a `str`).
+  - Keys matched against struct fields are views into the input (`lrt_json_object_key_view`); dict keys, which are stored, are still copied.
+  - Integers are accumulated while their digits are scanned.
+  - `tests/run/json_reader.wb` pins the edge cases: error paths 36 parts deep, keys with escapes, empty keys, unfinished escapes, lone surrogates and the limits of `int`. Its expected output came from the build before this change.
+- **Smaller ones.** `str.join` copies the pieces directly; `repr` of a string and plain `{x:.2f}` and `{n}` format specs write into the builder.
+
+**Counts per request** (`bench/http/counts.py`, 256 connections):
+
+| Endpoint | Rust `malloc` before | After | Collector calls before | After | Bytes allocated before | After |
+|---|---|---|---|---|---|---|
+| `/items` | 155.1 | 9.1 | 75 | 75 | 8,897 | 8,896 |
+| `POST /orders` | 62.1 | 14.1 | 32 | 15 | 1,488 | 1,216 |
+| `/plaintext` | 9.3 | 9.4 | 3 | 3 | 256 | 256 |
+
+What is left on the Rust heap is the HTTP path, milestone 2's subject. The collector calls on `/items` are milestone 3's.
+
+**Timings**, interleaved A/B against the build before this milestone (`bench/ab.py`; servers on one CPU with 64 connections unless stated):
+
+| Measure | Before | After | Change |
+|---|---|---|---|
+| `json_orders` | 0.507 s | 0.225 s | 56% less time |
+| `/items` | 114,600 req/s (8.7 µs each) | 181,200 req/s (5.5 µs) | +58% |
+| `POST /orders` | 236,800 req/s (4.2 µs) | 307,800 req/s (3.2 µs) | +30% |
+| `/json` | 411,200 req/s | 419,300 req/s | +2.0% |
+| `/plaintext` | 408,200 req/s | 412,600 req/s | +1.1% |
+| `/users/42` | 341,800 req/s | 347,800 req/s | +1.7% |
+| `/items`, six CPUs, 256 connections | 290,500 req/s | 352,000 req/s | +21% |
+| `POST /orders`, six CPUs, 256 connections | 703,400 req/s | 879,700 req/s | +25% |
+| `word_count`, `sort` | | | within 1.2% |
+
+In each row the ranges of the two sides do not overlap, except the last. Of the float gain, the stage-1 rewrite (no `String`s) and the short-decimal fast path each gave about half: the fast path alone was 11% on `json_orders` and 15% on `/items`. Peak memory fell for `json_orders` (71 to 62 MB) and is unchanged for the others.
+
+**The gains are larger than the plan expected** (20% for `json_orders`, 10% for `/items`), which was estimated from the profiler's inclusive shares. Those are measured only to a depth of four frames, so they understated how much of each request went through `String`-building and the allocator. LTO accounts for 2% to 6% of it (measured alone during planning). The cause of the rest of the difference between estimate and result was not investigated. On one CPU, `/items` now costs 5.5 µs; Go's figure in [web-performance.md](web-performance.md) is 10.9 µs.
+
+**Not done, and why.**
+- **Matching fields from the expected position** (plan item 1.5.6). The comparison chain did not show in the profile of `POST /orders`, whose target was met without it.
+- **`binary_trees` reads 3% to 5% slower** in A/B. It does not use any code this milestone changed, and its generated IR is identical. LTO is not the cause either: with and without it, from the same source, the difference was 0.4%. The program's `make` and `check` functions moved 16 bytes, from offset 32 to offset 48 within a 64-byte cache line, because the runtime linked before them changed size. This is the layout effect the handoff describes, not a change in work. Aligning hot generated functions is noted for milestone 4.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

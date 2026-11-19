@@ -47,6 +47,32 @@ python3 bench/http/one_core.py
 
 The summary for readers deciding whether to use the language is [docs/web-performance.md](../docs/web-performance.md).
 
+`--browser` (for `run.py` and `load.go`) adds the dozen headers a browser sends, about 600 bytes, to every request. Without it, requests carry only `Host`, which understates the cost of parsing headers.
+
+## Measuring a change
+
+Small effects (a few percent) are hidden by the machine's drift of up to 10% between runs a few minutes apart. Three tools make them visible (docs/10, milestone 1):
+
+- **`counts.py`** runs the server under `profile/count.c`, an `LD_PRELOAD` shim, and prints exact counts per request for each endpoint: `recv` calls (and how many found nothing to read), `send`, `epoll_wait`, clock reads, Rust heap allocations, collector calls and bytes allocated. Counts do not drift, so they show whether a change did what it was meant to.
+
+```bash
+python3 bench/http/counts.py [--browser] [--server EXECUTABLE]
+```
+
+- **`ab.py`** runs two builds of the same program interleaved, in alternating order, and prints each side's median and range. Build the "before" side against a saved runtime with `WEBY_RUNTIME=saved/liblang_rt.a`.
+
+```bash
+python3 bench/ab.py before after --rounds 5
+```
+
+```bash
+python3 bench/ab.py before_server after_server --server --one-core --endpoints /items,/plaintext
+```
+
+- **`WEBY_ALLOC_STATS=1`** makes any compiled program print the bytes it allocated, its number of collections and its heap size when it exits.
+
+`profile/` has a sampling profiler for machines without `perf` (`sampler.c`, `report.py`; usage in `sampler.c`).
+
 ## Idle WebSockets and task creation
 
 `ws_idle/` holds a WebSocket echo server (`server.wb`) and a Go client (`client.go`) that opens N connections from several loopback addresses, holds them idle, then checks that each still echoes. `run.py` measures the server's resident memory before and after.

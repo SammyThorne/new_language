@@ -2,9 +2,11 @@
 // after another for `seconds`, and the program prints requests per second and latency
 // percentiles. Written because no load-testing tool is installed on the benchmark machine.
 //
-// Usage: load PORT PATH CONNECTIONS SECONDS [METHOD BODY]
+// Usage: load [--browser] PORT PATH CONNECTIONS SECONDS [METHOD BODY]
 //
-// With METHOD and BODY, each request is that method with BODY as a JSON body.
+// With METHOD and BODY, each request is that method with BODY as a JSON body. With --browser,
+// each request also carries the dozen headers a browser sends (about 600 bytes), so that the
+// cost of parsing headers is measured too; without it, requests carry only Host.
 package main
 
 import (
@@ -19,14 +21,34 @@ import (
 	"time"
 )
 
+// The headers a desktop browser sends with a same-site API request, after Host.
+const browserHeaders = "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\n" +
+	"Accept: application/json, text/plain, */*\r\n" +
+	"Accept-Language: en-GB,en-US;q=0.9,en;q=0.8\r\n" +
+	"Accept-Encoding: gzip, deflate, br, zstd\r\n" +
+	"Referer: http://localhost/dashboard/orders?page=2\r\n" +
+	"Cookie: session=6f1c2a9e8b7d4c3fa0e1d2c3b4a59687; theme=dark; consent=analytics%3Dfalse\r\n" +
+	"Cache-Control: no-cache\r\n" +
+	"Pragma: no-cache\r\n" +
+	"Sec-Fetch-Dest: empty\r\n" +
+	"Sec-Fetch-Mode: cors\r\n" +
+	"Sec-Fetch-Site: same-origin\r\n" +
+	"Connection: keep-alive\r\n"
+
 func main() {
-	port, path := os.Args[1], os.Args[2]
-	connections, _ := strconv.Atoi(os.Args[3])
-	seconds, _ := strconv.ParseFloat(os.Args[4], 64)
-	request := []byte("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n")
-	if len(os.Args) > 6 {
-		body := os.Args[6]
-		request = []byte(os.Args[5] + " " + path + " HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: " +
+	args := os.Args[1:]
+	extra := ""
+	if len(args) > 0 && args[0] == "--browser" {
+		extra = browserHeaders
+		args = args[1:]
+	}
+	port, path := args[0], args[1]
+	connections, _ := strconv.Atoi(args[2])
+	seconds, _ := strconv.ParseFloat(args[3], 64)
+	request := []byte("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n" + extra + "\r\n")
+	if len(args) > 5 {
+		body := args[5]
+		request = []byte(args[4] + " " + path + " HTTP/1.1\r\nHost: localhost\r\n" + extra + "Content-Type: application/json\r\nContent-Length: " +
 			strconv.Itoa(len(body)) + "\r\n\r\n" + body)
 	}
 	deadline := time.Now().Add(time.Duration(seconds * float64(time.Second)))

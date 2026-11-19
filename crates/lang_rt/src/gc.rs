@@ -17,6 +17,8 @@
 //! - `GC_MIN_ALLOC`: the least the program allocates between collections, in bytes; 4 MiB by
 //!   default, Go's minimum heap. Without it, a program whose live data is small collects after
 //!   every megabyte or so, which for a busy server is a thousand times a second (docs/08, D84).
+//! - `ALLOC_STATS`: at exit, print the bytes allocated, the number of collections and the heap
+//!   size to standard error (`bench/http/counts.py` divides them by the requests served).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -31,6 +33,19 @@ unsafe extern "C" {
     fn GC_expand_hp(bytes: usize) -> i32;
     fn GC_set_free_space_divisor(divisor: usize);
     fn GC_set_min_bytes_allocd(bytes: usize);
+    fn GC_get_total_bytes() -> usize;
+    fn GC_get_gc_no() -> usize;
+    fn GC_get_heap_size() -> usize;
+}
+
+unsafe extern "C" {
+    fn atexit(callback: extern "C" fn()) -> i32;
+}
+
+extern "C" fn print_alloc_stats() {
+    // SAFETY: plain queries.
+    let (bytes, collections, heap) = unsafe { (GC_get_total_bytes(), GC_get_gc_no(), GC_get_heap_size()) };
+    eprintln!("alloc stats: bytes={bytes} collections={collections} heap={heap}");
 }
 
 static STRESS: AtomicBool = AtomicBool::new(false);
@@ -57,6 +72,10 @@ pub fn init() {
     if let Some(bytes) = env_number("GC_INITIAL_HEAP") {
         // SAFETY: plain configuration call; failure only means the heap grows later.
         unsafe { GC_expand_hp(bytes) };
+    }
+    if std::env::var(lang_names::env_var("ALLOC_STATS")).is_ok_and(|v| !v.is_empty() && v != "0") {
+        // SAFETY: registering a function with no preconditions.
+        unsafe { atexit(print_alloc_stats) };
     }
 }
 

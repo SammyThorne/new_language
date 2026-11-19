@@ -6,8 +6,11 @@
 //! zeros, no lone surrogates). The first error is kept, with the path to where it happened
 //! (`addresses[1].zip`), and every later call fails quickly.
 //!
-//! The reader lives on Rust's heap and holds no references to collected objects; the input text
-//! is kept alive by the caller for the duration of the decode.
+//! The reader is a fixed-size record in the generated function's stack frame
+//! (`lrt_json_reader_init`), so a decode makes no Rust heap allocations unless it fails or nests
+//! more than `INLINE_PATH` deep. Strings without escapes are copied once, straight from the
+//! input into collected memory; object keys that are only compared with field names are not
+//! copied at all (`lrt_json_object_key_view`).
 
 use crate::Str;
 use crate::builder::{Builder, lrt_builder_push};
@@ -15,35 +18,91 @@ use crate::builder::{Builder, lrt_builder_push};
 /// Nesting deeper than this is an error, so that hostile input cannot exhaust the stack.
 const MAX_DEPTH: usize = 512;
 
-enum PathPart {
-    Key(String),
-    Index(i64),
+/// The bytes generated code reserves on its stack for a [`Reader`] (`JSON_READER_BYTES` in
+/// `lang_codegen`, which must match).
+pub const READER_BYTES: usize = 512;
+
+/// Path parts kept in the reader itself; deeper ones go to a `Vec`.
+const INLINE_PATH: usize = 16;
+
+/// One step of the path to the value being read: an object key (`ptr`, `len`) or, with a null
+/// `ptr`, an array index (`len`). Keys are field names (constants) or dict keys that the
+/// generated decoder holds until it pops them, so the pointers stay valid.
+#[derive(Clone, Copy)]
+struct PathPart {
+    ptr: *const u8,
+    len: i64,
 }
 
+#[repr(C)]
 pub struct Reader {
     input: &'static [u8],
     pos: usize,
-    /// For each open array or object: whether no element has been read yet.
-    frames: Vec<bool>,
-    path: Vec<PathPart>,
-    error: Option<(String, String)>,
+    /// How many arrays and objects are open.
+    depth: usize,
+    /// One bit per open array or object, set while no element has been read from it yet.
+    first: [u64; MAX_DEPTH / 64],
+    path_len: usize,
+    path: [PathPart; INLINE_PATH],
+    deeper_path: Vec<PathPart>,
+    /// The message and the path of the first error.
+    error: Option<Box<(String, String)>>,
 }
 
+const _: () = assert!(std::mem::size_of::<Reader>() <= READER_BYTES);
+const _: () = assert!(std::mem::align_of::<Reader>() <= 8);
+
 impl Reader {
+    fn new(input: &'static [u8]) -> Reader {
+        Reader {
+            input,
+            pos: 0,
+            depth: 0,
+            first: [0; MAX_DEPTH / 64],
+            path_len: 0,
+            path: [PathPart { ptr: std::ptr::null(), len: 0 }; INLINE_PATH],
+            deeper_path: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn push_path(&mut self, part: PathPart) {
+        if self.path_len < INLINE_PATH {
+            self.path[self.path_len] = part;
+        } else {
+            self.deeper_path.push(part);
+        }
+        self.path_len += 1;
+    }
+
+    fn pop_path(&mut self) {
+        if self.path_len > INLINE_PATH {
+            self.deeper_path.pop();
+        }
+        self.path_len = self.path_len.saturating_sub(1);
+    }
+
+    fn clear_path(&mut self) {
+        self.path_len = 0;
+        self.deeper_path.clear();
+    }
+
     fn fail(&mut self, message: impl Into<String>) {
         if self.error.is_none() {
             let mut path = String::new();
-            for part in &self.path {
-                match part {
-                    PathPart::Key(key) if path.is_empty() => path.push_str(key),
-                    PathPart::Key(key) => {
-                        path.push('.');
-                        path.push_str(key);
-                    }
-                    PathPart::Index(i) => path.push_str(&format!("[{i}]")),
+            let parts = self.path[..self.path_len.min(INLINE_PATH)].iter().chain(&self.deeper_path);
+            for part in parts {
+                if part.ptr.is_null() {
+                    path.push_str(&format!("[{}]", part.len));
+                    continue;
                 }
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                // SAFETY: key parts point to live UTF-8 strings (see `PathPart`).
+                path.push_str(unsafe { Str::from_raw(part.ptr, part.len) });
             }
-            self.error = Some((message.into(), path));
+            self.error = Some(Box::new((message.into(), path)));
         }
     }
 
@@ -87,7 +146,7 @@ impl Reader {
         false
     }
 
-    fn string(&mut self) -> Option<String> {
+    fn string(&mut self) -> Option<Text<'static>> {
         self.skip_ws();
         if self.peek() != Some(b'"') {
             self.expected("a string");
@@ -106,6 +165,22 @@ impl Reader {
         }
     }
 
+    /// The next key of the open object, with its `:` consumed; `None` at the end of the object
+    /// or on error.
+    fn key(&mut self) -> Option<Text<'static>> {
+        if self.next(b'}') != 1 {
+            return None;
+        }
+        let key = self.string()?;
+        self.skip_ws();
+        if self.peek() != Some(b':') {
+            self.expected("`:` after the key");
+            return None;
+        }
+        self.pos += 1;
+        Some(key)
+    }
+
     fn open(&mut self, open: u8, what: &str) -> bool {
         if self.failed() {
             return false;
@@ -115,12 +190,13 @@ impl Reader {
             self.expected(what);
             return false;
         }
-        if self.frames.len() >= MAX_DEPTH {
+        if self.depth >= MAX_DEPTH {
             self.fail("the JSON is nested too deeply");
             return false;
         }
         self.pos += 1;
-        self.frames.push(true);
+        self.first[self.depth / 64] |= 1 << (self.depth % 64);
+        self.depth += 1;
         true
     }
 
@@ -130,10 +206,11 @@ impl Reader {
             return -1;
         }
         self.skip_ws();
-        let first = *self.frames.last().expect("inside an array or object");
+        let top = self.depth.checked_sub(1).expect("inside an array or object");
+        let first = self.first[top / 64] & (1 << (top % 64)) != 0;
         if self.peek() == Some(close) {
             self.pos += 1;
-            self.frames.pop();
+            self.depth = top;
             return 0;
         }
         if !first {
@@ -149,7 +226,7 @@ impl Reader {
                 return -1;
             }
         }
-        *self.frames.last_mut().expect("inside an array or object") = false;
+        self.first[top / 64] &= !(1 << (top % 64));
         1
     }
 }
@@ -170,11 +247,37 @@ fn hex4(input: &[u8], pos: usize) -> Option<u32> {
     u32::from_str_radix(text, 16).ok()
 }
 
+/// A string's text: a slice of the input when it has no escapes (almost always), or decoded.
+/// Either way it is valid UTF-8, since the input is and escapes decode to scalar values.
+enum Text<'a> {
+    Raw(&'a [u8]),
+    Decoded(Vec<u8>),
+}
+
+impl Text<'_> {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Text::Raw(bytes) => bytes,
+            Text::Decoded(bytes) => bytes,
+        }
+    }
+
+    /// A copy in collected memory.
+    fn to_str(&self) -> Str {
+        Str::from_bytes(self.bytes())
+    }
+}
+
 /// A string starting at the `"` at `pos`: its text and the position after its closing quote, or
 /// an error message and where.
-fn scan_string(input: &[u8], pos: usize) -> Result<(String, usize), (String, usize)> {
-    let mut i = pos + 1;
-    let mut out: Vec<u8> = Vec::new();
+fn scan_string(input: &[u8], pos: usize) -> Result<(Text<'_>, usize), (String, usize)> {
+    // The bytes that end a run of plain text are the ones a writer must escape.
+    let end = next_escape(input, pos + 1);
+    if input.get(end) == Some(&b'"') {
+        return Ok((Text::Raw(&input[pos + 1..end]), end + 1));
+    }
+    let mut i = end;
+    let mut out: Vec<u8> = input[pos + 1..end].to_vec();
     loop {
         let start = i;
         while let Some(&c) = input.get(i) {
@@ -232,8 +335,7 @@ fn scan_string(input: &[u8], pos: usize) -> Result<(String, usize), (String, usi
             Some(_) => return Err(("a control character must be escaped in a string".to_string(), i)),
         }
     }
-    // The input is valid UTF-8 and escapes produce valid UTF-8.
-    Ok((String::from_utf8(out).expect("valid UTF-8"), i + 1))
+    Ok((Text::Decoded(out), i + 1))
 }
 
 enum Number {
@@ -244,9 +346,12 @@ enum Number {
 /// A number starting at `pos`, following JSON's grammar exactly.
 fn scan_number(input: &[u8], pos: usize) -> Result<(Number, usize), String> {
     let mut i = pos;
-    if input.get(i) == Some(&b'-') {
+    let negative = input.get(i) == Some(&b'-');
+    if negative {
         i += 1;
     }
+    // The magnitude of the integer part, while it fits; `None` once it overflows.
+    let mut magnitude = Some(0u64);
     match input.get(i) {
         Some(b'0') => {
             i += 1;
@@ -255,7 +360,8 @@ fn scan_number(input: &[u8], pos: usize) -> Result<(Number, usize), String> {
             }
         }
         Some(b'1'..=b'9') => {
-            while input.get(i).is_some_and(u8::is_ascii_digit) {
+            while let Some(&c @ b'0'..=b'9') = input.get(i) {
+                magnitude = magnitude.and_then(|m| m.checked_mul(10)).and_then(|m| m.checked_add(u64::from(c - b'0')));
                 i += 1;
             }
         }
@@ -285,10 +391,16 @@ fn scan_number(input: &[u8], pos: usize) -> Result<(Number, usize), String> {
             i += 1;
         }
     }
-    let text = std::str::from_utf8(&input[pos..i]).expect("ASCII");
-    if integral && let Ok(value) = text.parse::<i64>() {
-        return Ok((Number::Int(value), i));
+    if integral && let Some(m) = magnitude {
+        // As `i64`'s parser would: -2^63 fits, 2^63 does not (it becomes a float below).
+        if negative && m <= 1 << 63 {
+            return Ok((Number::Int(0u64.wrapping_sub(m) as i64), i));
+        }
+        if !negative && m <= i64::MAX as u64 {
+            return Ok((Number::Int(m as i64), i));
+        }
     }
+    let text = std::str::from_utf8(&input[pos..i]).expect("ASCII");
     let value: f64 = text.parse().map_err(|_| "invalid number".to_string())?;
     if value.is_infinite() {
         return Err("the number is too large".to_string());
@@ -343,40 +455,45 @@ fn skip(input: &[u8], pos: usize, depth: usize) -> Result<usize, (String, usize)
 // ---- the C interface used by generated decoders -----------------------------------------
 
 /// # Safety
-/// `r` comes from `lrt_json_reader_new` and has not been freed.
+/// `r` comes from `lrt_json_reader_init` and has not been freed.
 unsafe fn reader<'a>(r: *mut Reader) -> &'a mut Reader {
     unsafe { &mut *r }
 }
 
-/// # Safety
-/// `ptr` and `len` describe a UTF-8 string that outlives the reader.
-#[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn lrt_json_reader_new(ptr: *const u8, len: i64) -> *mut Reader {
-    let input: &'static [u8] = if len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(ptr, len as usize) } };
-    Box::into_raw(Box::new(Reader { input, pos: 0, frames: Vec::new(), path: Vec::new(), error: None }))
-}
-
-/// Free the reader. `_input` is the text it read: the reader lives on the Rust heap, which the
-/// collector does not scan, so generated code passes the text here to keep it alive until now.
+/// Set up a reader in the `READER_BYTES` bytes at `r`, over the text `ptr`, `len`.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` is writable, 8-aligned and `READER_BYTES` long; `ptr` and `len` describe a UTF-8 string
+/// that outlives the reader.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_json_reader_init(r: *mut Reader, ptr: *const u8, len: i64) {
+    let input: &'static [u8] = if len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(ptr, len as usize) } };
+    // SAFETY: the caller reserved `READER_BYTES` bytes, 8-aligned.
+    unsafe { r.write(Reader::new(input)) };
+}
+
+/// Release what the reader allocated (an error, a deep path). `_input` is the text it read,
+/// passed so that generated code keeps it in a scanned register or slot until now, whatever the
+/// optimiser does with the reader's own copy of the pointer.
+///
+/// # Safety
+/// `r` was set up by `lrt_json_reader_init` and is not used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_reader_free(r: *mut Reader, _input: *const u8) {
-    drop(unsafe { Box::from_raw(r) });
+    unsafe { std::ptr::drop_in_place(r) };
 }
 
 /// After the value: only whitespace may follow. Returns 1 if the whole decode succeeded.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_finish(r: *mut Reader) -> i64 {
     let r = unsafe { reader(r) };
     if !r.failed() {
         r.skip_ws();
         if r.pos < r.input.len() {
-            r.path.clear();
+            r.clear_path();
             r.fail("unexpected text after the JSON value");
         }
     }
@@ -384,54 +501,56 @@ pub unsafe extern "C-unwind" fn lrt_json_finish(r: *mut Reader) -> i64 {
 }
 
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_failed(r: *mut Reader) -> i64 {
     i64::from(unsafe { reader(r) }.failed())
 }
 
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_error_message(r: *mut Reader) -> Str {
-    let message = unsafe { reader(r) }.error.as_ref().map_or("", |(m, _)| m.as_str()).to_string();
-    Str::from_bytes(message.as_bytes())
+    Str::from_bytes(unsafe { reader(r) }.error.as_ref().map_or("", |e| e.0.as_str()).as_bytes())
 }
 
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_error_path(r: *mut Reader) -> Str {
-    let path = unsafe { reader(r) }.error.as_ref().map_or("", |(_, p)| p.as_str()).to_string();
-    Str::from_bytes(path.as_bytes())
+    Str::from_bytes(unsafe { reader(r) }.error.as_ref().map_or("", |e| e.1.as_str()).as_bytes())
 }
 
+/// Enter the value of the key `ptr`, `len`, for error paths. Only the pointer is kept.
+///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`; `ptr` and `len` describe a UTF-8 string.
+/// `r` comes from `lrt_json_reader_init`; `ptr` and `len` describe a UTF-8 string that stays
+/// alive until the matching `lrt_json_pop`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_push_key(r: *mut Reader, ptr: *const u8, len: i64) {
-    let key = unsafe { Str::from_raw(ptr, len) }.to_string();
-    unsafe { reader(r) }.path.push(PathPart::Key(key));
+    // A key is never null: an empty one still points somewhere.
+    let ptr = if ptr.is_null() { b"".as_ptr() } else { ptr };
+    unsafe { reader(r) }.push_path(PathPart { ptr, len });
 }
 
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_push_index(r: *mut Reader, index: i64) {
-    unsafe { reader(r) }.path.push(PathPart::Index(index));
+    unsafe { reader(r) }.push_path(PathPart { ptr: std::ptr::null(), len: index });
 }
 
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_pop(r: *mut Reader) {
-    unsafe { reader(r) }.path.pop();
+    unsafe { reader(r) }.pop_path();
 }
 
 /// Record that something else was expected here (`what` is "an integer", ...).
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`; `ptr` and `len` describe a UTF-8 string.
+/// `r` comes from `lrt_json_reader_init`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_fail_expected(r: *mut Reader, ptr: *const u8, len: i64) {
     let what = unsafe { Str::from_raw(ptr, len) }.to_string();
@@ -443,7 +562,7 @@ pub unsafe extern "C-unwind" fn lrt_json_fail_expected(r: *mut Reader, ptr: *con
 /// Record an error message.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`; `ptr` and `len` describe a UTF-8 string.
+/// `r` comes from `lrt_json_reader_init`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_fail(r: *mut Reader, ptr: *const u8, len: i64) {
     let message = unsafe { Str::from_raw(ptr, len) }.to_string();
@@ -453,7 +572,7 @@ pub unsafe extern "C-unwind" fn lrt_json_fail(r: *mut Reader, ptr: *const u8, le
 /// 1 if `null` is next, which is consumed.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_read_null(r: *mut Reader) -> i64 {
     let r = unsafe { reader(r) };
@@ -467,7 +586,7 @@ pub unsafe extern "C-unwind" fn lrt_json_read_null(r: *mut Reader) -> i64 {
 /// 1 for `true`, 0 for `false`, -1 (after recording an error) for anything else.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_read_bool(r: *mut Reader) -> i64 {
     let r = unsafe { reader(r) };
@@ -508,7 +627,7 @@ fn number(r: &mut Reader) -> Option<Number> {
 /// An integer into `out`; 1 on success.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`; `out` is writable.
+/// `r` comes from `lrt_json_reader_init`; `out` is writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_read_int(r: *mut Reader, out: *mut i64) -> i64 {
     let r = unsafe { reader(r) };
@@ -538,7 +657,7 @@ pub unsafe extern "C-unwind" fn lrt_json_read_int(r: *mut Reader, out: *mut i64)
 /// A number into `out` as a float; 1 on success.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`; `out` is writable.
+/// `r` comes from `lrt_json_reader_init`; `out` is writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_read_float(r: *mut Reader, out: *mut f64) -> i64 {
     let r = unsafe { reader(r) };
@@ -563,7 +682,7 @@ pub unsafe extern "C-unwind" fn lrt_json_read_float(r: *mut Reader, out: *mut f6
 /// A number: 1 with an integer in `int_out`, 2 with a float in `float_out`, 0 on error.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`; the outputs are writable.
+/// `r` comes from `lrt_json_reader_init`; the outputs are writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_read_number(r: *mut Reader, int_out: *mut i64, float_out: *mut f64) -> i64 {
     let r = unsafe { reader(r) };
@@ -588,7 +707,7 @@ pub unsafe extern "C-unwind" fn lrt_json_read_number(r: *mut Reader, int_out: *m
 /// A string, or a null `Str` after recording an error.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_read_str(r: *mut Reader) -> Str {
     let r = unsafe { reader(r) };
@@ -597,7 +716,7 @@ pub unsafe extern "C-unwind" fn lrt_json_read_str(r: *mut Reader) -> Str {
         return null;
     }
     match r.string() {
-        Some(text) => Str::from_bytes(text.as_bytes()),
+        Some(text) => text.to_str(),
         None => null,
     }
 }
@@ -605,7 +724,7 @@ pub unsafe extern "C-unwind" fn lrt_json_read_str(r: *mut Reader) -> Str {
 /// Start an array; 1 on success.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_array_start(r: *mut Reader) -> i64 {
     i64::from(unsafe { reader(r) }.open(b'[', "an array"))
@@ -614,7 +733,7 @@ pub unsafe extern "C-unwind" fn lrt_json_array_start(r: *mut Reader) -> i64 {
 /// 1 if another element follows, 0 at the end of the array, -1 on error.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`, inside an array.
+/// `r` comes from `lrt_json_reader_init`, inside an array.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_array_next(r: *mut Reader) -> i64 {
     unsafe { reader(r) }.next(b']')
@@ -623,7 +742,7 @@ pub unsafe extern "C-unwind" fn lrt_json_array_next(r: *mut Reader) -> i64 {
 /// Start an object; 1 on success.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_object_start(r: *mut Reader) -> i64 {
     i64::from(unsafe { reader(r) }.open(b'{', "an object"))
@@ -633,35 +752,43 @@ pub unsafe extern "C-unwind" fn lrt_json_object_start(r: *mut Reader) -> i64 {
 /// object or on error (check `lrt_json_failed`).
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`, inside an object.
+/// `r` comes from `lrt_json_reader_init`, inside an object.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_object_key(r: *mut Reader) -> Str {
-    let r = unsafe { reader(r) };
-    let null = Str { ptr: std::ptr::null(), len: 0 };
-    if r.next(b'}') != 1 {
-        return null;
+    match unsafe { reader(r) }.key() {
+        Some(key) => key.to_str(),
+        None => Str { ptr: std::ptr::null(), len: 0 },
     }
-    let Some(key) = r.string() else { return null };
-    r.skip_ws();
-    if r.peek() != Some(b':') {
-        r.expected("`:` after the key");
-        return null;
+}
+
+/// Like `lrt_json_object_key`, but a key without escapes is returned as a view into the input
+/// instead of a copy: for keys that are only compared, never stored. Generated code keeps the
+/// input alive (it passes it to `lrt_json_reader_free`), and the collector treats a pointer into
+/// the middle of a string as a reference to it.
+///
+/// # Safety
+/// `r` comes from `lrt_json_reader_init`, inside an object.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_json_object_key_view(r: *mut Reader) -> Str {
+    match unsafe { reader(r) }.key() {
+        // An empty key must not be a null `Str`, which means the end of the object.
+        Some(Text::Raw(bytes)) => Str { ptr: bytes.as_ptr(), len: bytes.len() as i64 },
+        Some(key) => key.to_str(),
+        None => Str { ptr: std::ptr::null(), len: 0 },
     }
-    r.pos += 1;
-    Str::from_bytes(key.as_bytes())
 }
 
 /// Skip a value, checking its syntax; 1 on success.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_skip_value(r: *mut Reader) -> i64 {
     let r = unsafe { reader(r) };
     if r.failed() {
         return 0;
     }
-    match skip(r.input, r.pos, r.frames.len()) {
+    match skip(r.input, r.pos, r.depth) {
         Ok(end) => {
             r.pos = end;
             1
@@ -678,7 +805,7 @@ pub unsafe extern "C-unwind" fn lrt_json_skip_value(r: *mut Reader) -> i64 {
 /// recording an error) for anything else.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`.
+/// `r` comes from `lrt_json_reader_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_peek_kind(r: *mut Reader) -> i64 {
     let r = unsafe { reader(r) };
@@ -705,7 +832,7 @@ pub unsafe extern "C-unwind" fn lrt_json_peek_kind(r: *mut Reader) -> i64 {
 /// object has no such key, or its value is not a string.
 ///
 /// # Safety
-/// `r` comes from `lrt_json_reader_new`; `ptr` and `len` describe a UTF-8 string.
+/// `r` comes from `lrt_json_reader_init`; `ptr` and `len` describe a UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_peek_tag(r: *mut Reader, ptr: *const u8, len: i64) -> Str {
     let wanted = unsafe { Str::from_raw(ptr, len) };
@@ -724,13 +851,13 @@ pub unsafe extern "C-unwind" fn lrt_json_peek_tag(r: *mut Reader, ptr: *const u8
             return null;
         }
         i = skip_ws(input, i + 1);
-        if key == wanted {
+        if key.bytes() == wanted.as_bytes() {
             return match scan_string(input, i) {
-                Ok((value, _)) if input.get(i) == Some(&b'"') => Str::from_bytes(value.as_bytes()),
+                Ok((value, _)) if input.get(i) == Some(&b'"') => value.to_str(),
                 _ => null,
             };
         }
-        let Ok(end) = skip(input, i, r.frames.len() + 1) else { return null };
+        let Ok(end) = skip(input, i, r.depth + 1) else { return null };
         i = skip_ws(input, end);
         if input.get(i) != Some(&b',') {
             return null;
@@ -750,37 +877,87 @@ pub unsafe extern "C-unwind" fn lrt_json_peek_tag(r: *mut Reader, ptr: *const u8
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_builder_push_json_str(b: *mut Builder, ptr: *const u8, len: i64) {
     let text = unsafe { Str::from_raw(ptr, len) }.as_bytes();
-    let mut out = Vec::with_capacity(text.len() + 2);
-    push_json_string(&mut out, text);
-    unsafe { lrt_builder_push(b, out.as_ptr(), out.len() as i64) };
+    let b = unsafe { &mut *b };
+    b.reserve(text.len() + 2);
+    push_json_string(b, text);
 }
 
-/// Append UTF-8 text to `out` as a JSON string literal.
-pub(crate) fn push_json_string(out: &mut Vec<u8>, text: &[u8]) {
-    out.push(b'"');
-    let mut start = 0;
-    for (i, &c) in text.iter().enumerate() {
-        let escape: Option<&[u8]> = match c {
-            b'"' => Some(b"\\\""),
-            b'\\' => Some(b"\\\\"),
-            b'\n' => Some(b"\\n"),
-            b'\r' => Some(b"\\r"),
-            b'\t' => Some(b"\\t"),
-            0x08 => Some(b"\\b"),
-            0x0c => Some(b"\\f"),
-            _ => None,
-        };
-        if escape.is_some() || c < 0x20 {
-            out.extend_from_slice(&text[start..i]);
-            match escape {
-                Some(e) => out.extend_from_slice(e),
-                None => out.extend_from_slice(format!("\\u{c:04x}").as_bytes()),
+/// Somewhere JSON text is written: a `Vec` or, without a copy in between, a builder.
+pub(crate) trait JsonSink {
+    fn put(&mut self, bytes: &[u8]);
+}
+
+impl JsonSink for Vec<u8> {
+    fn put(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+impl JsonSink for Builder {
+    fn put(&mut self, bytes: &[u8]) {
+        self.push(bytes);
+    }
+}
+
+/// Whether a byte must be escaped inside a JSON string.
+fn needs_escape(c: u8) -> bool {
+    c == b'"' || c == b'\\' || c < 0x20
+}
+
+/// The index of the first byte at or after `i` that must be escaped, or the length of `text`.
+/// Looks at eight bytes at a time: most strings have nothing to escape.
+fn next_escape(text: &[u8], mut i: usize) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    loop {
+        while let Some(chunk) = text.get(i..i + 8) {
+            let word = u64::from_le_bytes(chunk.try_into().unwrap());
+            let quote = word ^ (ONES * u64::from(b'"'));
+            let backslash = word ^ (ONES * u64::from(b'\\'));
+            // A byte's high bit is set in each term when that byte is zero (or below 0x20).
+            let found = (quote.wrapping_sub(ONES) & !quote)
+                | (backslash.wrapping_sub(ONES) & !backslash)
+                | (word.wrapping_sub(ONES * 0x20) & !word);
+            if found & HIGH != 0 {
+                break;
             }
-            start = i + 1;
+            i += 8;
+        }
+        let end = (i + 8).min(text.len());
+        while i < end {
+            if needs_escape(text[i]) {
+                return i;
+            }
+            i += 1;
+        }
+        if i >= text.len() {
+            return text.len();
         }
     }
-    out.extend_from_slice(&text[start..]);
-    out.push(b'"');
+}
+
+/// Append UTF-8 text as a JSON string literal.
+pub(crate) fn push_json_string(out: &mut impl JsonSink, text: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.put(b"\"");
+    let mut start = 0;
+    loop {
+        let i = next_escape(text, start);
+        out.put(&text[start..i]);
+        let Some(&c) = text.get(i) else { break };
+        match c {
+            b'"' => out.put(b"\\\""),
+            b'\\' => out.put(b"\\\\"),
+            b'\n' => out.put(b"\\n"),
+            b'\r' => out.put(b"\\r"),
+            b'\t' => out.put(b"\\t"),
+            0x08 => out.put(b"\\b"),
+            0x0c => out.put(b"\\f"),
+            _ => out.put(&[b'\\', b'u', b'0', b'0', HEX[usize::from(c >> 4)], HEX[usize::from(c & 15)]]),
+        }
+        start = i + 1;
+    }
+    out.put(b"\"");
 }
 
 /// Append a float as a JSON number, the way Python writes it (`1.0`, `1e+100`). NaN and the
@@ -790,6 +967,69 @@ pub(crate) fn push_json_string(out: &mut Vec<u8>, text: &[u8]) {
 /// `b` comes from `lrt_builder_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_builder_push_json_float(b: *mut Builder, value: f64) {
-    let text = if value.is_finite() { lang_format::float_repr(value) } else { "null".to_string() };
+    let mut text = [0; lang_format::FLOAT_REPR_MAX];
+    let text: &[u8] = if value.is_finite() {
+        let len = lang_format::write_float_repr(value, &mut text);
+        &text[..len]
+    } else {
+        b"null"
+    };
     unsafe { lrt_builder_push(b, text.as_ptr(), text.len() as i64) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The byte-at-a-time escaping the eight-at-a-time scan must agree with.
+    fn simple(text: &[u8]) -> Vec<u8> {
+        let mut out = vec![b'"'];
+        for &c in text {
+            match c {
+                b'"' => out.extend_from_slice(b"\\\""),
+                b'\\' => out.extend_from_slice(b"\\\\"),
+                b'\n' => out.extend_from_slice(b"\\n"),
+                b'\r' => out.extend_from_slice(b"\\r"),
+                b'\t' => out.extend_from_slice(b"\\t"),
+                0x08 => out.extend_from_slice(b"\\b"),
+                0x0c => out.extend_from_slice(b"\\f"),
+                c if c < 0x20 => out.extend_from_slice(format!("\\u{c:04x}").as_bytes()),
+                c => out.push(c),
+            }
+        }
+        out.push(b'"');
+        out
+    }
+
+    #[test]
+    fn strings_escape_like_the_simple_loop() {
+        let alphabet: &[u8] = b"ab\"\\\n\r\t\x08\x0c\x00\x1f\x7f \xc3\xa9~\x21\x5b\x5d";
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for len in 0..80 {
+            for _ in 0..200 {
+                let text: Vec<u8> = (0..len)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        // Mostly plain letters, so that long runs without escapes occur.
+                        if state % 4 == 0 {
+                            alphabet[(state >> 8) as usize % alphabet.len()]
+                        } else {
+                            b'a' + (state >> 16) as u8 % 26
+                        }
+                    })
+                    .collect();
+                let mut out = Vec::new();
+                push_json_string(&mut out, &text);
+                assert_eq!(out, simple(&text), "{text:?}");
+            }
+        }
+        for c in 0..=255u8 {
+            let text = [b'x', b'x', b'x', b'x', b'x', b'x', b'x', b'x', c, b'y'];
+            let mut out = Vec::new();
+            push_json_string(&mut out, &text);
+            assert_eq!(out, simple(&text), "byte {c:#x}");
+        }
+    }
 }

@@ -183,6 +183,8 @@ cargo fmt --check
 
 ## Milestone 1: Measuring tools, then formatting and JSON without the Rust heap
 
+**Done 2026-11-19 (D87).** All exit criteria met: `json_orders` 56% less time, `/items` +58% and `POST /orders` +30% on one CPU; Rust `malloc` per request 155 to 9 on `/items` and 62 to 14 on `POST /orders`. Both stages of 1.3 were done; the optional field matching of 1.5 was not needed. Later milestones measure against this build.
+
 ### 1.1 Tools
 
 Build these first; later milestones use them as exit criteria.
@@ -542,6 +544,7 @@ Each is independent. Read the IR before and after, and keep only what measures 2
 
 - **Indexing with one compare on the fast path.** `list[i]` (`expr.rs:526`) computes `i < 0 ? i + len : i` and then does an unsigned bounds check. Instead: if `i` is below `len` as an unsigned number, index directly; otherwise go to a cold block that handles negative indexes and the panic. One compare and one predictable branch replace a compare, a select and a compare. Judge it on `sieve`.
 - **`bool` elements loaded as bytes.** `list[bool]` elements are loaded as `i1`. If the IR of `sieve`'s counting loop shows that this blocks vectorisation, load `i8` and compare with zero.
+- **Aligning generated functions.** Milestone 1 made `binary_trees` 3% to 5% slower with identical IR, only because its hot functions moved 16 bytes within a cache line (D87). Try aligning generated functions to 64 bytes (`align 64` on the function, or LLVM's `-align-all-functions=6`) and check that it makes such effects stable without growing executables much.
 - **A `--cpu` flag.** The target machine is created with the `generic` CPU and no features (`lang_codegen/src/lib.rs:115`). Add `--cpu <name>` to `build`, passed through to LLVM, with `native` allowed. The default stays `generic`, and the help text says that the result may not run on older processors.
 
 ### Exit criteria
