@@ -114,7 +114,7 @@ Handlers do more than the HTTP layer. These are the standard benchmarks in `benc
 | `fib` | Function calls | 0.021 s | 0.036 s | 0.644 s | 1.73x faster |
 | `sieve` | List indexing and appends | 0.051 s | 0.052 s | 2.277 s | 1.03x faster |
 
-Weby is at or ahead of Go on all eight, and 3.6 to 64 times faster than CPython. The weak spot is memory in allocation-heavy programs: `binary_trees` peaks at 90 MB against Go's 42 MB, and `sort` at 148 MB against 79 MB. That is the conservative collector's cost, which phase 5 of the plan is about.
+Weby is at or ahead of Go on all eight, and 3.6 to 64 times faster than CPython. The weak spot is memory in allocation-heavy programs. Since phase 5 of the plan (D86), `binary_trees` peaks at 65 MB against Go's 40 MB (it was 90 MB), and `sort` at 149 MB against 81 MB. The cause is object layout, not collection: each object carries an 8-byte header and is rounded to 16-byte granules, and a list of structs holds pointers to them where Go stores the values inline.
 
 ## What these numbers do not cover
 

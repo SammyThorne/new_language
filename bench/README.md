@@ -59,6 +59,41 @@ python3 bench/ws_idle/run.py --connections 50000
 
 ## Results
 
+### 2026-11-19, performance plan phase 5
+
+Phase 5 of [docs/09](../docs/09-performance-plan.md) measured the collector's costs and decided to stay on Boehm, with the heap-growth divisor's default raised from 1 to 2 (docs/08, D86). Best of 3 runs. The machine was about 10% slower than for phase 4: compare the ratios, not the times.
+
+| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+|---|---|---|---|---|---|---|
+| binary_trees | 0.736 s | 0.938 s | 21.833 s | 1.27x faster | 29.7x faster | 65 / 40 / 56 MB |
+| dispatch | 0.011 s | 0.032 s | 0.636 s | 3.05x faster | 60.0x faster | 13 / 13 / 13 MB |
+| fib | 0.021 s | 0.038 s | 0.678 s | 1.81x faster | 31.8x faster | 13 / 13 / 13 MB |
+| json_orders | 0.606 s | 0.664 s | 3.642 s | 1.10x faster | 6.0x faster | 71 / 59 / 130 MB |
+| sieve | 0.061 s | 0.064 s | 2.340 s | 1.05x faster | 38.5x faster | 60 / 55 / 161 MB |
+| sort | 0.537 s | 1.203 s | 2.169 s | 2.24x faster | 4.0x faster | 149 / 81 / 302 MB |
+| spawn | 0.047 s | 0.047 s | 1.280 s | 1.00x faster | 27.1x faster | 15 / 14 / 47 MB |
+| word_count | 0.674 s | 0.825 s | 2.447 s | 1.22x faster | 3.6x faster | 13 / 13 / 13 MB |
+
+HTTP at 256 connections, requests per second (median / p99 latency in ms; peak memory), median of 3 runs of 5 s, pinned:
+
+| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+|---|---|---|---|---|
+| `/plaintext` | 1,010,397 (0.21 / 0.79; 27 MB) | 528,241 (0.36 / 1.77; 25 MB) | 27,269 | 1.91x faster |
+| `/json` | 901,450 (0.23 / 0.98; 20 MB) | 495,903 (0.38 / 1.93; 24 MB) | 25,457 | 1.82x faster |
+| `/items` | 229,082 (0.99 / 2.46; 28 MB) | 227,851 (0.78 / 5.48; 22 MB) | 17,018 | 1.01x faster |
+| `/users/42` | 848,079 (0.25 / 0.92; 26 MB) | 475,075 (0.40 / 1.90; 24 MB) | 23,956 | 1.79x faster |
+| `POST /orders` | 615,022 (0.36 / 1.04; 20 MB) | 289,549 (0.65 / 3.60; 24 MB) | 19,170 | 2.12x faster |
+
+What changed:
+
+- **`binary_trees`** peaks at 65 MB instead of 90 MB, 1.6x Go's memory instead of 2.1x. In an A/B run on the same build it took about 5% longer, and it is still 1.27x faster than Go.
+- **`json_orders`** went from 79 to 71 MB, and **`spawn`** from 19 to 15 MB.
+- **`/items`** is level with Go here, against 1.08x in phase 4. The divisor accounts for about 1.5 points of that in A/B runs (D86); the rest is this slower run.
+- Measured for the decision (D86):
+  - collection is about 2% of `/items`' CPU;
+  - a server under a minute of sustained load stays at 24 MB throughout;
+  - the remaining memory gap with Go comes from object layout, not from collection.
+
 ### 2026-11-19, web performance report
 
 The measurements behind [docs/web-performance.md](../docs/web-performance.md), on the phase 4 build. HTTP at 64 and 256 connections is in that report.

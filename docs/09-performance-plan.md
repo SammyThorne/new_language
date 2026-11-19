@@ -240,7 +240,15 @@ Items 1 and 4 are done, and item 3 in part; item 2 is not done. See D85 in [08](
 
 Exit: `dispatch` and `word_count` at or ahead of Go.
 
-### Phase 5 — The collector (decided after phase 2)
+### Phase 5 — The collector (decided after phase 2) — decided 2026-11-19: stay on Boehm
+
+Measured as planned; see D86 in [08](08-decisions-and-risks.md).
+- **Time.** Collection is about 2% of `/items`. Cutting collections 150-fold made the endpoint no faster.
+- **Servers.** A server under a minute of load holds steady at 24 MB, level with Go.
+- **Batch programs.** They used about twice Go's memory, mainly from object layout: the header, Boehm's extra byte and 16-byte granules, and structs in lists stored as pointers. A precise collector would remove only part of that.
+- **Decision.** Neither threshold for a new collector is met for the reasons the collector could fix, so the runtime stays on Boehm.
+- **What changed.** The heap-growth divisor's default goes from 1 to 2, which cut `binary_trees` from 90 to 64 MB for about 5% more time.
+- **Left for later.** Value types in collections (structs stored inline in lists) are what would close the rest of the gap, and they are a language and code-generation question, not a collector one.
 
 After phases 1 and 2, measure again how much time and memory the collector costs on `binary_trees`, `/items` and a long-running server.
 

@@ -10,9 +10,10 @@
 //! - `GC_STRESS`: collect before every allocation, to make missing roots crash immediately.
 //! - `GC_INITIAL_HEAP`: bytes to reserve at startup.
 //! - `GC_FREE_SPACE_DIVISOR`: Boehm's heap growth control; lower values grow the heap faster and
-//!   collect less often. The default is 1, which lets the heap grow to about twice the live data
-//!   before collecting, like Go's default `GOGC=100`; Boehm's own default, 3, collects about
-//!   three times as often (docs/08, D73).
+//!   collect less often. The default is 2: a collection after allocating about half the live
+//!   data. 1 (about the live data, like Go's `GOGC=100`) was the default until the minimum below
+//!   took over its job for small heaps; for large ones it cost up to 40% more memory for a few
+//!   percent of time (docs/08, D73 and D86). Boehm's own default is 3.
 //! - `GC_MIN_ALLOC`: the least the program allocates between collections, in bytes; 4 MiB by
 //!   default, Go's minimum heap. Without it, a program whose live data is small collects after
 //!   every megabyte or so, which for a busy server is a thousand times a second (docs/08, D84).
@@ -47,7 +48,7 @@ pub fn init() {
     unsafe { GC_init() };
     let stress = std::env::var(lang_names::env_var("GC_STRESS")).is_ok_and(|v| !v.is_empty() && v != "0");
     STRESS.store(stress, Ordering::Relaxed);
-    let divisor = env_number("GC_FREE_SPACE_DIVISOR").filter(|&d| d > 0).unwrap_or(1);
+    let divisor = env_number("GC_FREE_SPACE_DIVISOR").filter(|&d| d > 0).unwrap_or(2);
     // SAFETY: plain configuration call.
     unsafe { GC_set_free_space_divisor(divisor) };
     let min_alloc = env_number("GC_MIN_ALLOC").filter(|&b| b > 0).unwrap_or(MIN_ALLOC);

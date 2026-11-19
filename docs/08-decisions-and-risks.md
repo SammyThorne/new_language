@@ -482,7 +482,7 @@ A TextMate grammar (`editors/vscode/`) covers VS Code and the many editors that 
 
 ### D73. The collector grows the heap to about twice the live data
 
-Boehm's default free-space divisor of 3 starts a collection when about a third of the heap has been allocated since the last one, which is far more often than Go's default (`GOGC=100`: collect when the heap has doubled). Setting the divisor to 1 matches Go's policy. It made the allocation-heavy HTTP endpoint 54% faster (with the response change below) and batch benchmarks 3% to 7% faster, for 10% to 25% more memory (`binary_trees`: 72 MB against 57 MB). `WEBY_GC_FREE_SPACE_DIVISOR` still overrides it; a memory-tight deployment can set 2 or 3.
+Boehm's default free-space divisor of 3 starts a collection when about a third of the heap has been allocated since the last one, which is far more often than Go's default (`GOGC=100`: collect when the heap has doubled). Setting the divisor to 1 matches Go's policy. It made the allocation-heavy HTTP endpoint 54% faster (with the response change below) and batch benchmarks 3% to 7% faster, for 10% to 25% more memory (`binary_trees`: 72 MB against 57 MB). `WEBY_GC_FREE_SPACE_DIVISOR` still overrides it; a memory-tight deployment can set 2 or 3. (The default became 2 in D86, once D84's allocation floor had taken over small heaps.)
 
 ### D74. The compiler recognises single-lookup dict updates
 
@@ -642,6 +642,40 @@ Phase 4 of [09](09-performance-plan.md).
 - `dispatch` takes 0.009 s against Go's 0.031 s; it was 1.73x Go's time.
 - `word_count` takes 0.648 s against Go's 0.778 s, from 1.07x to 1.20x faster than Go.
 - Every benchmark and every HTTP endpoint is now at or ahead of Go.
+
+### D86. Stay on Boehm; collect a little more often (performance plan, phase 5)
+
+Phase 5 of [09](09-performance-plan.md) was to be decided by measuring what the collector still costs after phases 1 to 4. The rule was to take up a precise, generational collector if collection were still more than about 15% of `/items`, or memory about twice Go's.
+
+**What the collector costs now.**
+- **Time.** Under `/items` at 256 connections, `libgc` takes 20% of the CPU (`bench/profile/`). Almost all of that is allocation, not collection. Raising the allocation floor from 4 MiB to 1 GiB, which cut collections from about 1,460 to 10 in 5 s, made the endpoint no faster (223,000 against 230,000 requests a second, within noise). World-stopped marking added up to 0.7 s of CPU out of about 30 CPU-seconds, about 2%.
+- **A long-running server.** Under a minute of sustained load on `/items` and on `POST /orders`, resident memory stayed at 24 MB from the first ten seconds to the last. Conservative scanning is not making it grow.
+- **Server memory.** Peak memory under load is level with Go's (22 to 24 MB against 23 to 24 MB).
+- **Batch programs** used about twice Go's memory: `binary_trees` 90 MB against 42 MB, `sort` 146 MB against 79 MB. The causes are in how objects are laid out, not in how they are collected:
+  - **`binary_trees`.** A node is an 8-byte header and two pointers, 24 bytes. Boehm adds one byte so that a pointer just past an object keeps it alive, and rounds to 16-byte granules, so each node takes 32 bytes; Go's takes 16.
+  - **`sort`.** A `list[Record]` holds pointers to 48-byte objects, where Go's slice holds 32-byte values inline. That is a question of value types in collections, which no collector changes.
+
+**Decision: stay on Boehm.** Collection time is far under the threshold. Of the memory gap, a precise collector such as MMTk's Immix would remove the extra byte and the rounding: 24-byte nodes, 25% less for `binary_trees`. It would not remove the header (the collector needs type information somewhere) or the boxed list elements. That is not worth a new runtime dependency, stack maps through the code generator, and the risk of a moving collector. The precise-collector path in [04](04-runtime-and-memory.md#beyond-boehm) stays the plan for when pause times or heap size become the problem, for example a server holding gigabytes of live data. The object header stays too (phase 2, item 3): it is what that path would use.
+
+**What changed: the free-space divisor default goes from 1 to 2.** D73 chose 1 to make small heaps collect less often, but D84's 4 MiB floor now does that job for servers and small programs. On larger heaps, 1 cost a lot of memory for a little time:
+
+| Benchmark | Divisor 1 | Divisor 2 |
+|---|---|---|
+| `binary_trees` | 0.690 s, 90 MB | 0.725 s, 64 MB |
+| `json_orders` | 0.583 s, 78 MB | 0.603 s, 71 MB |
+| `spawn` | 0.045 s, 19 MB | 0.044 s, 13 MB |
+| `/items`, 256 connections | 238,600 req/s, 23 MB | 235,100 req/s, 22 MB |
+
+The other benchmarks are unchanged. `WEBY_GC_FREE_SPACE_DIVISOR=1` restores the old behaviour.
+
+**Not done, and why.**
+- **Asking Boehm for one byte less for objects whose size is a multiple of 16.** This would avoid the extra byte where it costs a whole granule, but a pointer just past such an object would then keep the next object alive instead of this one, and LLVM may keep such pointers. Not worth that risk.
+- **Turning off interior pointers.** Substrings share their parent's bytes at any offset, so the collector must recognise pointers into the middle of objects.
+
+**Results** (full runs, [bench/README.md](../bench/README.md); the machine was about 10% slower than for phase 4, as Go's own times show):
+- `binary_trees` peaks at 65 MB against Go's 40 MB, 1.6x, down from 2.1x; it is still 1.27x faster than Go.
+- `json_orders` 71 MB against 59 MB.
+- Every benchmark is still at or ahead of Go. `/items` is level with Go (1.01x), and the other HTTP endpoints are 1.8x to 2.1x faster.
 
 ## Risks
 

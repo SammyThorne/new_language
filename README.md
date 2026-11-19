@@ -212,7 +212,7 @@ On a 6-core laptop, against the same service in Go (`net/http`) and Python. The 
 | Idle server memory | 4.2 MB | 10.9 MB | 18.2 MB |
 | Memory per idle WebSocket (50,000 open) | 15.5 KiB | not measured | not measured |
 
-Every benchmark in [bench/](bench/README.md) runs at or ahead of Go: from about level (task creation, list indexing) to 2.4x faster (sorting with a key function) and 3.4x (calls through trait objects). They run 3.6x to 64x faster than CPython. Allocation-heavy programs use up to twice Go's memory, which is the [plan](docs/09-performance-plan.md)'s remaining phase.
+Every benchmark in [bench/](bench/README.md) runs at or ahead of Go: from about level (task creation, list indexing) to 2.4x faster (sorting with a key function) and 3.4x (calls through trait objects). They run 3.6x to 64x faster than CPython. Allocation-heavy programs use 1.6x to 1.8x Go's memory, because of how objects are laid out ([plan](docs/09-performance-plan.md), phase 5); servers use about the same as Go.
 
 ## Building and running
 
