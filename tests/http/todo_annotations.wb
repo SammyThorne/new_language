@@ -1,5 +1,6 @@
 # Milestone 8 exit program: the todo service from docs/05, written with route annotations.
-# The HTTP test in crates/lang_cli/tests/http.rs starts it and sends it a script of requests.
+# The HTTP test in crates/lang_cli/tests/http.rs starts it and sends it a script of requests;
+# the one in crates/lang_cli/tests/openapi.rs checks its API documentation against its answers.
 
 import http
 import io
@@ -36,7 +37,7 @@ impl App:
             matching = [t for t in todos.values() if done is None or t.done == done]
             return matching[:limit]
 
-    @http.post("/todos", status=201)
+    @http.post("/todos", status=201, errors=[422])
     def create(self, body: NewTodo) -> Result[Todo]:
         if body.title.strip() == "":
             return Err(http.Error(422, "the title is empty"))
@@ -45,8 +46,12 @@ impl App:
             todos[todo.id] = todo
         return todo
 
-    @http.get("/todos/{id}")
+    @http.get("/todos/{id}", errors=[404])
     def get(self, id: int) -> Result[Todo]:
+        """Fetch one todo.
+
+        Answers 404 when there is no todo with that id.
+        """
         with self.todos.lock() as todos:
             match todos.get(id):
                 case Some(todo):
@@ -54,7 +59,7 @@ impl App:
                 case None:
                     return Err(http.Error(404, "todo not found"))
 
-    @http.patch("/todos/{id}")
+    @http.patch("/todos/{id}", errors=[404])
     def update(self, id: int, body: Update) -> Result[Todo]:
         with self.todos.lock() as todos:
             match todos.get(id):
@@ -97,6 +102,7 @@ def main():
     server.mount(health)
     server.mount(echo)
     server.mount(boom)
+    server.docs("/docs", title="Todo API", version="1.0.0")
     port = server.bind("127.0.0.1:0").unwrap()
     io.eprint(f"listening on {port}")
     server.serve()

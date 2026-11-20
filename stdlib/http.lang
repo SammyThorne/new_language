@@ -460,6 +460,23 @@ def not_routed(req: Request, fitting: list[Route]) -> Result[Response]:
 def wrap(middleware: Middleware, next: Handler) -> Handler:
     return lambda req: middleware(req, next)
 
+struct DocOperation:
+    """A route `mount` documented: `operation` is its OpenAPI operation object as JSON text,
+    without the `operationId`, which the document makes unique."""
+    method: str
+    path: str
+    id: str
+    operation: str
+    ws: bool
+
+struct DocsSettings:
+    path: str
+    title: str
+    version: str
+    description: str
+    servers: list[str]
+    hide_ws: bool
+
 pub struct Server:
     """
     Routes, middleware and settings. Register routes, then call `listen`. Request handlers run
@@ -479,12 +496,22 @@ pub struct Server:
     # The parameters of a request on a route without any, shared by all such requests. Never
     # changed: `params` is only ever replaced, and read.
     priv no_params: dict[str, str] = {}
+    # The API documentation (docs/12): what `mount` recorded when the program asks for it, the
+    # settings given to `docs`, the patterns of the routes `docs` added, and the documents
+    # once built ("" until the first request for them, and after any route is added).
+    priv doc_operations: list[DocOperation] = []
+    priv doc_schemas: dict[str, str] = {}
+    priv docs_settings: DocsSettings? = None
+    priv docs_routes: list[str] = []
+    priv docs_json: str = ""
+    priv docs_yaml: str = ""
 
 impl Server:
     def route(self, method: str, path: str, handler: Handler):
         """Register a handler for a method and a path such as `/todos/{id}` or `/files/{rest...}`."""
         self.routes.append(new_route(method.upper(), path, handler))
         self.chain = None
+        self.docs_json = ""
 
     def get(self, path: str, handler: Handler):
         self.route("GET", path, handler)
@@ -641,6 +668,116 @@ impl Server:
         """Ask `serve` to finish, as SIGTERM does."""
         shutdown_raw()
 
+    def docs(
+        self,
+        path: str = "/docs",
+        title: str = "API",
+        version: str = "0.1.0",
+        description: str = "",
+        servers: list[str] = [],
+        hide_ws: bool = True,
+    ):
+        """
+        Serve an OpenAPI 3.1 description of this server's routes at `path + "/openapi.json"`
+        and `path + "/openapi.yaml"`. It is built from the routes' types, annotations and
+        docstrings when first asked for, so `docs` can come before or after `mount`. `servers`
+        are the base URLs listed in it; WebSocket endpoints are listed only with
+        `hide_ws=False`. The routes go through the server's middleware like any other.
+        """
+        base = path
+        while base.ends_with("/"):
+            base = base[0:len(base) - 1]
+        self.docs_settings = DocsSettings(base, title, version, description, servers, hide_ws)
+        server = self
+        self.docs_route(base + "/openapi.json", lambda req: Ok(server.openapi_reply(False)))
+        self.docs_route(base + "/openapi.yaml", lambda req: Ok(server.openapi_reply(True)))
+
+    def openapi_json(
+        self,
+        title: str = "API",
+        version: str = "0.1.0",
+        description: str = "",
+        servers: list[str] = [],
+        hide_ws: bool = True,
+    ) -> str:
+        """The OpenAPI document `docs` serves, as JSON text: for tests, a file, or a route of
+        your own."""
+        return self.document(DocsSettings("", title, version, description, servers, hide_ws))
+
+    def __document(self, method: str, path: str, id: str, operation: str, ws: bool):
+        """Used by the code `server.mount` generates: one documented route."""
+        self.doc_operations.append(DocOperation(method, path, id, operation, ws))
+        self.docs_json = ""
+
+    def __schema(self, name: str, schema: str):
+        """Used by the code `server.mount` generates: a schema the documented routes use."""
+        self.doc_schemas[name] = schema
+        self.docs_json = ""
+
+    def docs_route(self, pattern: str, handler: Handler):
+        self.route("GET", pattern, handler)
+        self.docs_routes.append(pattern)
+
+    def openapi_reply(self, yaml: bool) -> Response:
+        if self.docs_json == "":
+            match self.docs_settings:
+                case Some(settings):
+                    self.docs_yaml = ""
+                    self.docs_json = self.document(settings)
+                case None:
+                    pass
+        if not yaml:
+            return Response(200, self.docs_json, "application/json")
+        if self.docs_yaml == "":
+            self.docs_yaml = yaml_of_json(self.docs_json)
+        return Response(200, self.docs_yaml, "application/yaml")
+
+    def document(self, settings: DocsSettings) -> str:
+        """The OpenAPI document, as JSON text, joined from what `mount` recorded. Call-style
+        routes are listed with their method, path and path parameters."""
+        documented: dict[str, DocOperation] = {}
+        for op in self.doc_operations:
+            documented[op.method + " " + op.path] = op
+        seen: list[str] = []
+        order: list[str] = []
+        by_path: dict[str, list[str]] = {}
+        used_ids: dict[str, int] = {}
+        for route in self.routes:
+            method = route.method.lower()
+            path = route.pattern.replace("...}", "}")
+            key = route.method + " " + path
+            if route.pattern in self.docs_routes or not OPENAPI_METHODS.contains(" " + method + " ") or key in seen:
+                continue
+            seen.append(key)
+            operation = ""
+            match documented.get(key):
+                case Some(op):
+                    if op.ws and settings.hide_ws:
+                        continue
+                    id = unique_id(op.id, used_ids)
+                    operation = "{\"operationId\":" + jsonlib.encode(id) + "," + op.operation[1:]
+                case None:
+                    operation = call_style_operation(route)
+            if path not in by_path:
+                order.append(path)
+                by_path[path] = []
+            by_path[path].append(jsonlib.encode(method) + ":" + operation)
+        info = "{\"title\":" + jsonlib.encode(settings.title) + ",\"version\":" + jsonlib.encode(settings.version)
+        if settings.description != "":
+            info = info + ",\"description\":" + jsonlib.encode(settings.description)
+        parts = ["{\"openapi\":\"3.1.0\",\"info\":" + info + "}"]
+        if len(settings.servers) > 0:
+            urls = ["{\"url\":" + jsonlib.encode(url) + "}" for url in settings.servers]
+            parts.append(",\"servers\":[" + ",".join(urls) + "]")
+        paths = [jsonlib.encode(path) + ":{" + ",".join(by_path[path]) + "}" for path in order]
+        parts.append(",\"paths\":{" + ",".join(paths) + "}")
+        if len(self.doc_schemas) > 0:
+            names = sorted(self.doc_schemas.keys())
+            schemas = [jsonlib.encode(name) + ":" + self.doc_schemas[name] for name in names]
+            parts.append(",\"components\":{\"schemas\":{" + ",".join(schemas) + "}}")
+        parts.append("}")
+        return "".join(parts)
+
 pub struct Group:
     priv server: Server
     priv prefix: str
@@ -671,6 +808,14 @@ impl Group:
     def ws(self, path: str, handler: WsHandler):
         self.route("GET", path, lambda req: upgrade(req, handler))
 
+    def __document(self, method: str, path: str, id: str, operation: str, ws: bool):
+        """Used by the code `group.mount` generates: one documented route."""
+        self.server.__document(method, self.prefix + path, id, operation, ws)
+
+    def __schema(self, name: str, schema: str):
+        """Used by the code `group.mount` generates: a schema the documented routes use."""
+        self.server.__schema(name, schema)
+
     def use(self, middleware: Middleware):
         """Middleware for the routes registered on this group after this call."""
         self.middleware.append(middleware)
@@ -680,6 +825,110 @@ impl Group:
         for middleware in self.middleware:
             nested.middleware.append(middleware)
         return nested
+
+# ---- API documentation --------------------------------------------------------------------
+
+# The methods an OpenAPI path item can have, each between spaces.
+const OPENAPI_METHODS = " get put post delete options head patch trace "
+
+def unique_id(id: str, used: dict[str, int]) -> str:
+    """`id`, or `id_2`, `id_3`... when the document already has it (a type mounted twice)."""
+    match used.get(id):
+        case None:
+            used[id] = 1
+            return id
+        case Some(count):
+            n = count + 1
+            candidate = f"{id}_{n}"
+            while candidate in used:
+                n += 1
+                candidate = f"{id}_{n}"
+            used[id] = n
+            used[candidate] = 1
+            return candidate
+
+def call_style_operation(route: Route) -> str:
+    """What is known of a route registered with `server.get(...)` and the like."""
+    parameters: list[str] = []
+    for i in range(len(route.kinds)):
+        if route.kinds[i] != LITERAL:
+            parameters.append(
+                "{\"name\":" + jsonlib.encode(route.names[i])
+                + ",\"in\":\"path\",\"required\":true,\"schema\":{\"type\":\"string\"}}"
+            )
+    text = "{"
+    if len(parameters) > 0:
+        text = text + "\"parameters\":[" + ",".join(parameters) + "],"
+    return text + "\"responses\":{\"default\":{\"description\":\"Response\"}}}"
+
+def yaml_of_json(text: str) -> str:
+    """The same document in YAML. Strings are plain when they cannot be read as anything else,
+    and double-quoted otherwise, which in YAML takes JSON's escapes."""
+    match jsonlib.parse(text):
+        case Ok(value):
+            lines: list[str] = []
+            yaml_lines(value, "", lines)
+            return "\n".join(lines) + "\n"
+        case Err(_):
+            return ""
+
+def yaml_lines(value: jsonlib.Value, indent: str, out: list[str]):
+    match value:
+        case jsonlib.Value.Object(fields):
+            for key, item in fields.items():
+                match yaml_inline(item):
+                    case Some(text):
+                        out.append(indent + yaml_str(key) + ": " + text)
+                    case None:
+                        out.append(indent + yaml_str(key) + ":")
+                        yaml_lines(item, indent + "  ", out)
+        case jsonlib.Value.Array(items):
+            for item in items:
+                match yaml_inline(item):
+                    case Some(text):
+                        out.append(indent + "- " + text)
+                    case None:
+                        out.append(indent + "-")
+                        yaml_lines(item, indent + "  ", out)
+        case _:
+            pass
+
+def yaml_inline(value: jsonlib.Value) -> str?:
+    """A value that fits on its line, or `None` for a non-empty object or array."""
+    match value:
+        case jsonlib.Value.Null:
+            return "null"
+        case jsonlib.Value.Bool(flag):
+            if flag:
+                return "true"
+            return "false"
+        case jsonlib.Value.Int(number):
+            return f"{number}"
+        case jsonlib.Value.Float(real):
+            return jsonlib.encode(real)
+        case jsonlib.Value.Str(text):
+            return yaml_str(text)
+        case jsonlib.Value.Array(items):
+            if len(items) == 0:
+                return "[]"
+            return None
+        case jsonlib.Value.Object(fields):
+            if len(fields) == 0:
+                return "{}"
+            return None
+
+# Letters, digits and the punctuation a plain YAML scalar may be made of here.
+const YAML_PLAIN = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-/"
+# Plain scalars that YAML would read as something other than a string, each between spaces.
+const YAML_WORDS = " true false null yes no on off y n "
+
+def yaml_str(text: str) -> str:
+    if text == "" or YAML_WORDS.contains(" " + text.lower() + " ") or not YAML_PLAIN[0:52].contains(text[0:1]):
+        return jsonlib.encode(text)
+    for c in text:
+        if not YAML_PLAIN.contains(c):
+            return jsonlib.encode(text)
+    return text
 
 # ---- WebSockets ---------------------------------------------------------------------------
 

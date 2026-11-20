@@ -192,12 +192,17 @@ Each milestone ends with its tests, the gates below, a "Done" note in this file,
 - Tests: golden JSON for `tests/http/todo_annotations.wb` (`tests/http/todo_annotations.openapi.json`), a program with every schema form in the table, generics, a recursive type, a mounted prefix, two types with a method of the same name. Run the compiler with a debug flag or a test hook that prints the generated documentation source (the same way the mount adapters can be inspected today).
 - Gate: the benchmark servers' generated code is byte-identical to before (compare `--emit=llvm-ir` or the object size).
 
+**Done** (D97, with milestone 3, since the operations and schemas can only be tested through the document). `check/openapi.rs` writes the operations and the schemas; `E0341` reports two types with one schema name (`tests/ui/openapi_name_clash.wb`). The operation id is passed separately so the server can make it unique when a type is mounted twice. The tests are `tests/openapi/schemas.wb` with its golden document, validated with a subset validator in `crates/lang_cli/tests/openapi.rs` (`common/json.rs` also has a JSON and a YAML reader). The benchmark servers do not mention `docs`, so `mount` generates the same source for them as before; the `Server` struct has six more fields, set once when it is created.
+
 ### Milestone 3: `docs`, `openapi_json`, the document (about 1.5 days)
 
 - `Server.docs(...)` and `Server.openapi_json(...)` in `http.lang`: build the document from the stored fragments (section 4.1), cached; JSON as above; YAML from a small emitter in the library working on the same text (quote strings; the document only has objects, arrays, strings, numbers, booleans and null). Call-style routes are included with their path parameters.
 - The `docs` routes: `openapi.json` and `openapi.yaml`. The page and its files are milestone 4, so until then `docs` serves the document only.
 - `title`, `description` and `servers` are JSON-escaped in the document.
 - Tests: `crates/lang_cli/tests/http.rs` gains a case that starts the todo service with `docs`, fetches `/docs/openapi.json`, parses it, and checks the paths, parameters, schemas and statuses against the service's real behaviour (e.g. the declared 404 really occurs, the declared 400 really occurs); `/docs/openapi.yaml` parses to the same content (compare through a small YAML subset reader in the test, or by round trip with Python if available in the test environment: the tests may not require Python). A `tests/run/` program using `openapi_json` with an in-process `http.test_request`.
+
+
+**Done** (D97). `server.docs(path, title, version, description, servers, hide_ws)` and `server.openapi_json(...)`; `ui` and `try_it_out` arrive with the viewer in milestone 4, and `tags` and `security` in milestone 5. The document is built on the first request and rebuilt after any route is added. The todo service test is in `crates/lang_cli/tests/openapi.rs` (not `http.rs`): it checks the YAML against the JSON with a small YAML reader, and that the declared statuses and the real ones are the same set. `tests/run/openapi_json.wb` uses `openapi_json` and the docs routes in process.
 
 ### Milestone 4: the viewer (about 4 days)
 

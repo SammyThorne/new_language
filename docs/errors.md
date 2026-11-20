@@ -11,7 +11,7 @@ A test (`every_code_has_a_section` in `crates/lang_cli/tests/errors.rs`) fails w
 | [Lexical](#lexical-errors) | E0001 to E0007 | The text is not valid tokens: tabs, strings, characters, numbers |
 | [Syntax](#syntax-errors) | E0100 to E0104 | The tokens do not form a program |
 | [Names](#name-errors) | E0200 to E0204 | A name that is missing, repeated or used too early |
-| [Types and checking](#type-and-checking-errors) | E0300 to E0340 | Everything the type checker finds |
+| [Types and checking](#type-and-checking-errors) | E0300 to E0341 | Everything the type checker finds |
 | [Warnings](#warnings) | W0001 to W0004 | Code that compiles but is probably a mistake |
 
 
@@ -1064,6 +1064,24 @@ error[E0340]: the path has `{id}`, but `missing_param` has no parameter `id`
 ```
 
 **What to do.** Route paths start with `/` and name each `{parameter}` as a parameter of the handler; query and body parameters must have types that can be read from text or JSON. The message says which part does not fit.
+
+### E0341: two types share a name in the API documentation
+
+The OpenAPI document that `server.docs` and `server.openapi_json` serve lists each JSON type under `components.schemas` by its name, with a generic type's arguments joined by `_` (`Page[Todo]` is `Page_Todo`). Two different types that a server documents would get the same name. The name `Error` is taken by the body of error responses.
+
+From `tests/ui/openapi_name_clash.wb`:
+
+```text
+error[E0341]: two schemas are both called `Box_Item` in the API documentation
+  --> tests/ui/openapi_name_clash.wb:32:5
+   |
+32 |     server.mount(App())
+   |     ^^^^^^^^^^^^^^^^^^^ documents `Box[Item]`
+   |
+   = help: `Box_Item` is documented under the same name; rename one of them
+```
+
+**What to do.** Rename one of the types. The check happens only in programs that call `docs` or `openapi_json`.
 
 
 ## Warnings

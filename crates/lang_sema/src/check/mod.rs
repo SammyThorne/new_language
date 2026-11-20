@@ -28,6 +28,7 @@ mod http;
 mod items;
 mod json;
 mod modules;
+mod openapi;
 mod patterns;
 mod stmt;
 mod unused;
@@ -36,7 +37,7 @@ use crate::hir::{self, FuncId, LocalId};
 use crate::types::{EnumId, StructId, TraitId, Ty, TyKind, Types};
 use lang_diag::{Diagnostic, Diagnostics, FileId, SourceMap, Span, codes};
 use lang_syntax::ast;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub use completion::{Completions, Member, MemberKind};
 
@@ -215,6 +216,7 @@ fn run(
     checker.import_all(&modules);
     checker.find_json_types();
     checker.find_http_types();
+    checker.uses_docs = checker.http.is_some() && openapi::program_uses_docs(inputs, checker.sources);
     checker.resolve_declarations();
     checker.check_consts();
     checker.register_derives();
@@ -535,6 +537,11 @@ struct Checker<'a, 'm> {
     generated: usize,
     /// The files of generated source.
     generated_files: Vec<FileId>,
+    /// Whether the program asks for its API documentation, so `mount` generates it (docs/12).
+    uses_docs: bool,
+    /// The types documented under each schema name, and the names already reported as shared.
+    openapi_names: HashMap<String, Ty>,
+    openapi_clashes: HashSet<String>,
 }
 
 /// Per-function state while checking a body.
@@ -781,6 +788,9 @@ impl<'a, 'm> Checker<'a, 'm> {
             function_routes: HashMap::new(),
             generated: 0,
             generated_files: Vec::new(),
+            uses_docs: false,
+            openapi_names: HashMap::new(),
+            openapi_clashes: HashSet::new(),
         }
     }
 

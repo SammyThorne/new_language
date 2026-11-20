@@ -1,0 +1,85 @@
+# expect: Notes 2.0 /notes,/notes/{id},/ping
+# expect: listNotes [limit] 200,400
+# expect: 201 Note
+# expect: 200 application/json True
+# expect: 200 application/yaml openapi: "3.1.0"
+# expect: ping default
+# expect: after: 2
+# expect: 404 not found
+import http
+import json
+
+@derive(Json)
+struct Note:
+    id: int
+    text: str
+
+@frozen
+struct Notes:
+    pass
+
+impl Notes:
+    @http.get("/notes")
+    def listNotes(self, limit: int = 10) -> list[Note]:
+        """All the notes."""
+        return [Note(1, "a")][:limit]
+
+    @http.post("/notes", status=201)
+    def add(self, note: Note) -> Note:
+        return note
+
+    @http.get("/notes/{id}", errors=[404])
+    def one(self, id: int) -> Result[Note]:
+        return Err(http.Error(404, "no such note"))
+
+def main():
+    server = http.Server()
+    server.mount(Notes())
+    server.get("/ping", lambda req: Ok(http.text("pong")))
+    server.docs("/api-docs/", title="Notes", version="2.0")
+
+    doc = json.parse(server.openapi_json(title="Notes", version="2.0")).unwrap()
+    paths: list[str] = []
+    match doc["paths"]:
+        case json.Value.Object(fields):
+            paths = fields.keys()
+        case _:
+            pass
+    print(f"{doc['info']['title'].as_str().unwrap()} {doc['info']['version'].as_str().unwrap()} {','.join(paths)}")
+    get = doc["paths"]["/notes"]["get"]
+    statuses: list[str] = []
+    match get["responses"]:
+        case json.Value.Object(fields):
+            statuses = fields.keys()
+        case _:
+            pass
+    print(f"{get['operationId'].as_str().unwrap()} [{get['parameters'][0]['name'].as_str().unwrap()}] {','.join(statuses)}")
+    created = doc["paths"]["/notes"]["post"]["responses"]["201"]["content"]["application/json"]["schema"]["$ref"]
+    print(f"201 {created.as_str().unwrap().split('/')[3]}")
+
+    # The routes `docs` added, with a trailing slash in its path ignored.
+    served = server.handle(http.test_request("GET", "/api-docs/openapi.json"))
+    print(f"{served.status} {served.content_type} {served.body == server.openapi_json(title='Notes', version='2.0')}")
+    yaml = server.handle(http.test_request("GET", "/api-docs/openapi.yaml"))
+    print(f"{yaml.status} {yaml.content_type} {yaml.body.split('\n')[0]}")
+    ping = json.parse(served.body).unwrap()["paths"]["/ping"]["get"]["responses"]
+    match ping:
+        case json.Value.Object(fields):
+            print(f"ping {','.join(fields.keys())}")
+        case _:
+            pass
+
+    # A route added after the first request is in the next document.
+    server.get("/late", lambda req: Ok(http.text("late")))
+    again = json.parse(server.handle(http.test_request("GET", "/api-docs/openapi.json")).body).unwrap()
+    late = 0
+    match again["paths"]:
+        case json.Value.Object(fields):
+            for name in fields.keys():
+                if name == "/late" or name == "/ping":
+                    late += 1
+        case _:
+            pass
+    print(f"after: {late}")
+    missing = server.handle(http.test_request("GET", "/api-docs"))
+    print(f"{missing.status} {json.parse(missing.body).unwrap()['error'].as_str().unwrap()}")

@@ -1,0 +1,33 @@
+# Two different types that the API documentation would call by the same name.
+import http
+
+@derive(Json)
+struct Item:
+    id: int
+
+@derive(Json)
+struct Box[T]:
+    value: T
+
+@derive(Json)
+struct Box_Item:
+    value: str
+
+@derive(Json)
+struct Both:
+    generic: Box[Item]
+    plain: Box_Item
+
+@frozen
+struct App:
+    pass
+
+impl App:
+    @http.get("/both")
+    def both(self) -> Both:
+        return Both(Box(Item(1)), Box_Item("x"))
+
+def main():
+    server = http.Server()
+    server.mount(App())
+    print(server.openapi_json())

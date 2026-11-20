@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod json;
+
 use lang_names::{CLI_NAME, SOURCE_EXTENSION, env_var};
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
@@ -14,7 +16,7 @@ pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
 }
 
-fn compiler() -> PathBuf {
+pub fn compiler() -> PathBuf {
     let variable = format!("CARGO_BIN_EXE_{CLI_NAME}");
     PathBuf::from(std::env::var_os(&variable).unwrap_or_else(|| panic!("cargo did not set {variable}")))
 }

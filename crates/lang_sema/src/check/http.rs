@@ -21,6 +21,7 @@
 //! The types the generated code names are bound to temporary names (`__g0`, ...) in the scope of
 //! the `mount` call, so it works whatever the user imported.
 
+use super::openapi;
 use super::{Checker, FnCx, Global, error_expr};
 use crate::hir::{self, ExprKind as K, FuncId};
 use crate::types::{Ty, TyKind};
@@ -44,7 +45,7 @@ pub(super) struct HttpTypes {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Scalar {
+pub(super) enum Scalar {
     Int,
     Float,
     Bool,
@@ -73,7 +74,7 @@ impl Scalar {
 }
 
 #[derive(Clone, Debug)]
-enum Binding {
+pub(super) enum Binding {
     Request,
     /// The connection, in a WebSocket handler.
     Socket,
@@ -102,7 +103,7 @@ enum Binding {
 }
 
 #[derive(Clone, Debug)]
-enum Reply {
+pub(super) enum Reply {
     Response,
     Json,
     Text,
@@ -111,21 +112,24 @@ enum Reply {
 
 #[derive(Clone, Debug)]
 pub(super) struct Route {
-    method: String,
-    path: String,
-    status: Option<i64>,
+    pub method: String,
+    pub path: String,
+    pub status: Option<i64>,
     /// The method's name, or the function.
-    handler: Result<String, FuncId>,
-    params: Vec<Binding>,
-    reply: Reply,
-    fallible: bool,
+    pub handler: Result<String, FuncId>,
+    /// The method's or function's name.
+    pub name: String,
+    pub params: Vec<Binding>,
+    pub reply: Reply,
+    /// What a successful call returns: the return type, or the `Ok` side of a `Result`.
+    pub ok: Ty,
+    pub fallible: bool,
     /// An `@http.ws` endpoint.
-    ws: bool,
-    span: Span,
+    pub ws: bool,
+    pub span: Span,
     /// What the documentation says about it (docs/12): `tags=`, `deprecated=`, `errors=`, and
     /// the handler's docstring split into a summary line and the rest.
-    #[allow(dead_code)] // read by the OpenAPI generator (docs/12, milestone 2)
-    doc: RouteDoc,
+    pub doc: RouteDoc,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -549,7 +553,8 @@ impl<'m> Checker<'_, 'm> {
         if let Some(text) = docstring(function) {
             (doc.summary, doc.description) = split_docstring(text);
         }
-        Some(Route { method, path, status, handler, params, reply, fallible, ws, span, doc })
+        let name = function.name.name.clone();
+        Some(Route { method, path, status, handler, name, params, reply, ok, fallible, ws, span, doc })
     }
 
     /// The `{name}` segments of a route path, after checking its syntax.
@@ -701,7 +706,20 @@ impl<'m> Checker<'_, 'm> {
                 ));
             }
         }
+        let documented =
+            self.uses_docs.then(|| self.document_routes(&routes, function.is_none().then_some(value.ty), span));
         for (index, route) in routes.iter().enumerate() {
+            if let Some(documented) = &documented {
+                let (id, operation, ws) = &documented.operations[index];
+                text.push_str(&format!(
+                    "    __server.__document({:?}, __prefix + {:?}, {}, {}, {})\n",
+                    route.method,
+                    route.path.replace("...}", "}"),
+                    openapi::source_literal(id),
+                    openapi::source_literal(operation),
+                    if *ws { "True" } else { "False" }
+                ));
+            }
             text.push_str(&format!("    def __route_{index}(__req: {request_name}) -> Result[{response_name}]:\n"));
             let mut args = Vec::new();
             for (n, binding) in route.params.iter().enumerate() {
@@ -768,6 +786,14 @@ impl<'m> Checker<'_, 'm> {
             text.push_str(&format!(
                 "    __server.route({:?}, __prefix + {:?}, __route_{index})\n",
                 route.method, route.path
+            ));
+        }
+
+        for (name, schema) in documented.iter().flat_map(|d| &d.schemas) {
+            text.push_str(&format!(
+                "    __server.__schema({}, {})\n",
+                openapi::source_literal(name),
+                openapi::source_literal(schema)
             ));
         }
 

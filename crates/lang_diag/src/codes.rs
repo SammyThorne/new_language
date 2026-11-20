@@ -121,6 +121,8 @@ pub const NOT_SHAREABLE: &str = "E0338";
 pub const GUARD_ESCAPE: &str = "E0339";
 /// An `@http` route whose path, parameters or return type do not fit together.
 pub const BAD_ROUTE: &str = "E0340";
+/// Two types documented under the same schema name in a server's OpenAPI document.
+pub const DOC_NAME_CLASH: &str = "E0341";
 
 /// A variable that is assigned but never read.
 pub const UNUSED_VARIABLE: &str = "W0001";

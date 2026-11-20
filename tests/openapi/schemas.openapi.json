@@ -1,0 +1,478 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "T",
+    "version": "0.1.0",
+    "description": "line\n\"q\""
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080"
+    }
+  ],
+  "paths": {
+    "/users/": {
+      "get": {
+        "operationId": "Users_list",
+        "tags": [
+          "people"
+        ],
+        "summary": "List users.",
+        "description": "Paged, with a **cursor**.",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/{id}": {
+      "put": {
+        "operationId": "put",
+        "tags": [
+          "Users"
+        ],
+        "deprecated": true,
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Everything"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Everything"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/live": {
+      "get": {
+        "operationId": "live",
+        "tags": [
+          "Users"
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching Protocols"
+          }
+        },
+        "x-websocket": true
+      }
+    },
+    "/v2/orders/": {
+      "get": {
+        "operationId": "Orders_list",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Shape"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/orders/raw": {
+      "post": {
+        "operationId": "raw",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/v2/again/": {
+      "get": {
+        "operationId": "Orders_list_2",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Shape"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/again/raw": {
+      "post": {
+        "operationId": "raw_2",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Color": {
+        "type": "string",
+        "enum": [
+          "Red",
+          "Green"
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "Everything": {
+        "type": "object",
+        "required": [
+          "small",
+          "tiny",
+          "big",
+          "ratio",
+          "display-name",
+          "tags",
+          "pair",
+          "frozen",
+          "extra",
+          "anything"
+        ],
+        "properties": {
+          "small": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "tiny": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "big": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "ratio": {
+            "type": "number",
+            "format": "float"
+          },
+          "display-name": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "pair": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "integer",
+                "format": "int64"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "items": false,
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "frozen": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "extra": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "anything": {},
+          "color": {
+            "$ref": "#/components/schemas/Color"
+          },
+          "shape": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Shape"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "note": {
+            "type": "string",
+            "default": "hi \"there\""
+          },
+          "score": {
+            "type": "number",
+            "format": "double",
+            "default": -1.5
+          }
+        },
+        "additionalProperties": false
+      },
+      "Node": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            },
+            "default": []
+          },
+          "parent": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Node"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        }
+      },
+      "Page_Node": {
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "Shape": {
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "Circle",
+            "required": [
+              "type",
+              "radius"
+            ],
+            "properties": {
+              "type": {
+                "const": "Circle"
+              },
+              "radius": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "Rect",
+            "required": [
+              "type",
+              "w",
+              "h"
+            ],
+            "properties": {
+              "type": {
+                "const": "Rect"
+              },
+              "w": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "h": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "Empty",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "Empty"
+              }
+            }
+          }
+        ],
+        "discriminator": {
+          "propertyName": "type"
+        }
+      },
+      "UserPage": {
+        "type": "object",
+        "required": [
+          "page"
+        ],
+        "properties": {
+          "page": {
+            "$ref": "#/components/schemas/Page_Node"
+          }
+        }
+      }
+    }
+  }
+}

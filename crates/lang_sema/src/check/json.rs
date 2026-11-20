@@ -37,7 +37,7 @@ impl Checker<'_, '_> {
         self.json = Some(hir::JsonTypes { value, error });
     }
 
-    fn json_value_ty(&self) -> Option<Ty> {
+    pub(super) fn json_value_ty(&self) -> Option<Ty> {
         self.json.map(|j| self.enums[j.value.0].ty)
     }
 

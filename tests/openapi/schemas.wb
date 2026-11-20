@@ -1,0 +1,119 @@
+# The OpenAPI test in crates/lang_cli/tests/openapi.rs runs this program. Its first line of
+# output is the document, which must equal schemas.openapi.json; each line after it is a type's
+# schema name and a value of that type as `json.encode` writes it, which must fit the schema.
+
+import http
+import json
+
+@derive(Json)
+enum Color:
+    Red
+    Green
+
+@derive(Json)
+enum Shape:
+    Circle(radius: float)
+    Rect(w: int, h: int)
+    Empty
+
+@derive(Json)
+struct Node:
+    value: int
+    children: list[Node] = []
+    parent: Node? = None
+
+@derive(Json)
+struct Page[T]:
+    items: list[T]
+    total: int
+
+@derive(Json)
+struct UserPage:
+    page: Page[Node]
+
+@derive(Json)
+@json(strict)
+struct Everything:
+    small: i32
+    tiny: u8
+    big: u64
+    ratio: f32
+    @json(name="display-name")
+    name: str
+    tags: set[str]
+    pair: tuple[int, str]
+    frozen: tuple[int, ...]
+    extra: dict[str, float]
+    anything: json.Value
+    color: Color = Color.Red
+    shape: Shape?
+    note: str = "hi \"there\""
+    score: float = -1.5
+
+@frozen
+struct Users:
+    pass
+
+@frozen
+struct Orders:
+    pass
+
+impl Users:
+    @http.get("/", tags=["people"], errors=[404, 409])
+    def list(self, cursor: str? = None, size: int = 10) -> UserPage:
+        """List users.
+
+        Paged, with a **cursor**.
+        """
+        return UserPage(Page([], 0))
+
+    @http.put("/{id}", deprecated=True)
+    def put(self, id: str, body: Everything, x_token: http.Header, session: http.Cookie?) -> Everything:
+        return body
+
+    @http.ws("/live")
+    def live(self, ws: http.WebSocket):
+        pass
+
+impl Orders:
+    @http.get("/")
+    def list(self) -> Result[list[Shape]]:
+        shapes: list[Shape] = []
+        return shapes
+
+    @http.post("/raw")
+    def raw(self, req: http.Request) -> http.Response:
+        return http.text("x")
+
+def main():
+    server = http.Server()
+    server.mount(Users(), prefix="/users")
+    api = server.group("/v2")
+    api.mount(Orders(), prefix="/orders")
+    api.mount(Orders(), prefix="/again")
+    print(server.openapi_json(title="T", description="line\n\"q\"", servers=["http://localhost:8080"], hide_ws=False))
+    leaf = Node(3)
+    tree = Node(1, [Node(2), leaf], Node(0))
+    print(f"Node {json.encode(tree)}")
+    print(f"UserPage {json.encode(UserPage(Page([tree, leaf], 2)))}")
+    print(f"Color {json.encode(Color.Green)}")
+    for shape in [Shape.Circle(1.5), Shape.Rect(2, 3), Shape.Empty]:
+        print(f"Shape {json.encode(shape)}")
+    tags: set[str] = {"a", "b"}
+    everything = Everything(
+        small=-5,
+        tiny=255,
+        big=18446744073709551615,
+        ratio=0.25,
+        name="n",
+        tags=tags,
+        pair=(1, "one"),
+        frozen=(1, 2, 3),
+        extra={"x": 1.5},
+        anything=json.parse("[1, {\"a\": null}]").unwrap(),
+        shape=Shape.Rect(1, 1),
+    )
+    print(f"Everything {json.encode(everything)}")
+    everything.shape = None
+    everything.color = Color.Green
+    print(f"Everything {json.encode(everything)}")
