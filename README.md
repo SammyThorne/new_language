@@ -298,7 +298,7 @@ The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real socke
 | [docs/release-notes.md](docs/release-notes.md) | What the first release has, what it does not, and how to install it |
 | [docs/errors.md](docs/errors.md) | Every error and warning code: what it means, a real example, and what to do (`weby explain E0300` prints one) |
 | [docs/11-release-polish-plan.md](docs/11-release-polish-plan.md) | The language and compiler work before release: gaps found by probing, five milestones, all done; what each did and left out is in the decision log (D91 to D95) |
-| [docs/12-openapi-docs-plan.md](docs/12-openapi-docs-plan.md) | Plan, not built yet: `server.docs("/docs")` serves an OpenAPI document generated from the routes and a built-in Swagger UI, like Fastify's swagger plugins |
+| [docs/12-openapi-docs-plan.md](docs/12-openapi-docs-plan.md) | Plan, not built yet: `server.docs("/docs")` serves an OpenAPI document generated from the routes and a built-in documentation page (a viewer written for the project, no downloads), like Fastify's swagger plugins |
 | [editors/README.md](editors/README.md) | Editor support and the language server |
 
 The name "Weby" and the `.wb` extension may still change. The name is kept out of crate names and runtime symbols and lives in one small crate of constants, so it can be changed later with a short checklist ([docs/03-compiler-architecture.md](docs/03-compiler-architecture.md#renaming-the-language)).

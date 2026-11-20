@@ -1,6 +1,6 @@
-# OpenAPI and a built-in Swagger UI: research and plan
+# OpenAPI and a built-in API documentation page: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. Nothing in it is built yet. It adds to the `http` module a function, `server.docs("/docs")`, that serves an OpenAPI document describing the server's routes and a ready-made Swagger UI page for it, at a path the user chooses. It mirrors what `@fastify/swagger` with `@fastify/swagger-ui` does in Fastify, and what FastAPI does at `/docs`.
+This is a plan, written so that an agent with no other context can carry it out. Nothing in it is built yet. It adds to the `http` module a function, `server.docs("/docs")`, that serves an OpenAPI document describing the server's routes and a ready-made, Swagger-style documentation page for it, at a path the user chooses. It mirrors what `@fastify/swagger` with `@fastify/swagger-ui` does in Fastify, and what FastAPI does at `/docs`. **The page is a viewer written for this project** (plain HTML, CSS and JavaScript, no dependencies, nothing downloaded), not a copy of Swagger UI; section 2 gives the reasons and section 4.5 the design.
 
 Read first: [05-standard-library.md](05-standard-library.md) (HTTP, "Route annotations" and "How handler parameters are bound"), `crates/lang_sema/src/check/http.rs` (how routes are checked and how `mount` generates adapters), `stdlib/http.lang` (the `Server`), and the conventions in [11-release-polish-plan.md](11-release-polish-plan.md) (commit and push per milestone, the gates, the rules in section "Rules").
 
@@ -31,10 +31,10 @@ def main():
     server.listen(":8080")
 ```
 
-- `GET /docs` is the Swagger UI page.
+- `GET /docs` is the documentation page: the routes grouped by tag, each with its parameters, body, responses and schemas, and a "Try it out" form that sends a real request.
 - `GET /docs/openapi.json` (and `/docs/openapi.yaml`) is the document, as Fastify serves `/documentation/json` and `/documentation/yaml`.
 - The document is produced from the program's own types and annotations. Nothing is written twice: path and query parameters, the JSON body, the success status, the response type and the 400 that the compiler already generates come from the handler's signature.
-- The page works with no internet connection: Swagger UI is part of the runtime library, not loaded from a CDN. A program that never calls `docs` does not contain it.
+- The page works with no internet connection: it is part of the runtime library, loads nothing from elsewhere, and needs no inline script or style, so it works under a strict Content-Security-Policy. A program that never calls `docs` does not contain it.
 
 ## 2. Research
 
@@ -42,9 +42,11 @@ def main():
 
 **FastAPI.** Generates the document at `/openapi.json`, Swagger UI at `/docs` and ReDoc at `/redoc`, from type hints. The UI's JavaScript and CSS come from a CDN (jsDelivr) by default; self-hosting is a documented how-to. Each URL can be set to `None` to turn it off.
 
-**Swagger UI.** Distributed as `swagger-ui-dist` on npm (the built files without the npm dependency tree), Apache-2.0 licensed. Version 5 reads OpenAPI 3.1. The files needed are `swagger-ui-bundle.js`, `swagger-ui-standalone-preset.js` (only for the top bar; may be left out) and `swagger-ui.css`. The package is large unpacked (11 MB with source maps and extra variants); the three files are about 1.5 MB together, and about a third of that compressed. **Measure these before deciding anything that depends on them.** The page is started by a small script that calls `SwaggerUIBundle({url, dom_id, ...})`; serving that as its own file, as Fastify does (`swagger-initializer.js`), keeps the page free of inline script, so it works under a strict Content-Security-Policy.
+**Swagger UI, and why this plan does not use it.** It is distributed as `swagger-ui-dist` on npm (Apache-2.0); the built files that matter are `swagger-ui-bundle.js` and `swagger-ui.css`, about 1.5 MB together (not measured here: measure before quoting). Using it means downloading a third-party bundle, committing it with its licence notices, and carrying it in every program that calls `docs`. The owner chose to build a viewer instead: no download, no third-party code to track for security fixes, a few tens of kilobytes instead of megabytes, and a page that can be made to match the rest of the project. The cost is that this project writes and maintains a small front end; section 4.5 keeps its scope to what a backend developer uses (read the operations, try them), and section 7 lists what it will not do.
 
-**Decision: the spec is OpenAPI 3.1.0.** Swagger UI 5 renders it, JSON Schema 2020-12 is what 3.1 uses (a nullable value is `{"type": ["string", "null"]}`), and Swagger 2 is obsolete. Tools that only read 3.0 are a known cost; an option to emit 3.0.3 is not planned (see section 7).
+What the viewer must match, taken from what Swagger UI, FastAPI's page and Fastify's page give a user: operations grouped by tag, collapsible, with the method and path, summary and description; a parameters table (name, `in`, type, required, default); request body and response schemas shown as a tree, with an example generated from the schema; a "Try it out" form that fills in parameters and a JSON body and shows the status, headers, body and the equivalent `curl` command; a list of the schemas ("Models"); a filter box; and an "Authorize" box for bearer and API-key schemes.
+
+**Decision: the spec is OpenAPI 3.1.0.** It is what current tools read, JSON Schema 2020-12 is what 3.1 uses (a nullable value is `{"type": ["string", "null"]}`), and Swagger 2 is obsolete. Tools that only read 3.0 are a known cost; an option to emit 3.0.3 is not planned (see section 7).
 
 ## 3. What the compiler and library already have
 
@@ -57,7 +59,8 @@ Facts found by reading the code, which the design relies on:
 - **Annotation arguments are only `Name`, `Str` and `Int`** (`ast::AnnotationValue`). Lists (`tags=["todos"]`, `errors=[404]`) and booleans need adding; `True` and `False` currently arrive as `Name`.
 - Call-style routes (`server.get("/x", handler)`) are `def(Request) -> Result[Response]`: nothing is known about them except method and path (and `{name}` segments).
 - `Server` stores `routes: list[Route]` in `stdlib/http.lang`. The compiler embeds the standard library with `include_str!` (`lang_sema/src/stdlib.rs`); the runtime (`lang_rt`) is a static archive linked with `--gc-sections`, so an unreferenced static in it is dropped from a program's executable (this is how executables became small in D95).
-- `Response.body` is a `str`; `respond_raw(handle, status, content_type, headers, body)` writes it. Strings are length-delimited bytes, so a gzip body can travel in one, provided the runtime does not validate UTF-8 on this path (check).
+- `Response.body` is a `str`; `respond_raw(handle, status, content_type, headers, body)` writes it. The viewer's files are text, so they can be served as strings.
+- `node` (20 here, preinstalled on GitHub's runners) can run the viewer's logic tests with `node --test`, which needs no package. The built-in browser pane can open a page for a real check. `chromium` and `firefox` are installed here too.
 
 ## 4. Design
 
@@ -73,7 +76,7 @@ server.docs(
     tags: list[http.Tag] = [],      # descriptions for tags (name, description)
     security: dict[str, http.SecurityScheme] = {},   # milestone 5
     ui: bool = True,                # False: serve only the JSON and YAML
-    cdn: bool = False,              # True: the page loads Swagger UI from jsDelivr instead of the built-in copy
+    try_it_out: bool = True,        # False: the page is read-only, with no request form
     hide_ws: bool = True,
 )
 
@@ -82,9 +85,9 @@ server.openapi_json(title=..., version=..., ...) -> str    # the document as tex
 ```
 
 - `docs` registers ordinary routes on the server (so middleware, including authentication, applies to them; the page says so in its docs, as Fastify's `uiHooks` exist for the same reason):
-  - `GET path` -> the HTML page. `GET path/` serves the same page (no redirect needed, assets use absolute URLs built from `path`).
+  - `GET path` -> the HTML page. `GET path/` serves the same page (no redirect needed, the files are linked with absolute paths built from `path`).
   - `GET path/openapi.json`, `GET path/openapi.yaml`.
-  - `GET path/static/swagger-ui.css`, `.../swagger-ui-bundle.js`, `.../swagger-initializer.js` (generated: sets `url` to the document and Swagger UI options).
+  - `GET path/viewer.css`, `GET path/core.js` and `GET path/viewer.js`: the viewer's files (section 4.5). The page tells the script where the document is, and whether "Try it out" is on, with `<meta name="openapi-url">` and `<meta name="try-it-out">` tags (HTML-escaped), not an inline script.
 - The document is built **on the first request**, not when `docs` is called, so `docs` can come before or after `mount` and group routes; it is cached afterwards. (If routes are registered after the first request, they are missing from the cache: documented, and `docs` registers an invalidation through `Server.chain = None`'s existing path.)
 - The docs routes themselves are never listed in the document.
 
@@ -133,23 +136,38 @@ Component names are the type's name; a type from a module other than the root is
 
 - The compiler builds, per `mount`, a list of operation records and the schemas they reach, **as JSON text constants in the generated adapter source**, and registers them on the server with a private method (`__server.__document(method, __prefix + path, operation_json)`, `__server.__schemas(schemas_json)`). `Server` keeps them in two new private fields. Nothing is parsed at run time: the document is built by joining text and escaping the few user-supplied strings (title, description, servers) with the `json` module.
 - **A program that does not use `docs` pays nothing.** The compiler emits the documentation calls only when the program mentions `docs` or `openapi_json` as a method name anywhere (a token scan like `check/unused.rs`; it can only be too generous, never too strict). The benchmark servers do not, so their code, counts and executable sizes must not change: a gate (section 6).
-- The Swagger UI files live in `lang_rt` as `static` byte arrays, reached only through a new extern used by the `docs` code in `http.lang`; the linker drops them from programs that do not call `docs`.
+- The viewer's files live in `lang_rt` as `static` strings (`include_str!`), reached only through a new extern used by the `docs` code in `http.lang`; the linker drops them from programs that do not call `docs`.
 
-### 4.5 Serving the UI files
+### 4.5 The viewer
 
-- Stored **gzip-compressed** in the repository and the runtime (`include_bytes!`), served with `Content-Encoding: gzip`, `Content-Type`, `Cache-Control: public, max-age=31536000, immutable` and an `ETag` (the SHA-256 of the file), answering `If-None-Match` with `304`. A client that does not send `Accept-Encoding: gzip` gets `406`; every browser sends it, and an inflate implementation is not worth adding for it.
-- The body goes to the connection from static memory without copying: a new runtime function returns a `str` that points at the static bytes (Boehm ignores pointers outside its heap).
-- `cdn=True` skips all of this: the page points at `https://cdn.jsdelivr.net/npm/swagger-ui-dist@<pinned version>/...`, for programs that want a smaller executable and have internet.
+**Files.** Source in `crates/lang_rt/assets/viewer/`: `index.html` (a template with a few `{{title}}`-style placeholders that `docs` fills in with HTML-escaped values), `viewer.css`, `core.js` (logic with no DOM: testable under `node`) and `viewer.js` (the DOM code). Plain ES2020 JavaScript, no framework, no build step, no minifier, no external request. Target: under 60 KB in total, unminified.
+
+**`core.js`** (also loadable by `node` with `module.exports`; every function below is tested without a browser):
+- `resolve(doc, ref)`: follows `#/components/...` references, with a guard against cycles;
+- `example(doc, schema)`: an example value from a schema (`default` if present, else by type: `0`, `0.0`, `""`, `false`, `[]` with one item, objects with their `required` properties first, `oneOf` takes the first branch, a recursive type stops after a depth limit);
+- `typeLabel(doc, schema)`: `integer`, `string?`, `array<Todo>`, `object`, for the tables;
+- `operations(doc)`: the flat list of operations grouped by tag, in the document's order, with parameters merged from path level and operation level;
+- `buildRequest(doc, op, values, baseUrl)`: the URL (path parameters substituted and percent-encoded, query parameters encoded, optional ones left out when empty), the headers and the body, ready for `fetch`;
+- `curl(request)`: the same request as a shell command, with single quotes escaped;
+- `markdown(text)`: a tiny safe subset for descriptions (paragraphs, `code`, fenced blocks, `**bold**`, links with `http`, `https` or relative targets only), producing HTML by escaping everything first.
+
+**`viewer.js`** builds the page from the document with DOM calls, never `innerHTML` with unescaped data (`markdown` is the single place that produces HTML, from escaped text). Features: header with title, version and description; a tag-grouped list of collapsible operations, with a coloured method badge; a filter box (matches method, path, summary, tag); for each operation the parameters table, the request body schema, the responses with their schemas, a deprecated marker; "Try it out" (inputs for each parameter, a JSON text area for the body prefilled from `example`, a Send button that uses `fetch` against the document's first `servers` entry or the page's own origin, and shows status, duration, response headers, the pretty-printed body, and the `curl` command with a copy button); a "Models" section; an "Authorize" box for the `bearer`, `apiKey` and `basic` schemes of milestone 5 (the value is kept in memory only, never in storage); the URL fragment opens the operation it names, so a link to one operation works. Light and dark follow `prefers-color-scheme`; the layout works at phone width; controls are real buttons and labelled inputs so the keyboard and screen readers work.
+
+**Serving.** Each file is a route with `Content-Type` (with `charset=utf-8`), `ETag` (a hash of the content computed once) and `Cache-Control: no-cache` (revalidate, so an upgraded server is never stuck with an old page), and `If-None-Match` answered with `304`. The page also sets `Content-Security-Policy: default-src 'self'; connect-src *; img-src 'self' data:` (the browser has to reach the API at whatever `servers` says), `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`. The files go out as plain strings; with files this small, compression is not worth a dependency.
 
 ### 4.6 Out of scope
 
-`group.docs` (the document describes one server); routes added after the first request; request/response examples (`example=`) beyond defaults; callbacks, webhooks, links; ReDoc or Scalar as extra UIs (the document is standard, so a user can serve one themselves with `openapi_json` and `http.html`); a `weby openapi` command that writes the file without running the program (it needs the route table at compile time, which `mount` has but the CLI does not collect; a possible follow-up).
+`group.docs` (the document describes one server); routes added after the first request; request/response examples (`example=`) beyond defaults; callbacks, webhooks, links; OAuth2 and OpenID Connect flows in the viewer (a bearer token pasted into "Authorize" works), file uploads and `multipart/form-data` or XML bodies in "Try it out" (they are shown, not sendable), XML and YAML response rendering beyond text; ReDoc or Scalar as extra UIs (the document is standard, so a user can serve one themselves with `openapi_json` and `http.html`); a `weby openapi` command that writes the file without running the program (it needs the route table at compile time, which `mount` has but the CLI does not collect; a possible follow-up).
 
-## 5. Owner decisions and approvals needed before building
+## 5. Owner decisions
 
-1. **Downloading Swagger UI.** The built files come from the npm package `swagger-ui-dist` (registry.npmjs.org). Downloading is not done without the owner's approval: ask, naming the package, the exact version, and the files. Record the SHA-256 of the tarball and of each file in `crates/lang_rt/assets/README.md`, with the upstream `LICENSE` and `NOTICE` (Apache-2.0 requires them to travel with the files), and the version and checksums in a decision-log entry. Without the approval, build milestones 1 to 3 and the `cdn=True` mode; milestone 4 then ships the page without the built-in copy.
-2. **Adding about 0.5 MB (compressed) to the repository and to programs that use `docs`.** Measure after vendoring; if the owner finds it too much, `cdn=True` can become the default.
-3. **The default path** (`/docs` as FastAPI, or `/documentation` as Fastify). This plan uses `/docs`.
+Settled: **the viewer is written in this repository, and nothing is downloaded** (the owner's decision, replacing the earlier plan to vendor Swagger UI). That means no licence notices to carry, no checksums to record, and no approval step in the milestones.
+
+Still open, with the plan's choice:
+
+1. **The default path:** `/docs` (FastAPI's) or `/documentation` (Fastify's). This plan uses `/docs`.
+2. **The name in the page and the docs.** The page is called "API documentation"; the plan avoids calling it Swagger UI, since it is not. Say "Swagger-style" at most.
+3. **A next version number** for this feature (1.1.0 would fit); not changed without asking.
 
 ## 6. Milestones
 
@@ -175,34 +193,37 @@ Each milestone ends with its tests, the gates below, a "Done" note in this file,
 ### Milestone 3: `docs`, `openapi_json`, the document (about 1.5 days)
 
 - `Server.docs(...)` and `Server.openapi_json(...)` in `http.lang`: build the document from the stored fragments (section 4.1), cached; JSON as above; YAML from a small emitter in the library working on the same text (quote strings; the document only has objects, arrays, strings, numbers, booleans and null). Call-style routes are included with their path parameters.
-- The `docs` routes: `openapi.json`, `openapi.yaml`, and the HTML page, which for now loads Swagger UI from the CDN (`cdn=True` behaviour) so the milestone can ship and be checked without the vendored files.
-- HTML is escaped; `title`, `description` and `servers` are JSON-escaped in the document.
+- The `docs` routes: `openapi.json` and `openapi.yaml`. The page and its files are milestone 4, so until then `docs` serves the document only.
+- `title`, `description` and `servers` are JSON-escaped in the document.
 - Tests: `crates/lang_cli/tests/http.rs` gains a case that starts the todo service with `docs`, fetches `/docs/openapi.json`, parses it, and checks the paths, parameters, schemas and statuses against the service's real behaviour (e.g. the declared 404 really occurs, the declared 400 really occurs); `/docs/openapi.yaml` parses to the same content (compare through a small YAML subset reader in the test, or by round trip with Python if available in the test environment: the tests may not require Python). A `tests/run/` program using `openapi_json` with an in-process `http.test_request`.
 
-### Milestone 4: the built-in Swagger UI (about 1.5 days; needs the approval in section 5)
+### Milestone 4: the viewer (about 4 days)
 
-- After the owner's approval: fetch the pinned `swagger-ui-dist` tarball, verify its published integrity hash, extract `swagger-ui.css`, `swagger-ui-bundle.js`, `LICENSE`, `NOTICE`, gzip the two files at the highest level, and commit them under `crates/lang_rt/assets/` with the README of section 5. Source maps are not included.
-- `lang_rt`: statics with `include_bytes!`, a function returning each asset as a `str`-shaped pointer and length, its ETag, and its content type. The `docs` code serves them (section 4.5), plus the generated `swagger-initializer.js`.
-- Tests: an HTTP test fetches each asset with and without `Accept-Encoding: gzip` and `If-None-Match`; `crates/lang_cli/tests/executables.rs` gains two size checks: a program that does not call `docs` is not larger than before (compare the hello and benchmark-server sizes with the recorded ones in `bench/README.md`), and one that does is smaller than a stated bound. **Verify in a browser, not only by tests:** with the built-in browser, start the todo service with `docs`, open `/docs`, expand an operation, press "Try it out" on `GET /todos/{id}`, and take a screenshot; check that the browser's console reports no errors and no request leaves localhost (the network log).
-- Measure and write down: the executable's growth, the startup effect (none expected), the page's load time.
+1. **`core.js` first, with its tests.** `crates/lang_rt/assets/viewer/core.js` and `crates/lang_rt/assets/viewer/core.test.js` (`node --test`, no packages). Cover every function in section 4.5 with the cases that go wrong: `$ref` cycles, a recursive schema, `oneOf`, nullable types (`["string","null"]`), path parameters with characters that need encoding, an empty optional query parameter, a body of each kind, `curl` quoting of a value with a single quote, and `markdown` given hostile input (`<script>`, `javascript:` links, unbalanced backticks). Add a Rust test in `crates/lang_cli/tests/` that runs `node --test` on the directory when `node` is on the PATH and prints a skip notice when it is not (CI has it).
+2. **`viewer.js`, `viewer.css`, `index.html`.** Build the page from section 4.5, feature by feature, checking each in the built-in browser against the real todo service: the filter, the expand and collapse, a generated example, a successful "Try it out" call, the 400 and 404 cases (shown with their JSON bodies), the models list, the dark scheme (the browser pane can emulate it), and a phone-width layout.
+3. **Serving.** `lang_rt` exposes the files as strings with their hashes; `docs` registers the routes of section 4.1 and the headers of section 4.5.
+4. **Tests.** HTTP tests: each file is served with the right type and headers, `If-None-Match` gives `304`, the page escapes a title containing `<script>` and `"`, and the response carries the CSP. `crates/lang_cli/tests/executables.rs` gains two size checks: a program that does not call `docs` is not larger than before (compare hello and the benchmark server with the sizes in `bench/README.md`), and one that does is larger by less than 100 KB.
+5. **A browser check that is kept.** Write `tests/http/docs_page_check.md` as a short manual script (the steps above and what to see) and run it once for real before the commit, with screenshots in the notes in this file. If a headless Chromium can be driven offline with what is installed, add it to the Rust tests behind an environment variable; it is not required, and CI does not run it.
+6. Measure and write down: the viewer's size, the executable's growth, and that a request to the docs routes allocates and costs what a request to a small static route does.
 
 ### Milestone 5: polish and close-out (about 1 day)
 
-- `security`: `http.SecurityScheme` (bearer, API key in a header or cookie, basic) listed in `components.securitySchemes`, and `security=["name"]` on an annotation to mark an operation (Swagger UI's "Authorize" button works from this). `persist_authorization` and other Swagger UI options are passed through a `ui_options: dict[str, str]` of raw JSON values.
+- `security`: `http.SecurityScheme` (bearer, API key in a header or cookie, basic) listed in `components.securitySchemes`, and `security=["name"]` on an annotation to mark an operation (the viewer's "Authorize" box uses this: it adds the token or key to every "Try it out" request).
 - `tags=[http.Tag(...)]` descriptions and ordering.
-- Documentation: a new "OpenAPI and Swagger UI" subsection in docs/05 and in `examples.md` (the program in section 1, compiled by the guide test), the API table, the error code, `docs/release-notes.md` ("What changed" and limitations), `docs/06-roadmap.md`, README feature list, `editors/` snippets if they list annotation names, and the D entries.
-- Run the whole gate list, including the benchmark checks, and the browser check again. Update this file with what was built and what was left out.
+- Documentation: a new "OpenAPI and the documentation page" subsection in docs/05 and in `examples.md` (the program in section 1, compiled by the guide test), the API table, the error code, `docs/release-notes.md` ("What changed" and limitations), `docs/06-roadmap.md`, README feature list, `editors/` snippets if they list annotation names, and the D entries.
+- Run the whole gate list, including the benchmark checks, and the browser script of milestone 4 again. Update this file with what was built and what was left out.
 - Leave to the owner: whether the next version number is 1.1.0 (this is a new feature; do not change the version without asking).
 
 ## 7. Risks and open questions
 
-- **Size.** Swagger UI is the largest single item the project would carry. Mitigated by gzip, by dropping unreferenced statics at link time, and by `cdn=True`. If the owner declines to vendor it, the feature is still useful: the JSON and YAML endpoints and the CDN page.
+- **A front end to maintain.** The viewer is code with its own bugs and browser differences. Mitigations: no dependencies, plain DOM calls, the logic split out and tested under `node`, and a deliberately short list of features (section 4.6). Where it falls short the document is standard, so users can point Swagger UI, Redoc or Scalar at `/docs/openapi.json` themselves.
+- **Not Swagger UI.** People who know Swagger UI will find the page familiar but not identical; some features (OAuth2 flows, uploads) are missing. Say so in the documentation.
+- **Cross-site scripting.** The document contains text from the program's authors (docstrings, titles) and from nowhere else, but the viewer still treats all of it as untrusted: everything is escaped, `markdown` allows no raw HTML and only safe link schemes, the CSP forbids inline script, and the tests include hostile input. "Try it out" sends requests with the viewer's page origin, so on a shared origin it could be used to call the API as the logged-in user; the page is as sensitive as the API (documented, with the advice to protect `/docs` with the server's middleware in production, or turn it off).
 - **The spec follows the encoder.** If the JSON encoding of a type changes later, the schema must change with it; the milestone 2 test that validates encoded samples against the generated schema is what keeps them together. Keep it in the standard test run.
 - **Errors from `Result` handlers are not typed.** `Result[T]` carries any `Error`, so which statuses a handler can return is unknown to the compiler; `errors=[...]` is the user's statement, and nothing checks it. (A later improvement could scan for `http.Error(404, ...)` literals, which is fragile; not planned.)
 - **Call-style routes** are documented thinly. The cost of richer metadata is an extra argument on every registration method; deferred until there is demand. Annotated routes are the recommended style and are fully described.
 - **OpenAPI 3.0.** Some code generators and gateways read only 3.0. A converter (nullable types, `prefixItems`) is a contained follow-up; not part of this plan.
-- **`Accept-Encoding: gzip` is required for the built-in assets.** A proxy that strips it would break the page; unlikely, documented in the troubleshooting section.
-- **Docs behind authentication.** The docs routes pass through the server's middleware, so an authentication middleware blocks the page along with the API; the browser cannot send a bearer token for the page itself. Document the pattern (let the middleware skip the docs path) in the example.
+- **Docs behind authentication.** The docs routes pass through the server's middleware, so an authentication middleware blocks the page along with the API; the browser cannot send a bearer token for the page itself. Document the pattern (let the middleware skip the docs path, or require its own check on it) in the example.
 - **The checker's pre-scan for `docs`** must also cover programs that call it through a module alias or a wrapper function: it looks for the identifier `docs`/`openapi_json` after a `.` anywhere, so it is conservative; a user-defined method also called `docs` only costs a little extra metadata.
 
 ## 8. Appendix: what the document looks like
@@ -257,4 +278,4 @@ For the todo service of docs/05 (`App` with `list`, `create`, `get`, `remove`) m
 
 (Whether repeated responses use `components.responses` and `$ref`, as sketched for `400` in `create`, or are written out each time is the implementer's choice; the content is what matters.)
 
-Sources for the research: the `@fastify/swagger` and `@fastify/swagger-ui` READMEs and migration guide on npm and unpkg; FastAPI's "Custom Docs UI Static Assets" how-to; the `swagger-ui-dist` package page on npm (Apache-2.0, "the entire dist folder" as a dependency-free module).
+Sources for the research: the `@fastify/swagger` and `@fastify/swagger-ui` READMEs and migration guide on npm and unpkg; FastAPI's "Custom Docs UI Static Assets" how-to; the `swagger-ui-dist` package page on npm (the feature list the viewer is measured against).
