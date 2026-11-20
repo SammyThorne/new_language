@@ -19,6 +19,7 @@
 
 mod builtins;
 mod closures;
+mod completion;
 mod concurrency;
 mod consts;
 mod expr;
@@ -29,12 +30,15 @@ mod json;
 mod modules;
 mod patterns;
 mod stmt;
+mod unused;
 
 use crate::hir::{self, FuncId, LocalId};
 use crate::types::{EnumId, StructId, TraitId, Ty, TyKind, Types};
 use lang_diag::{Diagnostic, Diagnostics, FileId, SourceMap, Span, codes};
 use lang_syntax::ast;
 use std::collections::HashMap;
+
+pub use completion::{Completions, Member, MemberKind};
 
 /// The prelude's source, compiled with every program.
 pub const PRELUDE: &str = include_str!("../prelude.lang");
@@ -167,8 +171,13 @@ pub fn check_program(
 
 /// Check a program for the language server: report diagnostics, and return the types and
 /// definitions of what the code refers to (even when there are errors).
-pub fn analyze(inputs: &[ModuleInput], sources: &mut SourceMap, diags: &mut Diagnostics) -> Vec<IndexEntry> {
-    run(inputs, sources, diags, "main", true).1
+pub fn analyze(
+    inputs: &[ModuleInput],
+    sources: &mut SourceMap,
+    diags: &mut Diagnostics,
+) -> (Vec<IndexEntry>, completion::Completions) {
+    let (_, index, completions) = run(inputs, sources, diags, "main", true);
+    (index, completions.unwrap_or_default())
 }
 
 fn run(
@@ -177,7 +186,7 @@ fn run(
     diags: &mut Diagnostics,
     entry: &str,
     indexed: bool,
-) -> (Option<hir::Program>, Vec<IndexEntry>) {
+) -> (Option<hir::Program>, Vec<IndexEntry>, Option<completion::Completions>) {
     let prelude_file = sources.add(PRELUDE_NAME, PRELUDE);
     let mut prelude_diags = Diagnostics::default();
     let tokens = lang_syntax::lex(prelude_file, PRELUDE, &mut prelude_diags);
@@ -233,6 +242,7 @@ fn run(
     let functions: Vec<hir::Function> = functions.into_iter().map(|f| f.expect("every function was checked")).collect();
     checker.check_trait_defaults();
     checker.check_pending_hashable();
+    checker.warn_unused_imports(inputs);
     if checker.diags.error_count() == errors_before
         && let Some(diagnostic) = checker.diags.suppressed.take()
     {
@@ -243,12 +253,13 @@ fn run(
         ));
     }
     let index = checker.index.take().unwrap_or_default();
+    let completions = indexed.then(|| checker.completions());
     if checker.diags.error_count() > errors_before {
-        return (None, index);
+        return (None, index, completions);
     }
     match entry {
-        Some(entry) => (Some(checker.into_program(&module_name, functions, entry)), index),
-        None => (None, index),
+        Some(entry) => (Some(checker.into_program(&module_name, functions, entry)), index, completions),
+        None => (None, index, completions),
     }
 }
 

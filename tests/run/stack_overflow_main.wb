@@ -1,0 +1,15 @@
+# A function that calls itself without end ends the program with a message and the status of a
+# panic, not a bare segmentation fault (docs/11, milestone 5). What was printed before still
+# comes out.
+# expect: before
+# expect-exit: 101
+# expect-stderr: panic: stack overflow
+# expect-stderr: calls itself without end
+def deep(n: int, items: list[int]) -> int:
+    items.append(n)
+    return deep(n + 1, items) + len(items)
+
+def main():
+    print("before")
+    items: list[int] = []
+    print(deep(0, items))

@@ -1,0 +1,32 @@
+warning[W0004]: `json` is imported but never used
+ --> tests/ui/unused_imports.wb:2:8
+  |
+2 | import json
+  |        ^^^^ imported here
+  |
+  = help: remove the import, or use it
+
+warning[W0004]: `re` is imported but never used
+ --> tests/ui/unused_imports.wb:3:8
+  |
+3 | import re
+  |        ^^ imported here
+  |
+  = help: remove the import, or use it
+
+warning[W0004]: `system` is imported but never used
+ --> tests/ui/unused_imports.wb:4:14
+  |
+4 | import os as system
+  |              ^^^^^^ imported here
+  |
+  = help: remove the import, or use it
+
+warning[W0004]: `read_file` is imported but never used
+ --> tests/ui/unused_imports.wb:7:16
+  |
+7 | from io import read_file, write_file
+  |                ^^^^^^^^^ imported here
+  |
+  = help: remove the import, or use it
+

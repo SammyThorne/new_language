@@ -9,6 +9,7 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 The prototype is complete and milestones 0 to 11 are done. Milestone 12 (performance and ecosystem) is ongoing by design. So far it has added:
 
 - TLS, an HTTP client, a PostgreSQL driver and regular expressions;
+- the [release polish plan](docs/11-release-polish-plan.md), which closed the gaps a Python programmer meets in the first hour (one-line blocks, raw strings, sets, methods of built-in types, generic methods, a message for stack overflow, completion in the language server); see the [release notes](docs/release-notes.md);
 - the [performance plan](docs/09-performance-plan.md) and the [final optimisation plan](docs/10-final-optimization-plan.md), after which every benchmark and every HTTP endpoint measured runs ahead of Go: HTTP endpoints at 1.8 to 3.1 times Go's rate, at 35% to 40% of its CPU per request (see [Web performance](docs/web-performance.md)).
 
 The WebSocket server passes the Autobahn conformance suite, and the JSON parser passes JSONTestSuite. See the [roadmap](docs/06-roadmap.md#progress).
@@ -294,7 +295,9 @@ The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real socke
 | [docs/web-performance.md](docs/web-performance.md) | What a web service can do: throughput, latency, CPU per request, memory |
 | [docs/optimization-handoff.md](docs/optimization-handoff.md) | State of the performance work and open leads, for planning the next round |
 | [docs/10-final-optimization-plan.md](docs/10-final-optimization-plan.md) | The final optimisation pass: evidence, five milestones, what is left out and why |
-| [docs/11-release-polish-plan.md](docs/11-release-polish-plan.md) | The language and compiler work before release: gaps found by probing, five milestones (milestones 1 to 4 done) |
+| [docs/release-notes.md](docs/release-notes.md) | What the first release has, what it does not, and how to install it |
+| [docs/errors.md](docs/errors.md) | Every error and warning code: what it means, a real example, and what to do (`weby explain E0300` prints one) |
+| [docs/11-release-polish-plan.md](docs/11-release-polish-plan.md) | The language and compiler work before release: gaps found by probing, five milestones, all done; what each did and left out is in the decision log (D91 to D95) |
 | [editors/README.md](editors/README.md) | Editor support and the language server |
 
 The name "Weby" and the `.wb` extension may still change. The name is kept out of crate names and runtime symbols and lives in one small crate of constants, so it can be changed later with a short checklist ([docs/03-compiler-architecture.md](docs/03-compiler-architecture.md#renaming-the-language)).

@@ -11,7 +11,7 @@ A rough guide to what a Weby web service can do, measured against the same servi
 | On a 3-core (6-thread) slice of a laptop? | About 960,000 small requests per second (the load generator's limit on this machine, not the server's), or 530,000 of the 20-record list |
 | Added latency at 256 concurrent connections | Median 0.2 ms, 99th percentile 0.9 ms for small responses; 0.4 / 1.1 ms for the 20-record list. Go's 99th percentile is 2 to 5 times higher |
 | Memory | 3.5 MB idle; 20 to 28 MB under full load; about 19 KiB per open, idle WebSocket |
-| Start-up | 3 ms to the first response; one 5.2 MB executable that needs only `libgc` |
+| Start-up | 3 ms to the first response; one 1.3 MB executable that needs only `libgc` |
 
 **What this means for a real service:** the framework is unlikely to be the bottleneck. At 2 to 4 µs of server CPU per request, a typical handler that waits 1 to 5 ms on a database spends well under 1% of its time in Weby's HTTP layer. Throughput is then decided by the database, the network and the handler's own work. Where the handler's work is CPU-bound (building and encoding JSON, string processing), Weby runs it 1.1 to 3.4 times as fast as Go (see "The language itself" below).
 
@@ -96,7 +96,7 @@ Six logical CPUs gave about three times the one-CPU rate, not six. Those six are
 |---|---|---|---|
 | Idle server | 3.5 MB | 11.0 MB | 17.9 MB |
 | Peak under load (256 connections) | 20 to 28 MB | 23 to 25 MB | 23 to 30 MB |
-| Executable | 5.2 MB, needs only `libgc` at run time | 9.8 MB, static | the interpreter |
+| Executable | 1.3 MB, needs only `libgc` at run time | 9.8 MB, static | the interpreter |
 | Start-up to first response | 3 ms | 4 ms | 33 ms |
 
 - **Under load.** Weby's peak is set mostly by the collector: it allocates at least 4 MiB between collections (`WEBY_GC_MIN_ALLOC`, the same minimum as Go's heap), so a busy server sits a few MB above its live data. Setting the variable lower trades memory for collection time.

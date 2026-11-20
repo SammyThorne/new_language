@@ -148,7 +148,7 @@ What changed, against phase 5:
 - **`POST /orders`** went from 2.12x to 3.11x Go at 256 connections.
 - **The small endpoints** cost 1.9 to 2.3 µs on one CPU instead of 2.6 to 3.2: one `recv` and two coarse clock reads per request, and no allocation in parsing (D88). At 256 connections on six CPUs their rates barely moved, because the load generator and the kernel on the other six CPUs set them; the server has idle CPU (D88).
 - `/plaintext` measured below `/json` on one CPU in this run, which interleaved A/B runs do not show (both about 520,000): take it as this run's variation.
-- Startup 3 ms, idle memory 3.5 MB, executable 5.2 MB (7.6 MB before LTO).
+- Startup 3 ms, idle memory 3.5 MB, executable 1.3 MB (7.6 MB before LTO, 5.2 MB before the runtime's debug information was left out, D95).
 - Idle WebSockets: 18.9 KiB each with 50,000 open, up from 15.5 KiB. LTO puts one more stack page under each parked connection (D88).
 
 Per request (`http/counts.py`; the same with a dozen browser headers): 1 `recv` (none failing), 1 `send`, 2 coarse clock reads, at most 1.5 Rust heap allocations, and on `/items` 22 collector calls and 5.3 KB allocated.

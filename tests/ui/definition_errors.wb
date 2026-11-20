@@ -1,0 +1,16 @@
+# Mistakes in what a file declares: a name defined twice, a `main` with the wrong signature, a
+# variable declared again with a hint, and `None` as the type of a variable or parameter.
+def helper() -> int:
+    return 1
+
+def helper() -> int:
+    return 2
+
+def takes_none(x: None):
+    pass
+
+def main(args: list[str]) -> int:
+    count: int = 1
+    count: int = 2
+    nothing = None
+    return count

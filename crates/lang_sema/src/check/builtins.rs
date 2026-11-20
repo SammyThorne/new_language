@@ -31,6 +31,28 @@ const DICT_METHODS: &[&str] = &["get", "get_or", "pop", "keys", "values", "items
 const SET_METHODS: &[&str] = &["add", "discard", "clear"];
 const OPTION_METHODS: &[&str] = &["unwrap", "unwrap_or", "is_some", "is_none"];
 
+/// The methods the compiler itself has for each built-in type, by the type's prelude prefix
+/// (the language server lists these, and the prelude's, after a `.`).
+pub(super) fn builtin_method_names() -> Vec<(&'static str, &'static [&'static str])> {
+    vec![
+        ("str", STR_METHODS),
+        ("list", LIST_METHODS),
+        ("dict", DICT_METHODS),
+        ("set", SET_METHODS),
+        ("option", OPTION_METHODS),
+        ("result", RESULT_METHODS),
+        ("tuple", &["index", "copy"]),
+        ("frozendict", &["get", "get_or", "keys", "values", "items"]),
+        ("task", &["join", "join_timeout"]),
+        ("channel", &["send", "recv", "close"]),
+        ("mutex", &["lock"]),
+        ("atomic", &["get", "set", "add", "increment", "decrement", "compare_and_set"]),
+        ("int", &[]),
+        ("float", &[]),
+        ("bool", &[]),
+    ]
+}
+
 /// The prefix of the prelude functions that are methods of a built-in type: `__str_count` is
 /// `count` of a `str`.
 fn prelude_prefix(kind: &TyKind) -> Option<&'static str> {

@@ -543,6 +543,10 @@ Panic backtraces must still name the program's functions and lines (there is a t
    - **Continuous integration.** Whether to add a GitHub Actions workflow now that the repository has a remote. The roadmap's M0 asked for it, and docs/06 records it as not set up because there was no remote. A workflow runs on GitHub and installs LLVM 19 and Boehm there, so it is outward-facing. Write the file only if the owner agrees.
 6. **Final checks.** Run the performance checks, then commit and push.
 
+### Done
+
+Carried out on 2026-11-20 as D95 in [08](08-decisions-and-risks.md). 5.1, 5.3, 5.4 (the unused import warning), 5.5 (with `weby explain`), 5.6 and 5.7 are done. 5.2 (preemption) was built as a prototype, measured at 25% on `sieve` against a limit of 2%, and dropped; the second warning of 5.4 (unused private functions) was not attempted, because the route adapters call user functions from generated source. The executable size item went further than hoped, 4.4 MB to 0.5 MB, because the program's own debug information is 5 KB and the rest comes from the runtime archive. The two decisions for the owner, the version number and continuous integration, are not taken: see 5.7.
+
 ### Exit criteria
 
 - Stack overflow gives a message and status 101.

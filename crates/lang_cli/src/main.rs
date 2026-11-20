@@ -94,6 +94,11 @@ enum Cmd {
         #[arg(long)]
         update: bool,
     },
+    /// Explain an error or warning code, such as `E0300`
+    Explain {
+        /// The code, as it appears in the message's first line
+        code: String,
+    },
     /// Run the language server, speaking the Language Server Protocol on standard input and output
     Lsp,
     /// Rewrite source files in the standard layout
@@ -130,6 +135,7 @@ fn main() -> ExitCode {
         Cmd::Run { file, release, args } => run(&file, opt_level(release), &args),
         Cmd::Check { file } => frontend(&file, None).map(|_| ExitCode::SUCCESS),
         Cmd::Fmt { paths, check } => format_files(&paths, check),
+        Cmd::Explain { code } => explain(&code),
         Cmd::Fetch { file, update } => {
             let file = file.unwrap_or_else(|| PathBuf::from(".").join("main"));
             match manifest::dependencies_for(&file, true, update) {
@@ -169,6 +175,27 @@ fn with_default_command(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsSt
         args.insert(1, "build".into());
     }
     args
+}
+
+/// The error reference, `docs/errors.md`, which is part of the program.
+const ERROR_REFERENCE: &str = include_str!("../../../docs/errors.md");
+
+/// `explain E0300`: print that code's section of the error reference.
+fn explain(code: &str) -> Result<ExitCode, Failure> {
+    let wanted = code.trim().to_ascii_uppercase();
+    let heading = format!("### {wanted}:");
+    let Some(start) = ERROR_REFERENCE.find(&heading) else {
+        eprintln!("error: there is no error or warning with the code `{code}`");
+        eprintln!("codes look like E0300 and W0001; the whole list is in docs/errors.md");
+        return Err(Failure(EXIT_COMPILE_ERROR));
+    };
+    let section = &ERROR_REFERENCE[start..];
+    let end = section[heading.len()..].find("\n### ").map_or(section.len(), |i| i + heading.len());
+    let section = section[..end].trim_end();
+    // Without the `###`, and without the fence markers around the example.
+    let text = section.strip_prefix("### ").unwrap_or(section);
+    println!("{}", text.replace("```text\n", "").replace("\n```", ""));
+    Ok(ExitCode::SUCCESS)
 }
 
 fn opt_level(release: bool) -> OptLevel {
@@ -510,6 +537,7 @@ fn write_file(path: &Path, contents: &str) -> Result<(), Failure> {
 fn link_executable(program: &hir::Program, sources: &SourceMap, opt: OptLevel, output: &Path) -> Result<(), Failure> {
     let runtime = find_runtime()?;
     let temp = TempDir::new()?;
+    let runtime = without_runtime_debug_info(runtime, &temp);
     let object = temp.path().join(format!("{}.o", program.module));
     lang_codegen::emit_object(program, sources, opt, &object).map_err(internal_error)?;
 
@@ -532,6 +560,27 @@ fn link_executable(program: &hir::Program, sources: &SourceMap, opt: OptLevel, o
         return Err(Failure(EXIT_COMPILE_ERROR));
     }
     Ok(())
+}
+
+/// The runtime library without its debug information. The standard library and the other crates
+/// in it carry nearly 4 MB of DWARF that a program never uses: a panic's backtrace shows the
+/// program's own functions and lines, and those come from the program's own object, which is
+/// not touched. Falls back to the runtime as it is if `objcopy` is not there, and when
+/// `<PREFIX>RUNTIME_DEBUG` is set, for debugging the runtime itself.
+fn without_runtime_debug_info(runtime: PathBuf, temp: &TempDir) -> PathBuf {
+    if env::var_os(env_var("RUNTIME_DEBUG")).is_some() {
+        return runtime;
+    }
+    let stripped = temp.path().join(RUNTIME_LIBRARY);
+    let tool = env::var("OBJCOPY").unwrap_or_else(|_| "objcopy".to_string());
+    let done = Command::new(tool)
+        .arg("--strip-debug")
+        .arg(&runtime)
+        .arg(&stripped)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if done { stripped } else { runtime }
 }
 
 /// The runtime library sits next to the compiler executable, or wherever `<PREFIX>RUNTIME` says.

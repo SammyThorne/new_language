@@ -3,7 +3,9 @@
 //! It speaks the Language Server Protocol's JSON-RPC with full-document sync and offers:
 //! diagnostics as you type (the compiler's own, with their help text), hover (the type of the
 //! expression under the cursor), go to definition (variables, functions, methods, fields and
-//! types), and formatting (the `fmt` command's layout).
+//! types), completion (after a `.`, the fields and methods of the value's type or a module's
+//! names; elsewhere the names in scope and the keywords), and formatting (the `fmt` command's
+//! layout).
 //!
 //! Each change re-checks the whole program the document belongs to; imported modules are read
 //! from disk. That is simple, and fast enough for the programs the language has so far.
@@ -307,6 +309,7 @@ struct Analysis {
     sources: SourceMap,
     diagnostics: Diagnostics,
     index: Vec<lang_sema::IndexEntry>,
+    completions: lang_sema::Completions,
 }
 
 const MAIN_FILE: FileId = FileId(0);
@@ -321,8 +324,8 @@ fn analyze(path: &Path, text: &str) -> Analysis {
     let root = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let dependencies = crate::manifest::dependencies_for(path, false, false).unwrap_or_default();
     let modules = loader::load(&root, &dependencies, name, module, &mut sources, &mut diagnostics);
-    let index = if diagnostics.has_errors() {
-        Vec::new()
+    let (index, completions) = if diagnostics.has_errors() {
+        (Vec::new(), lang_sema::Completions::default())
     } else {
         let inputs: Vec<lang_sema::ModuleInput> = modules
             .iter()
@@ -330,7 +333,7 @@ fn analyze(path: &Path, text: &str) -> Analysis {
             .collect();
         lang_sema::analyze(&inputs, &mut sources, &mut diagnostics)
     };
-    Analysis { sources, diagnostics, index }
+    Analysis { sources, diagnostics, index, completions }
 }
 
 impl Analysis {
@@ -404,6 +407,184 @@ impl Analysis {
     }
 }
 
+// ---- completion -----------------------------------------------------------------------
+
+const KEYWORDS: &[&str] = &[
+    "and", "as", "assert", "break", "case", "const", "continue", "def", "del", "elif", "else", "enum", "False", "for",
+    "from", "if", "impl", "import", "in", "is", "lambda", "match", "None", "not", "or", "pass", "priv", "pub",
+    "return", "self", "spawn", "struct", "trait", "True", "while", "with",
+];
+
+/// The language server's numbers for the kinds of completion items.
+fn item_kind(kind: lang_sema::MemberKind) -> f64 {
+    match kind {
+        lang_sema::MemberKind::Method => 2.0,
+        lang_sema::MemberKind::Function => 3.0,
+        lang_sema::MemberKind::Field => 5.0,
+        lang_sema::MemberKind::Type => 7.0,
+        lang_sema::MemberKind::Module => 9.0,
+        lang_sema::MemberKind::Constant => 21.0,
+    }
+}
+
+fn item(name: &str, kind: f64, detail: &str) -> Json {
+    let mut fields = vec![("label", Json::Str(name.to_string())), ("kind", Json::Num(kind))];
+    if !detail.is_empty() {
+        fields.push(("detail", Json::Str(detail.to_string())));
+    }
+    obj(fields)
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80
+}
+
+/// Which built-in type's methods a type shown as `shown` has.
+fn builtin_prefix(shown: &str) -> Option<&'static str> {
+    Some(match shown {
+        "str" => "str",
+        "int" => "int",
+        "float" => "float",
+        "bool" => "bool",
+        "Atomic" => "atomic",
+        s if s.ends_with('?') => "option",
+        s if s.starts_with("list[") => "list",
+        s if s.starts_with("set[") => "set",
+        s if s.starts_with("dict[") => "dict",
+        s if s.starts_with("tuple[") && s.ends_with(", ...]") => "tuple",
+        s if s.starts_with("frozendict[") => "frozendict",
+        s if s.starts_with("Result[") => "result",
+        s if s.starts_with("Task[") => "task",
+        s if s.starts_with("Channel[") => "channel",
+        s if s.starts_with("Mutex[") => "mutex",
+        _ => return None,
+    })
+}
+
+/// The names a function's body has bound before `offset`: its parameters, assigned variables,
+/// loop variables and `with` names, found in the tokens, which are there even when the text
+/// does not parse.
+fn locals_before(text: &str, offset: usize) -> Vec<String> {
+    use lang_syntax::token::TokenKind as T;
+    let mut diags = Diagnostics::default();
+    let tokens = lang_syntax::lex(MAIN_FILE, text, &mut diags);
+    let before: Vec<&lang_syntax::token::Token> = tokens.iter().filter(|t| (t.span.hi as usize) <= offset).collect();
+    // The enclosing function: from the last `def` that starts a line.
+    let start = before
+        .iter()
+        .rposition(|t| t.kind == T::Def && (t.span.lo == 0 || text.as_bytes()[t.span.lo as usize - 1] != b'.'))
+        .unwrap_or(0);
+    let tokens = &before[start..];
+    let mut names: Vec<String> = Vec::new();
+    let mut add = |name: &str| {
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    };
+    let mut depth = 0i32;
+    let mut in_header = false;
+    let mut loop_target = false;
+    for (i, token) in tokens.iter().enumerate() {
+        match &token.kind {
+            T::Def => in_header = true,
+            T::LParen | T::LBracket | T::LBrace => depth += 1,
+            T::RParen | T::RBracket | T::RBrace => {
+                depth -= 1;
+                if depth <= 0 && in_header && token.kind == T::RParen {
+                    in_header = false;
+                }
+            }
+            T::For => loop_target = true,
+            T::In => loop_target = false,
+            T::Name(name) => {
+                let next = tokens.get(i + 1).map(|t| &t.kind);
+                let previous = i.checked_sub(1).map(|p| &tokens[p].kind);
+                let binds =
+                    (in_header && depth == 1 && matches!(next, Some(T::Colon | T::Assign | T::Comma | T::RParen)))
+                        || (depth == 0 && matches!(next, Some(T::Assign)))
+                        || (depth == 0
+                            && matches!(next, Some(T::Colon))
+                            && matches!(previous, Some(T::Newline | T::Indent | T::Dedent) | None))
+                        || loop_target
+                        || matches!(previous, Some(T::As));
+                if binds && name != "self" {
+                    add(name);
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// The completions at `offset` of `text`, the document at `path`.
+fn complete(path: &Path, text: &str, offset: usize) -> Json {
+    let bytes = text.as_bytes();
+    let mut start = offset.min(text.len());
+    while start > 0 && is_word_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    let mut end = offset.min(text.len());
+    while end < bytes.len() && is_word_byte(bytes[end]) {
+        end += 1;
+    }
+    let list = |items: Vec<Json>| obj(vec![("isIncomplete", Json::Bool(false)), ("items", Json::Arr(items))]);
+    if start > 0 && bytes[start - 1] == b'.' {
+        // After a dot: analyse the text without what is being typed, which usually parses, and
+        // ask what type the expression before the dot has.
+        let dot = start - 1;
+        let repaired = format!("{}{}", &text[..dot], &text[end..]);
+        let analysis = analyze(path, &repaired);
+        let receiver = analysis
+            .index
+            .iter()
+            .filter(|e| e.span.file == MAIN_FILE && e.span.hi as usize == dot)
+            .filter(|e| e.ty.is_some())
+            .max_by_key(|e| e.span.hi - e.span.lo);
+        let members = receiver.and_then(|e| {
+            let shown = e.ty.as_deref()?;
+            analysis
+                .completions
+                .by_type
+                .get(shown)
+                .or_else(|| builtin_prefix(shown).and_then(|p| analysis.completions.builtin.get(p)))
+        });
+        let word_before = {
+            let mut s = dot;
+            while s > 0 && is_word_byte(bytes[s - 1]) {
+                s -= 1;
+            }
+            &text[s..dot]
+        };
+        let members = members.or_else(|| analysis.completions.modules.get(word_before));
+        return list(
+            members
+                .map(|members| members.iter().map(|m| item(&m.name, item_kind(m.kind), &m.detail)).collect())
+                .unwrap_or_default(),
+        );
+    }
+    // Elsewhere: what is in scope, and the keywords.
+    let analysis = analyze(path, text);
+    let mut seen: Vec<String> = Vec::new();
+    let mut items = Vec::new();
+    for name in locals_before(text, offset) {
+        items.push(item(&name, 6.0, "variable"));
+        seen.push(name);
+    }
+    for member in &analysis.completions.scope {
+        if !seen.contains(&member.name) {
+            items.push(item(&member.name, item_kind(member.kind), &member.detail));
+            seen.push(member.name.clone());
+        }
+    }
+    for keyword in KEYWORDS {
+        if !seen.iter().any(|n| n == keyword) {
+            items.push(item(keyword, 14.0, ""));
+        }
+    }
+    list(items)
+}
+
 // ---- the server -----------------------------------------------------------------------
 
 fn read_message(input: &mut impl BufRead) -> Option<Json> {
@@ -451,6 +632,7 @@ pub fn serve(input: &mut impl BufRead, output: &mut impl Write) -> u8 {
                     ("textDocumentSync", Json::Num(1.0)),
                     ("hoverProvider", Json::Bool(true)),
                     ("definitionProvider", Json::Bool(true)),
+                    ("completionProvider", obj(vec![("triggerCharacters", Json::Arr(vec![Json::Str(".".into())]))])),
                     ("documentFormattingProvider", Json::Bool(true)),
                 ]);
                 let info = obj(vec![("name", Json::Str(lang_names::CLI_NAME.into()))]);
@@ -496,6 +678,13 @@ pub fn serve(input: &mut impl BufRead, output: &mut impl Write) -> u8 {
                         let at = offset(text, params.get("position"));
                         if method == "textDocument/hover" { analysis.hover(at) } else { analysis.definition(at) }
                     }
+                    _ => Json::Null,
+                };
+                reply(output, &id, result);
+            }
+            "textDocument/completion" => {
+                let result = match (documents.get(&uri), path_of(&uri)) {
+                    (Some(text), Some(path)) => complete(&path, text, offset(text, params.get("position"))),
                     _ => Json::Null,
                 };
                 reply(output, &id, result);
@@ -611,5 +800,91 @@ mod tests {
         let Json::Arr(edits) = replies[4].get("result") else { panic!() };
         assert!(edits[0].get("newText").str().unwrap().contains("return n * 2"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The completion items a session answers for each `(text before the cursor, needle)`.
+    fn completions_at(source: &str, requests: &[&str]) -> Vec<Vec<(String, f64)>> {
+        let dir = std::env::temp_dir().join(format!("lsp-complete-{}-{}", std::process::id(), source.len()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("app.{}", lang_names::SOURCE_EXTENSION));
+        std::fs::write(&path, source).unwrap();
+        let uri = uri_of(&path);
+        let open = format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{uri}","text":{}}}}}}}"#,
+            Json::Str(source.into()).to_text()
+        );
+        let mut input = vec![message(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#), message(&open)];
+        for (n, needle) in requests.iter().enumerate() {
+            // The cursor is just after the needle's last character.
+            let at = source.rfind(needle).unwrap_or_else(|| panic!("{needle} is in the document")) + needle.len();
+            let line = source[..at].matches('\n').count();
+            let character = at - source[..at].rfind('\n').map_or(0, |i| i + 1);
+            input.push(message(&format!(
+                r#"{{"jsonrpc":"2.0","id":{},"method":"textDocument/completion","params":{{"textDocument":{{"uri":"{uri}"}},"position":{{"line":{line},"character":{character}}}}}}}"#,
+                10 + n
+            )));
+        }
+        input.push(message(r#"{"jsonrpc":"2.0","method":"exit"}"#));
+        let mut output = Vec::new();
+        serve(&mut std::io::BufReader::new(input.concat().as_bytes()), &mut output);
+        let output = String::from_utf8(output).unwrap();
+        let replies: Vec<Json> = output
+            .split("Content-Length: ")
+            .skip(1)
+            .map(|m| Json::parse(m.split_once("\r\n\r\n").unwrap().1).unwrap())
+            .collect();
+        assert!(
+            replies[0].get("result").get("capabilities").get("completionProvider").get("triggerCharacters")
+                == &Json::Arr(vec![Json::Str(".".into())])
+        );
+        let answers = replies
+            .iter()
+            .filter(|r| r.get("id").num().is_some_and(|id| id >= 10.0))
+            .map(|r| {
+                let Json::Arr(items) = r.get("result").get("items") else { return Vec::new() };
+                items
+                    .iter()
+                    .map(|i| (i.get("label").str().unwrap().to_string(), i.get("kind").num().unwrap()))
+                    .collect()
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(dir);
+        answers
+    }
+
+    #[test]
+    fn completion_after_a_dot_and_in_scope() {
+        let source = "import io\n\nstruct User:\n    name: str\n    age: int\n\nimpl User:\n    def greet(self) -> str:\n        return self.name\n\ndef helper(x: int) -> int:\n    return x\n\ndef main():\n    user = User(\"a\", 1)\n    text = \"abc\"\n    count = 3\n    names = [text]\n    user.na\n    text.up\n    io.rea\n    names.app\n    cou\n";
+        let answers = completions_at(source, &["user.na", "text.up", "io.rea", "names.app", "    cou"]);
+        let labels = |i: usize| -> Vec<&str> { answers[i].iter().map(|(l, _)| l.as_str()).collect() };
+        // A struct: its fields (kind 5) and methods (kind 2).
+        assert!(answers[0].contains(&("name".to_string(), 5.0)), "{:?}", labels(0));
+        assert!(answers[0].contains(&("age".to_string(), 5.0)));
+        assert!(answers[0].contains(&("greet".to_string(), 2.0)));
+        assert!(!labels(0).contains(&"upper"));
+        // A `str`: the compiler's methods and the prelude's.
+        for method in ["upper", "split", "count", "is_digit", "split_lines", "zfill"] {
+            assert!(labels(1).contains(&method), "{method} in {:?}", labels(1));
+        }
+        // A module: its public names.
+        assert!(labels(2).contains(&"read_file"), "{:?}", labels(2));
+        // A list: `append` and the prelude's `count`.
+        assert!(labels(3).contains(&"append") && labels(3).contains(&"count"), "{:?}", labels(3));
+        // Elsewhere: locals, functions, types, built-ins and keywords.
+        for name in ["count", "text", "user", "helper", "User", "print", "return", "main"] {
+            assert!(labels(4).contains(&name), "{name} in {:?}", labels(4));
+        }
+        assert!(!labels(4).iter().any(|l| l.starts_with("__")));
+    }
+
+    #[test]
+    fn completion_in_a_document_that_does_not_parse() {
+        // The method list is still there after a dot when the rest of the file is broken: names
+        // in scope come from the tokens.
+        let source = "def helper(x: int) -> int:\n    return x\n\ndef main(:\n    total = 1\n    for item in [1]:\n        tot\n";
+        let answers = completions_at(source, &["        tot"]);
+        let labels: Vec<&str> = answers[0].iter().map(|(l, _)| l.as_str()).collect();
+        assert!(labels.contains(&"def") && labels.contains(&"for"), "{labels:?}");
+        assert!(labels.contains(&"total") && labels.contains(&"item"), "locals come from the tokens: {labels:?}");
     }
 }

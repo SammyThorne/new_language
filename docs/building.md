@@ -308,6 +308,7 @@ With `--check`, nothing is changed: the command lists the files that are not for
 |---|---|
 | `CC` | The C compiler used to link (default `cc`) |
 | `WEBY_RUNTIME` | The path of `liblang_rt.a`, instead of looking next to the compiler. Useful for testing a runtime built some other way |
+| `WEBY_RUNTIME_DEBUG` | Any value keeps the runtime's debug information in the executable, which is otherwise removed with `objcopy --strip-debug` while linking (4.4 MB down to 0.5 MB for a small program). The program's own line tables are always kept. Useful when debugging the runtime itself |
 
 **When running a compiled program.** These are read when the program starts, so the same executable can be tuned without recompiling:
 

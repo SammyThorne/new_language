@@ -671,6 +671,14 @@ fn current_worker() -> *const Worker {
     WORKER.with(Cell::get)
 }
 
+/// The addresses that count as running off the end of the running fiber's stack: its guard
+/// page and the space beside it. Safe to call from a signal handler.
+pub(crate) fn guard_window() -> Option<(usize, usize)> {
+    let fiber = current()?;
+    let base = fiber.stack.base as usize;
+    Some((base.saturating_sub(64 * 1024), base + PAGE))
+}
+
 /// A reference to the running fiber that can outlive this call.
 fn current_ref() -> Option<FiberRef> {
     Some(FiberRef::to(current()?))
@@ -1245,6 +1253,7 @@ fn wake_idle_worker() {
 
 fn worker_main(index: usize) {
     crate::tasks::register_thread();
+    crate::overflow::setup_thread();
     let scheduler = scheduler();
     let worker = &scheduler.workers[index];
     WORKER.with(|w| w.set(worker));

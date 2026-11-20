@@ -105,7 +105,7 @@ A task becomes a **fiber**: a user-space thread with its own stack, scheduled by
 
 | Component | Design |
 |---|---|
-| Fiber stacks | Each is a virtual memory reservation (default 256 KiB, configurable) with a guard page below it; physical memory is committed on touch. Stack overflow hits the guard page and becomes a clean panic. Freed stacks are pooled |
+| Fiber stacks | Each is a virtual memory reservation (default 256 KiB, configurable) with a guard page below it; physical memory is committed on touch. Stack overflow hits the guard page, and a handler on an alternate stack prints `panic: stack overflow` and exits with the status of a panic (D95). Freed stacks are pooled |
 | Context switch | A short assembly routine per architecture that saves callee-saved registers and swaps stack pointers. Either hand-written or taken from the `corosensei` crate, provided we keep control of stack allocation |
 | Scheduler | Each worker has a local run queue; idle workers steal from others; a global queue receives tasks made runnable from outside a worker. This is the design Go and Tokio both use |
 | Network poller | Sockets are non-blocking. A read that would block registers the fiber with epoll (edge-triggered) and switches away. A poller wakes fibers when their sockets are ready |

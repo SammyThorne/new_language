@@ -1,0 +1,37 @@
+error[E0004]: unknown escape sequence `\q`
+ --> tests/ui/lexical_errors.wb:4:15
+  |
+4 |     print("tab\q")
+  |               ^^ unknown escape
+  |
+  = help: write `\\` for a literal backslash
+
+error[E0007]: invalid number literal `12abc`
+ --> tests/ui/lexical_errors.wb:5:9
+  |
+5 |     x = 12abc
+  |         ^^^^^ not a valid number
+
+error[E0005]: unexpected character `$`
+ --> tests/ui/lexical_errors.wb:6:11
+  |
+6 |     y = 1 $ 2
+  |           ^ not valid here
+
+error[E0002]: unindent does not match any outer indentation level
+ --> tests/ui/lexical_errors.wb:8:1
+  |
+8 |   w = 4
+  | ^^ this indentation
+  |
+  = help: indent this line by the same number of spaces as an enclosing block
+
+error[E0100]: expected a declaration, found name `w`
+ --> tests/ui/lexical_errors.wb:8:3
+  |
+8 |   w = 4
+  |   ^ statements are not allowed here
+  |
+  = help: statements must be inside a function; the program starts in `def main():`
+
+error: could not compile `tests/ui/lexical_errors.wb` due to 5 errors

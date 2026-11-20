@@ -1565,7 +1565,8 @@ test result: ok. 3 passed; 0 failed
 | `weby test [paths] [--filter text]` | Run `@test` functions |
 | `weby fmt [paths] [--check]` | Format files in the standard layout |
 | `weby fetch [--update]` | Fetch git dependencies and update `weby.lock` |
-| `weby lsp` | The language server: diagnostics, hover, go to definition, formatting |
+| `weby explain E0300` | What an error or warning code means, with an example and what to do ([errors.md](errors.md) has them all) |
+| `weby lsp` | The language server: diagnostics, hover, go to definition, completion, formatting |
 | `weby build --emit=tokens\|ast\|hir\|llvm-ir\|obj file.wb` | Show an intermediate form |
 
 Compiler messages show the source and usually suggest a fix:
@@ -1580,7 +1581,7 @@ error[E0317]: a condition must be a `bool`, found `int`
   = help: values are not true or false by themselves; compare explicitly, for example `len(items) > 0`
 ```
 
-Programs include debug line information, so `gdb` and `perf` show function names and source lines. Editor support (a Zed extension, VS Code, Vim, Neovim and Helix) is described in [editors/README.md](../editors/README.md).
+Programs include debug line information for their own code, so `gdb` and `perf` show function names and source lines, and a panic prints a backtrace of the program's functions. A program that runs out of stack, such as one with a function that calls itself without end, stops with `panic: stack overflow` and the status 101, as a panic does. Editor support (a Zed extension, VS Code, Vim, Neovim and Helix) is described in [editors/README.md](../editors/README.md).
 
 ## 25. Coming from Python
 

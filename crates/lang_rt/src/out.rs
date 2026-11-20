@@ -17,6 +17,16 @@ pub fn write(bytes: &[u8]) {
     }
 }
 
+/// Flush what is buffered, if nothing else is using standard output at this moment: for a
+/// signal handler, which must not wait for a lock.
+pub fn try_flush() {
+    if let Ok(mut guard) = OUT.try_lock()
+        && let Some(writer) = guard.as_mut()
+    {
+        let _ = writer.flush();
+    }
+}
+
 pub fn flush() {
     let mut guard = OUT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(writer) = guard.as_mut() {

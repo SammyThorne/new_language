@@ -1,0 +1,8 @@
+# Mistakes the lexer finds: a bad escape, a bad number, a character the language does not use, and
+# an indentation that matches no earlier level.
+def main():
+    print("tab\q")
+    x = 12abc
+    y = 1 $ 2
+        z = 3
+  w = 4

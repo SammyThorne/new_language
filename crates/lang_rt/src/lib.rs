@@ -22,6 +22,7 @@ pub mod json;
 pub mod list;
 pub mod num;
 pub mod out;
+pub mod overflow;
 pub mod panic;
 pub mod pg;
 pub mod poll;
@@ -41,6 +42,7 @@ pub extern "C-unwind" fn main(argc: std::ffi::c_int, argv: *const *const std::ff
         fn lang_user_main();
     }
     gc::init();
+    overflow::install();
     sys::set_args(argc as i64, argv);
     // SAFETY: the code generator always defines `lang_user_main` as `void(void)` with the C
     // calling convention.

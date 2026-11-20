@@ -1,0 +1,15 @@
+# An import nothing uses is a warning; one used in code, a type, an f-string or a decorator is not.
+import json
+import re
+import os as system
+import time
+import imports.helpers
+from io import read_file, write_file
+from imports.helpers import Marker, twice as double
+
+def describe(marker: Marker) -> str:
+    return f"{marker.label} at {time.monotonic() > 0.0}"
+
+def main():
+    print(write_file("x", "y").is_ok(), describe(Marker("m")), double(2))
+    print(imports.helpers.twice(3))

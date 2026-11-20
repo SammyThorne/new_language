@@ -14,6 +14,14 @@ error[E0200]: module `lib.accounts` has no `open_acount`
   |
   = help: did you mean `open_account`?
 
+warning[W0004]: `open_acount` is imported but never used
+ --> tests/ui/module_privacy.wb:2:52
+  |
+2 | from lib.accounts import Account, internal_helper, open_acount
+  |                                                    ^^^^^^^^^^^ imported here
+  |
+  = help: remove the import, or use it
+
 error[E0335]: field `balance` of `Account` is private to module `lib.accounts`
  --> tests/ui/module_privacy.wb:7:22
   |

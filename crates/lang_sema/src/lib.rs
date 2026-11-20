@@ -8,4 +8,6 @@ pub mod hir;
 pub mod stdlib;
 pub mod types;
 
-pub use check::{IndexEntry, ModuleInput, analyze, check, check_modules, check_program};
+pub use check::{
+    Completions, IndexEntry, Member, MemberKind, ModuleInput, analyze, check, check_modules, check_program,
+};

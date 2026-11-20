@@ -35,7 +35,7 @@ tree-sitter test
 
 ## The language server
 
-`weby lsp` speaks the Language Server Protocol on standard input and output: diagnostics as you type, hover for the type of an expression, go to definition, and formatting with `weby fmt`'s layout. Zed starts it through the extension. Any editor with a generic LSP client can use it. For Neovim 0.11:
+`weby lsp` speaks the Language Server Protocol on standard input and output: diagnostics as you type, hover for the type of an expression, go to definition, completion (after a `.` the fields and methods of the value, a module's names, and in other places the names in scope and the keywords) and formatting with `weby fmt`'s layout. Zed starts it through the extension. Any editor with a generic LSP client can use it. For Neovim 0.11:
 
 ```lua
 vim.lsp.config("weby", { cmd = { "weby", "lsp" }, filetypes = { "weby" }, root_markers = { "weby.toml", ".git" } })

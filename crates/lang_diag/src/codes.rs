@@ -63,7 +63,7 @@ pub const UNEXPECTED_TYPE_ARGS: &str = "E0309";
 pub const NONE_PARAMETER: &str = "E0310";
 /// A struct construction that leaves out a field without a default.
 pub const MISSING_FIELD: &str = "E0311";
-/// A constant whose value is not a literal.
+/// A constant whose value cannot be worked out when compiling, or is defined in terms of itself.
 pub const CONST_NOT_LITERAL: &str = "E0312";
 /// A dict key type that cannot be hashed.
 pub const UNHASHABLE_KEY: &str = "E0313";
@@ -89,7 +89,7 @@ pub const UNUSED_RESULT: &str = "E0322";
 pub const FROZEN_FIELD: &str = "E0323";
 /// An implementation whose trait requires another trait the type does not implement.
 pub const MISSING_REQUIRED_TRAIT: &str = "E0324";
-/// A trait used as a type although some method prevents it.
+/// A trait used as a type although some method prevents it, or a trait method with type parameters.
 pub const NOT_OBJECT_SAFE: &str = "E0325";
 /// A `match` that does not cover every possible value.
 pub const NON_EXHAUSTIVE: &str = "E0326";
@@ -128,3 +128,5 @@ pub const UNUSED_VARIABLE: &str = "W0001";
 pub const UNREACHABLE_CODE: &str = "W0002";
 /// A `case` that can never match, because earlier cases cover everything it would.
 pub const UNREACHABLE_CASE: &str = "W0003";
+/// An `import` of a name the file never uses.
+pub const UNUSED_IMPORT: &str = "W0004";

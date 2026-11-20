@@ -1,0 +1,19 @@
+# The same in a task, whose stack is a mapping with a guard page; here a small one. The whole
+# program ends, as a panic in a task would if nothing joined it.
+# expect: before
+# expect-exit: 101
+# expect-stderr: panic: stack overflow in a task
+# expect-stderr: WEBY_TASK_STACK
+# env: WEBY_TASK_STACK=65536
+def deep(n: int, items: list[int]) -> int:
+    items.append(n)
+    return deep(n + 1, items) + len(items)
+
+def run() -> int:
+    items: list[int] = []
+    return deep(0, items)
+
+def main():
+    print("before")
+    task = spawn run()
+    print(task.join())
