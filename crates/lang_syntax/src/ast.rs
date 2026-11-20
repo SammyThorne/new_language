@@ -251,6 +251,9 @@ pub enum StmtKind {
         target: Option<Ident>,
         body: Vec<Stmt>,
     },
+    /// `del xs[i]` or `del d[key]`: remove an element of a list or an entry of a dict. The
+    /// checker reports any other operand.
+    Del(Expr),
     Break,
     Continue,
     /// `pass`: does nothing; fills a block that needs no statements.
@@ -357,6 +360,12 @@ pub enum ExprKind {
         rhs: Box<Expr>,
     },
     /// `then if cond else otherwise`
+    /// `match subject:` with one `case pattern: value` per line, as the whole right-hand side
+    /// of an assignment or a `return`. Each case's body is a single expression statement.
+    Match {
+        subject: Box<Expr>,
+        cases: Vec<Case>,
+    },
     IfElse {
         cond: Box<Expr>,
         then: Box<Expr>,
@@ -402,7 +411,12 @@ pub struct Arg {
 #[derive(Debug)]
 pub enum FStringPart {
     Literal(String),
-    Expr { expr: Expr, spec: Option<(String, Span)> },
+    /// `{expr}`, `{expr:spec}`, `{expr!r}` or `{expr!r:spec}`. `conversion` is `r` or `s`.
+    Expr {
+        expr: Expr,
+        spec: Option<(String, Span)>,
+        conversion: Option<char>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

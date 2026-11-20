@@ -437,10 +437,7 @@ impl<'m> Checker<'_, 'm> {
         expected: Option<Ty>,
     ) -> hir::Expr {
         match global {
-            Global::Const(index) => match &self.consts[index].value {
-                Some(value) => hir::Expr { span, ..value.clone() },
-                None => error_expr(span),
-            },
+            Global::Const(index) => self.const_value(index, name, span),
             Global::Function(id) => self.func_ref(id, span),
             Global::GenericFunction(index) => self.generic_fn_value(index, expected, span),
             Global::Missing => error_expr(span),

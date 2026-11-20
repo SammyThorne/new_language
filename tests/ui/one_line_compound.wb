@@ -1,0 +1,7 @@
+# A compound statement cannot follow `:` on the same line, and a bad case in a `match` is
+# reported once, not again as an empty `match`.
+def main():
+    x = 1
+    if x > 0: for i in range(3): print(i)
+    match x:
+        case 1: if x > 0: print(x)

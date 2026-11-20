@@ -24,8 +24,8 @@ syn match   webyTypeName   "\<[A-Z][A-Za-z0-9_]*\>"
 syn match   webyComment    "#.*$" contains=@Spell
 
 syn region  webyDocString  start=+"""+ end=+"""+ contains=@Spell
-syn region  webyString     start=+[fF]\="+ skip=+\\\\\|\\"+ end=+"+ oneline
-syn region  webyString     start=+[fF]\='+ skip=+\\\\\|\\'+ end=+'+ oneline
+syn region  webyString     start=+[fFrR]\="+ skip=+\\\\\|\\"+ end=+"+ oneline
+syn region  webyString     start=+[fFrR]\='+ skip=+\\\\\|\\'+ end=+'+ oneline
 
 hi def link webyStatement   Statement
 hi def link webyConditional Conditional

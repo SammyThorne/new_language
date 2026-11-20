@@ -1,0 +1,17 @@
+# What a constant cannot be: a call, a collection, an f-string, a division by zero, a negative
+# power, something too long, and something defined in terms of itself.
+const CALLED = len("abc")
+const LIST = [1, 2]
+const TEXT = f"{1}"
+const ZERO = 10 // 0
+const FLOAT_ZERO = 1.0 / 0.0
+const NEGATIVE = 2 ** -1
+const HUGE = "x" * 100000000
+const A = B + 1
+const B = C * 2
+const C = A - 1
+const SELF = SELF
+const MISMATCH: float = 1 + 2
+
+def main():
+    print(CALLED, LIST, TEXT, ZERO, FLOAT_ZERO, NEGATIVE, HUGE, A, SELF, MISMATCH)

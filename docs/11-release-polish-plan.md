@@ -254,6 +254,10 @@ label = match status:
 
 **Tests:** the affected `tests/ui/*.stderr` files are regenerated, and each changed text is reviewed by reading it.
 
+### Done
+
+Carried out on 2026-11-20 as D91 in [08](08-decisions-and-risks.md). All of 1.1 to 1.8 are done, with two differences: bytes literals (`b"..."`, optional in 1.2) are not implemented, since a `str` literal cannot hold invalid UTF-8, and the tree-sitter grammar was not regenerated, since that needs the `tree-sitter` command. `del` also became legal as a one-line block statement, and constants are checked on first use so that their order does not matter. Measured with `bench/run.py --check` and `bench/http/counts.py --check`: no regression and no count grew.
+
 ### Exit criteria
 
 - Every program in Appendix A's milestone 1 rows compiles and prints what Python would print, except comparison chains, which stay an error by design.

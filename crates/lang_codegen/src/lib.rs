@@ -251,6 +251,7 @@ const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_builder_push_format_str", "v", "ppipi"),
     ("lrt_builder_finish", "s", "p"),
     ("lrt_builder_print", "v", "p"),
+    ("lrt_builder_print_flush", "v", "pi"),
     ("lrt_str_concat", "s", "pipi"),
     ("lrt_str_concat_n", "s", "pi"),
     ("lrt_str_repeat", "s", "pii"),

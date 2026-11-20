@@ -1,0 +1,17 @@
+error[E0100]: a `match` expression's case needs its value on the same line
+ --> tests/ui/match_expression_syntax.wb:5:16
+  |
+5 |         case 1:
+  |                ^ expected a value
+  |
+  = help: write `case pattern: value`; use a `match` statement for cases with several statements
+
+error[E0100]: a `match` expression can only be the whole value of an assignment or a `return`
+  --> tests/ui/match_expression_syntax.wb:11:11
+   |
+11 |     print(match n:
+   |           ^^^^^ not allowed here
+   |
+   = help: assign it first: `label = match x:` with a `case pattern: value` on each line
+
+error: could not compile `tests/ui/match_expression_syntax.wb` due to 2 errors

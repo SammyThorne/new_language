@@ -23,7 +23,7 @@ Code blocks here are Weby. They are highlighted as Python because the surface sy
 Reserved words:
 
 ```
-and as break case const continue def elif else enum False for from if impl
+and as break case const continue def del elif else enum False for from if impl
 import in is lambda match None not or pass priv pub return self spawn struct
 trait True while with
 ```
@@ -49,7 +49,11 @@ count += 1
 ```python
 const MAX_BODY_BYTES = 1_048_576
 const SERVICE_NAME = "users"
+const UPLOAD_LIMIT = 4 * MAX_BODY_BYTES
+const BANNER = "== " + SERVICE_NAME + " =="
 ```
+
+A constant's value is a literal, or an expression made of literals, other constants (in the same file or imported, in any order), the operators on `int`, `float`, `bool` and `str`, and `x if c else y`. The compiler works it out, with the results the same operators give at run time: integers wrap, `//` and `%` round down, shifts of 64 or more give 0. Dividing an `int` by zero, a negative `int` power and a string over 1 MiB are compile errors, and so is a constant that is defined in terms of itself (the error shows the chain). Calls, collections and f-strings are not allowed in constants.
 
 There are no mutable globals. Shared state is created in `main` and passed down, or held in a `Mutex`.
 
@@ -109,10 +113,12 @@ block = """
     triple-quoted strings span lines
 """
 message = f"{user.name} has {len(items)} items, total {total:.2f}"
+pattern = r"\d{4}-\d{2}"          # raw: backslashes are kept as written
 ```
 
 - `str` is immutable. `len(s)` is the byte length; iterating yields characters (Unicode scalar values). Indexing by integer is not provided, because it is either slow or wrong for UTF-8; slicing by byte offsets (`s[a:b]`) panics if it splits a character.
-- f-strings (M2) accept any expression whose type implements `Display`, with an optional format spec after `:`.
+- f-strings (M2) accept any expression whose type implements `Display`, with an optional format spec after `:`. `{x!r}` shows the value as `repr` does (a string in quotes), `{x!s}` is the plain form; a spec after either, as in `{name!r:>12}`, pads that text. `!a` is not supported.
+- Raw strings, `r"..."`, `r'...'` and `r"""..."""`, keep every backslash as written, as in Python: `r"\d+"` is a backslash, a `d` and a plus sign. A backslash before a quote keeps the quote from ending the string and stays in it. This is how patterns for `re` are written. `rf"..."` and bytes literals (`b"..."`) are not supported: make bytes with `text.encode()`.
 - Common methods: `upper`, `lower`, `strip`, `split`, `join`, `starts_with`, `ends_with`, `find`, `replace`, `contains`.
 
 ## Control flow (M1, `match` in M3)
@@ -143,6 +149,12 @@ label = "even" if n % 2 == 0 else "odd"
 ```
 
 `for` works on anything that implements `Iterable[T]` ([02](02-type-system-and-traits.md#built-in-traits)). `range` is compiled to a plain counting loop.
+
+A block that is one simple statement can go on the line of its header: `if done: return`, `else: count += 1`, `for x in xs: total += x`, `case Ok(v): print(v)`. The statement is an expression, an assignment, `return`, `pass`, `break`, `continue`, `assert` or `del`; a compound statement such as another `if` needs its own indented block, and there is no `;`.
+
+`del xs[i]` removes a list element (negative indices count from the end, and an index out of range panics), and `del d[key]` removes a dict entry, panicking with `key 'k' is not in the dict` when it is absent. It takes nothing else: not a variable, a field or a slice.
+
+`print(a, b, sep=", ", end="")` takes Python's `sep`, `end` and `flush` keywords, with the same defaults. `file=` is not supported; use `io.eprint` for standard error. Standard output is flushed after every write on a terminal, and when the program ends or waits, so `end=""` prompts show at once.
 
 `pass` does nothing. It fills a block that needs no statements, such as an `impl` that only uses a trait's default methods.
 
@@ -260,7 +272,16 @@ def handle(msg: Message) -> str:
 - Enums are tagged unions. Variants may carry named fields.
 - `match` must be exhaustive; `case _:` is the catch-all.
 - Patterns: variant with sub-patterns, literal, tuple, binding name, `_`, alternatives with `|`, and a guard (`case Text(body) if len(body) > 0:`).
-- `match` is a statement in the prototype. Expression form is deferred.
+- `match` is a statement, and also an expression as the whole right-hand side of an assignment or a `return`, with each case's value on its own line:
+
+```python
+label = match status:
+    case 200: "ok"
+    case 404: "not found"
+    case _: "other"
+```
+
+  The cases of a `match` expression must cover every value, since there is nothing else for it to give. The values have one type: the one the context expects (a type hint, or the function's return type), or else the first one's, as the two sides of `a if c else b` do. A case that panics has no value and does not take part, and a `None` value makes the others optional. A `match` expression anywhere else, such as inside a call, is an error that says to assign it first.
 - A variant is written `Message.Text("hi")`, or just `Text("hi")` when no other enum has a variant of that name. Variants without fields are values: `Message.Ping` or `Ping`. Fields can be given by position or by name, as for structs.
 - In a pattern, a bare name that is a variant of the matched enum is that variant; any other bare name binds the value. Patterns may also name the enum: `case Message.Close(code, _):`.
 - Enum values are immutable. Equality, hashing and printing come from `@derive(Eq, Hash, Display)`.
@@ -286,7 +307,7 @@ email = user.email.unwrap_or("none")
 - `T?` is sugar for `Option[T]`, an ordinary enum with `Some(T)` and `None`.
 - A `T` is accepted where `T?` is expected and is wrapped automatically.
 - There is no null. A `User` is never `None`; only a `User?` can be.
-- Flow narrowing (`if user is not None:` makes `user` a `User` inside the block) is planned for M4. Until then, use `match`, `unwrap_or` and `?`.
+- Flow narrowing: after `if user is not None:` the variable `user` is a `User` inside the block (D37). `match`, `unwrap_or` and `?` work too.
 
 ## Errors
 

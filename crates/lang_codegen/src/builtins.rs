@@ -22,6 +22,26 @@ impl<'ctx> Codegen<'ctx, '_> {
             self.call_rt("lrt_builder_print", &[builder.into()]);
             return None;
         }
+        if op == Builtin::PrintWith {
+            let (values, rest) = args.split_at(args.len() - 3);
+            let builder = self.builder_new();
+            let values: Vec<_> = values.iter().map(|arg| (arg.ty, self.expr(arg))).collect();
+            let sep = self.value(&rest[0]);
+            let end = self.value(&rest[1]);
+            let flush = self.value(&rest[2]).into_int_value();
+            let [sep_ptr, sep_len] = self.str_parts(sep);
+            for (index, (ty, value)) in values.into_iter().enumerate() {
+                if index > 0 {
+                    self.builder_push(builder, sep_ptr, sep_len);
+                }
+                self.push_value(builder, ty, value, false);
+            }
+            let [end_ptr, end_len] = self.str_parts(end);
+            self.builder_push(builder, end_ptr, end_len);
+            let flush = self.b.build_int_z_extend(flush, self.cx.i64_type(), "").must();
+            self.call_rt("lrt_builder_print_flush", &[builder.into(), flush.into()]);
+            return None;
+        }
         if op == Builtin::ToStr {
             let value = self.expr(&args[0]);
             return Some(self.display_string(args[0].ty, value));
@@ -73,7 +93,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         };
 
         Some(match op {
-            Builtin::Print | Builtin::ToStr => unreachable!("handled above"),
+            Builtin::Print | Builtin::PrintWith | Builtin::ToStr => unreachable!("handled above"),
             Builtin::Panic => {
                 let [ptr, len] = self.str_parts(values[0]);
                 let (loc, loc_len) = self.location(span);
@@ -266,6 +286,15 @@ impl<'ctx> Codegen<'ctx, '_> {
                     },
                     |this| Some(this.none_value(option)),
                 );
+            }
+            Builtin::DictDelete => {
+                let (key_ty, value_ty) = dict_types.unwrap();
+                // Reading the entry first panics, naming the key, when it is absent.
+                self.dict_lookup(values[0].into_pointer_value(), values[1], key_ty, span);
+                let out = self.alloca(self.value_type(value_ty), "deleted");
+                let key = self.spill(values[1]);
+                self.call_rt("lrt_dict_remove", &[values[0], key.into(), out.into()]);
+                return None;
             }
             Builtin::DictKeys | Builtin::DictValues | Builtin::DictItems => {
                 let (key_ty, value_ty) = dict_types.unwrap();

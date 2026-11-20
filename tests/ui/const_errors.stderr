@@ -1,0 +1,74 @@
+error[E0312]: the value of constant `CALLED` cannot be worked out when compiling
+ --> tests/ui/const_errors.wb:3:16
+  |
+3 | const CALLED = len("abc")
+  |                ^^^^^^^^^^ a call
+  |
+  = help: constants are worked out when compiling, so they cannot call functions
+
+error[E0312]: the value of constant `LIST` cannot be worked out when compiling
+ --> tests/ui/const_errors.wb:4:14
+  |
+4 | const LIST = [1, 2]
+  |              ^^^^^^ a collection
+  |
+  = help: a constant is a number, string or `True`/`False`; build a collection in a function
+
+error[E0312]: the value of constant `TEXT` cannot be worked out when compiling
+ --> tests/ui/const_errors.wb:5:14
+  |
+5 | const TEXT = f"{1}"
+  |              ^^^^^^ an f-string
+  |
+  = help: join strings with `+`, or build the text in a function
+
+error[E0312]: the value of constant `ZERO` cannot be worked out when compiling
+ --> tests/ui/const_errors.wb:6:14
+  |
+6 | const ZERO = 10 // 0
+  |              ^^^^^^^ division by zero
+  |
+  = help: dividing by zero is an error here as it is when running
+
+error[E0312]: the value of constant `NEGATIVE` cannot be worked out when compiling
+ --> tests/ui/const_errors.wb:8:18
+  |
+8 | const NEGATIVE = 2 ** -1
+  |                  ^^^^^^^ negative exponent
+  |
+  = help: an `int` cannot be raised to a negative power; convert to `float` first
+
+error[E0312]: the value of constant `HUGE` cannot be worked out when compiling
+ --> tests/ui/const_errors.wb:9:14
+  |
+9 | const HUGE = "x" * 100000000
+  |              ^^^^^^^^^^^^^^^ too long
+  |
+  = help: a constant string can be at most 1 MiB
+
+error[E0312]: constant `A` is defined in terms of itself
+  --> tests/ui/const_errors.wb:12:11
+   |
+12 | const C = A - 1
+   |           ^ used again here
+   |
+   = help: the chain is `A` -> `B` -> `C` -> `A`
+
+error[E0312]: constant `SELF` is defined in terms of itself
+  --> tests/ui/const_errors.wb:13:14
+   |
+13 | const SELF = SELF
+   |              ^^^^ used again here
+   |
+   = help: the chain is `SELF` -> `SELF`
+
+error[E0300]: expected `float`, found `int`
+  --> tests/ui/const_errors.wb:14:25
+   |
+14 | const MISMATCH: float = 1 + 2
+   |                 ----- expected because of this type hint
+   |                         ^^^^^ expected `float`, found `int`
+   |
+   = help: convert it with `float(...)`
+
+error: could not compile `tests/ui/const_errors.wb` due to 9 errors

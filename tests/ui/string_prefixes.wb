@@ -1,0 +1,5 @@
+# Bytes literals and raw f-strings are not supported; each error says what to write instead.
+def main():
+    a = b"abc"
+    b = rf"\d{1}"
+    print(a, b)

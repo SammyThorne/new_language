@@ -1,0 +1,29 @@
+# `!r` and `!s` in f-strings (docs/11, milestone 1.5).
+# expect: 'x' x
+# expect: [1, 2] ['b']
+# expect: |'ab'      |  'ab'|     'ab'|
+# expect: |       42|42       |
+# expect: Point(x=1, y=2)
+# expect: "it's" 'say "hi"'
+# expect: None 3 2.5 True
+# expect: ab!=b True
+@derive(Display)
+struct Point:
+    x: int
+    y: int
+
+def main():
+    name = "x"
+    print(f"{name!r} {name!s}")
+    items = [1, 2]
+    print(f"{items!r} {['b']!r}")
+    text = "ab"
+    print(f"|{text!r:<10}| {text!r:>5}|{text!r:>9}|")
+    print(f"|{42!s:>9}|{42!s:<9}|")
+    print(f"{Point(1, 2)!r}")
+    single = "it's"
+    double = 'say "hi"'
+    print(f"{single!r} {double!r}")
+    nothing: int? = None
+    print(f"{nothing!r} {3!r} {2.5!r} {True!r}")
+    print(f"{text}!={'b'} {text != 'b'}")

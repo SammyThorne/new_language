@@ -6,7 +6,7 @@ The standard library is what makes Weby a backend language and not a general-pur
 
 | Module | Purpose | Milestone | Implemented in (prototype) |
 |---|---|---|---|
-| prelude | `print`, `len`, `range`, `str`, `int`, `float`, `min`, `max`, `sorted`, `panic`, built-in types and traits | M1–M4 | Compiler built-ins plus runtime |
+| prelude | `print` (with `sep`, `end` and `flush`), `len`, `range`, `str`, `int`, `float`, `min`, `max`, `sorted`, `panic`, built-in types and traits | M1–M4 | Compiler built-ins plus runtime |
 | `io`, `os` | Files, standard streams, environment variables, arguments | M5 | Weby wrappers over runtime |
 | `time` | Clocks, durations, `sleep` | M6 | Weby wrappers over runtime |
 | `sync` | `Channel`, `Mutex`, `Atomic`, `spawn` support | M6 | Runtime |
@@ -52,8 +52,8 @@ Method lists are indicative; the prototype implements what the demo programs nee
 | Type | Operations |
 |---|---|
 | `str` | `len`, `+`, `==`, `in`, slicing, iteration; `upper`, `lower`, `strip`, `split`, `join`, `replace`, `find`, `starts_with`, `ends_with`, `to_bytes`; `int.parse(s)`, `float.parse(s)` return `Result` |
-| `list[T]` | Literal `[a, b]`, indexing, slicing, `len`, `in`, iteration; `append`, `extend`, `insert`, `pop`, `remove`, `clear`, `sort`, `reverse`, `index`, `copy` |
-| `dict[K, V]` | Literal `{k: v}`, `d[k]` (panics if missing), `d[k] = v`, `in`, `len`; `get(k) -> V?`, `get_or(k, default)`, `pop`, `keys`, `values`, `items` |
+| `list[T]` | Literal `[a, b]`, indexing, slicing, `len`, `in`, iteration; `append`, `extend`, `insert`, `pop`, `remove`, `clear`, `sort`, `reverse`, `index`, `copy`; `del xs[i]` |
+| `dict[K, V]` | Literal `{k: v}`, `d[k]` (panics if missing), `d[k] = v`, `in`, `len`; `get(k) -> V?`, `get_or(k, default)`, `pop`, `keys`, `values`, `items`; `del d[k]` (panics if missing) |
 | `set[T]` | Literal `{a, b}`, `add`, `remove`, `in`, `len`, union and intersection |
 | `T?` | `unwrap`, `unwrap_or`, `is_some`, `is_none`, `map` |
 | `Result[T, E]` | `unwrap`, `unwrap_or`, `is_ok`, `is_err`, `map_err` |

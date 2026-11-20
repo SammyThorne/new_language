@@ -1,0 +1,33 @@
+# Raw strings (docs/11, milestone 1.2): a backslash is kept as it is, so patterns for `re` and
+# Windows-style paths need no doubling.
+# expect: \d+\s
+# expect: 5
+# expect: 10
+# expect: a\"b
+# expect: 2
+# expect: x\ny
+# expect: 3 lines
+# expect: C:\temp\new
+# expect: True
+# expect: ['3', '14', '159']
+# expect: 2026/11/18
+import re
+
+def main():
+    print(r"\d+\s")
+    print(len(r"\d+\s"))
+    print(len(r'a\nb\tc\\d'))
+    print(r"a\"b")
+    print(len(r"\\"))
+    print(R'x\ny')
+    block = r"""one\n
+two\t
+three"""
+    lines = block.split("\n")
+    print(f"{len(lines)} lines")
+    print(r"C:\temp\new")
+    print(r"\n" == "\\n")
+    digits = re.compile(r"\d+").unwrap()
+    print([x.text for x in digits.find_all("3, 14 and 159")])
+    date = re.compile(r"(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})").unwrap()
+    print(date.replace_all("2026-11-18", "$y/$m/$d"))

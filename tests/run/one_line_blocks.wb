@@ -1,0 +1,51 @@
+# One simple statement may follow the `:` of a block header on the same line (docs/11,
+# milestone 1.1): `if`, `elif`, `else`, `while`, `for`, `with`, `def` and `case`.
+# expect: -1 0 1
+# expect: total 10, countdown 0
+# expect: big
+# expect: ten
+# expect: ok 1
+# expect: bad boom
+# expect: 6
+# expect: even
+# expect: locked 4
+def sign(x: int) -> int:
+    if x > 0: return 1
+    elif x < 0: return -1
+    else: return 0
+
+def label(r: Result[int]) -> str:
+    match r:
+        case Ok(v): return f"ok {v}"
+        case Err(e): return f"bad {e.message()}"
+
+def double(x: int) -> int: return x * 2
+
+struct Failure:
+    text: str
+
+impl Error for Failure:
+    def message(self) -> str: return self.text
+
+def main():
+    print(f"{sign(-5)} {sign(0)} {sign(9)}")
+    total = 0
+    for i in range(5): total += i
+    n = 3
+    while n > 0: n -= 1
+    print(f"total {total}, countdown {n}")
+    if total > 5: print("big")
+    match total:
+        case 10: print("ten")
+        case _: print("other")
+    good: Result[int] = Ok(1)
+    failed: Result[int] = Err(Failure("boom"))
+    print(label(good))
+    print(label(failed))
+    print(double(3))
+    if total % 2 == 0: print("even")
+    else: print("odd")
+    counter = Mutex(0)
+    for _ in range(4):
+        with counter.lock() as c: c += 1
+    with counter.lock() as c: print(f"locked {c}")

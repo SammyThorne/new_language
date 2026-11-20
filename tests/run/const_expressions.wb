@@ -1,0 +1,115 @@
+# Constants may be expressions of literals, other constants and operators (docs/11, milestone
+# 1.4), worked out when compiling with the same results the operators give at run time, and in
+# any order, within a file or across files.
+# expect: 4096 buffer
+# expect: 1048576 2147483647
+# expect: -4 -1 2 -3 -2
+# expect: 3.5 0.5 -0.5 0.5 True
+# expect: True False
+# expect: ababab 6
+# expect: -9223372036854775808 0 -1
+# expect: 255 -256 1.25
+# expect: 12 1024 7
+# expect: later 30
+# expect: constants agree with run time: True
+from consts.limits import BUFFER, NAME
+
+const MIB = KIB * KIB
+const MAX_INT32 = 2 ** 31 - 1
+const KIB = 1024
+const FLOOR_DIV = -7 // 2
+const MOD_NEG = 7 % -4
+const AFTER = 5 // -2
+const SIGNED = -(7 % 4) // 2
+const REM = -7 % 3
+const HALF = 7 / 2
+const FRAC = 0.5
+const FLOAT_FLOOR = 7.0 // 2.0
+const FLOAT_MOD = -1.5 % 2.0
+const BIG = 9223372036854775807 + 1
+const SHIFTED = 1 << 70
+const SHIFT_RIGHT = -8 >> 70
+const MASK = 0xFF
+const NOT_MASK = ~0xFF
+const RATIO = 5 / 4
+const IS_SMALL = BUFFER < 5000 and not (KIB == 0)
+const SAME = "a" == "a" and "b" != "b"
+const PATTERN = "ab" * 3
+const PATTERN_LEN = 2 * 3
+const CHOICE = "later" if KIB > 1000 else "never"
+const TOTAL = PRODUCT + 10
+const PRODUCT = 4 * 5
+const TWELVE = 3 << 2
+const POWERS = 2 ** 10
+const SEVEN = 2 ** 3 - 1
+
+# Operands the run-time check below reads from variables, and the constants made from the same
+# numbers.
+const X = -17
+const Y = 5
+const W = 9223372036854775807
+const SUM = X + Y
+const DIFF = X - Y
+const PROD = X * Y
+const FDIV = X // Y
+const MODULO = X % Y
+const NEG_FDIV = Y // -3
+const NEG_MOD = Y % -3
+const WRAP_ADD = W + Y
+const WRAP_MUL = W * Y
+const POW = Y ** 13
+const WRAP_POW = Y ** 40
+const SHL = Y << 62
+const SHR = X >> 2
+const AND = X & Y
+const OR = X | Y
+const XOR = X ^ Y
+const MIN_DIV = (-W - 1) // -1
+const MIN_MOD = (-W - 1) % -1
+const LESS = X < Y
+const GEQ = X >= Y
+
+def runtime_agrees() -> bool:
+    x = -17
+    y = 5
+    w = 9223372036854775807
+    three = 3
+    forty = 40
+    minus_one = -1
+    smallest = -w - 1
+    checks = [
+        x + y == SUM,
+        x - y == DIFF,
+        x * y == PROD,
+        x // y == FDIV,
+        x % y == MODULO,
+        y // -three == NEG_FDIV,
+        y % -three == NEG_MOD,
+        w + y == WRAP_ADD,
+        w * y == WRAP_MUL,
+        y ** (three * 4 + 1) == POW,
+        y ** forty == WRAP_POW,
+        y << 62 == SHL,
+        x >> 2 == SHR,
+        x & y == AND,
+        x | y == OR,
+        x ^ y == XOR,
+        smallest // minus_one == MIN_DIV,
+        smallest % minus_one == MIN_MOD,
+        (x < y) == LESS,
+        (x >= y) == GEQ,
+    ]
+    return all(checks)
+
+def main():
+    print(f"{BUFFER} {NAME}")
+    print(f"{MIB} {MAX_INT32}")
+    print(f"{FLOOR_DIV} {MOD_NEG} {REM} {AFTER} {SIGNED}")
+    print(f"{HALF} {FRAC} {-FLOAT_MOD} {FLOAT_MOD} {FLOAT_FLOOR == 3.0}")
+    print(f"{IS_SMALL} {SAME}")
+    print(f"{PATTERN} {PATTERN_LEN}")
+    print(f"{BIG} {SHIFTED} {SHIFT_RIGHT}")
+    print(f"{MASK} {NOT_MASK} {RATIO}")
+    print(f"{TWELVE} {POWERS} {SEVEN}")
+    print(f"{CHOICE} {TOTAL}")
+    print(f"constants agree with run time: {runtime_agrees()}")

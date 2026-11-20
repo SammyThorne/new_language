@@ -44,6 +44,73 @@ impl Checker<'_, '_> {
         true
     }
 
+    /// `print(a, b, sep="-", end="", flush=True)`: the keywords Python's `print` has, except
+    /// `file`.
+    fn print_with_keywords(&mut self, cx: &mut FnCx, args: &[ast::Arg], span: Span) -> hir::Expr {
+        let string = |text: &str| hir::Expr { kind: hir::ExprKind::Str(text.to_string()), ty: Ty::STR, span };
+        let mut values = Vec::new();
+        let (mut sep, mut end, mut flush) = (None, None, None);
+        let mut failed = false;
+        for arg in args {
+            let Some(name) = &arg.name else {
+                let value = self.expr(cx, &arg.value, None);
+                if value.ty != Ty::ERROR && !self.displayable(value.ty) {
+                    self.not_displayable(value.ty, value.span);
+                }
+                values.push(value);
+                continue;
+            };
+            let slot = match name.name.as_str() {
+                "sep" | "end" | "flush" => None,
+                other => {
+                    let (message, help) = if other == "file" {
+                        (
+                            "`print` cannot write to a file".to_string(),
+                            "write to standard error with `io.eprint(text)`, or to a file with `io.open`".to_string(),
+                        )
+                    } else {
+                        (
+                            format!("`print` has no keyword argument `{other}`"),
+                            "its keyword arguments are `sep`, `end` and `flush`".to_string(),
+                        )
+                    };
+                    self.error(
+                        Diagnostic::error(codes::NOT_SUPPORTED, message, name.span, "not supported").with_help(help),
+                    );
+                    failed = true;
+                    self.expr(cx, &arg.value, None);
+                    Some(())
+                }
+            };
+            if slot.is_some() {
+                continue;
+            }
+            let (target, ty) = match name.name.as_str() {
+                "sep" => (&mut sep, Ty::STR),
+                "end" => (&mut end, Ty::STR),
+                _ => (&mut flush, Ty::BOOL),
+            };
+            let value = self.expect(cx, &arg.value, ty, None);
+            if target.is_some() {
+                self.error(Diagnostic::error(
+                    codes::NOT_SUPPORTED,
+                    format!("`{}` is given twice", name.name),
+                    name.span,
+                    "repeated",
+                ));
+                failed = true;
+            }
+            *target = Some(value);
+        }
+        if failed {
+            return error_expr(span);
+        }
+        values.push(sep.unwrap_or_else(|| string(" ")));
+        values.push(end.unwrap_or_else(|| string("\n")));
+        values.push(flush.unwrap_or(hir::Expr { kind: hir::ExprKind::Bool(false), ty: Ty::BOOL, span }));
+        hir::Expr { kind: hir::ExprKind::Builtin { op: Op::PrintWith, args: values }, ty: Ty::NONE, span }
+    }
+
     fn arity(&mut self, name: &str, args: &[ast::Arg], expected: usize, span: Span) -> bool {
         if args.len() == expected {
             return true;
@@ -74,6 +141,9 @@ impl Checker<'_, '_> {
                 return error_expr(span);
             }
             return self.collection_function(cx, name, args, span);
+        }
+        if name == "print" && args.iter().any(|a| a.name.is_some()) {
+            return self.print_with_keywords(cx, args, span);
         }
         if !self.no_keywords(args, &format!("`{name}`")) {
             for arg in args {
@@ -183,11 +253,13 @@ impl Checker<'_, '_> {
                 self.error(
                     Diagnostic::error(
                         codes::NOT_SUPPORTED,
-                        "converting text to a number is not supported yet",
+                        format!("`{name}(...)` does not convert text to a number"),
                         value.span,
                         "a `str`",
                     )
-                    .with_help("parsing arrives as `int.parse(text)` with `Result` in milestone 3"),
+                    .with_help(format!(
+                        "parse it with `{name}.parse(text)`, which gives a `Result` because the text may not be a number"
+                    )),
                 );
                 return error_expr(span);
             }

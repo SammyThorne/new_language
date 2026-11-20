@@ -1,0 +1,12 @@
+# `del` takes a list element or a dict entry, and nothing else.
+def main():
+    xs = [1, 2, 3]
+    n = 4
+    del n
+    del xs[0:1]
+    del xs.size
+    del xs["a"]
+    del n[0]
+    t = (1, 2)
+    del t[0]
+    del 5

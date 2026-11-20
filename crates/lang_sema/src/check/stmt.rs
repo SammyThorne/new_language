@@ -69,6 +69,7 @@ impl Checker<'_, '_> {
             ast::StmtKind::Def(function) => (self.nested_def(cx, function), false),
             ast::StmtKind::With { value, target, body } => self.with_stmt(cx, value, target.as_ref(), body),
             ast::StmtKind::Pass => (Vec::new(), false),
+            ast::StmtKind::Del(target) => (self.del_stmt(cx, target), false),
             ast::StmtKind::Assign { target, ty, value } => (self.assign(cx, target, ty.as_ref(), value), false),
             ast::StmtKind::AugAssign { target, op, value } => (self.aug_assign(cx, target, *op, value), false),
             ast::StmtKind::Return(value) => (vec![self.return_stmt(cx, stmt.span, value.as_ref())], true),
@@ -95,6 +96,77 @@ impl Checker<'_, '_> {
                 }
             }
         }
+    }
+
+    /// `del xs[i]` removes a list element (the same operation as `xs.pop(i)`, with the value
+    /// dropped), and `del d[key]` removes a dict entry, panicking when the key is absent, as
+    /// reading it would.
+    fn del_stmt(&mut self, cx: &mut FnCx, target: &ast::Expr) -> Vec<hir::Stmt> {
+        let ast::ExprKind::Index { object, index } = &target.kind else {
+            let (message, help) = match &target.kind {
+                ast::ExprKind::Name(name) => (
+                    format!("`del {name}` is not supported"),
+                    "a variable cannot be removed; leave it alone, or reassign it".to_string(),
+                ),
+                ast::ExprKind::Attr { .. } => (
+                    "`del` cannot remove a field".to_string(),
+                    "a struct's fields always exist; give an optional field `None` instead".to_string(),
+                ),
+                ast::ExprKind::Slice { .. } => (
+                    "`del` cannot remove a slice".to_string(),
+                    "build the list without those elements, for example `xs = xs[:a] + xs[b:]`".to_string(),
+                ),
+                _ => (
+                    "`del` needs a list element or a dict entry".to_string(),
+                    "write `del xs[i]` or `del d[key]`".to_string(),
+                ),
+            };
+            self.error(Diagnostic::error(codes::NOT_SUPPORTED, message, target.span, "not supported").with_help(help));
+            return Vec::new();
+        };
+        let container = self.expr(cx, object, None);
+        let op = match self.types.kind(container.ty).clone() {
+            TyKind::List(elem) => {
+                let index = self.expect(cx, index, Ty::INT, None);
+                hir::Expr {
+                    kind: hir::ExprKind::Builtin { op: hir::Builtin::ListPopAt, args: vec![container, index] },
+                    ty: elem,
+                    span: target.span,
+                }
+            }
+            TyKind::Dict(key, _) => {
+                let index = self.expect(cx, index, key, None);
+                hir::Expr {
+                    kind: hir::ExprKind::Builtin { op: hir::Builtin::DictDelete, args: vec![container, index] },
+                    ty: Ty::NONE,
+                    span: target.span,
+                }
+            }
+            TyKind::Error => {
+                self.expr(cx, index, None);
+                return Vec::new();
+            }
+            kind => {
+                let shown = self.display(container.ty);
+                let help = match kind {
+                    TyKind::FrozenList(_) | TyKind::FrozenDict(..) | TyKind::Tuple(_) => {
+                        "this value cannot be changed after it is made"
+                    }
+                    _ => "only lists and dicts have elements to remove",
+                };
+                self.error(
+                    Diagnostic::error(
+                        codes::BAD_INDEX,
+                        format!("`del` cannot remove an element of `{shown}`"),
+                        target.span,
+                        format!("has type `{shown}`"),
+                    )
+                    .with_help(help),
+                );
+                return Vec::new();
+            }
+        };
+        vec![hir::Stmt::Expr(op)]
     }
 
     /// `with value as name:`. The value's type needs `def exit(self)`; with `def enter(self)`,
@@ -879,7 +951,15 @@ impl Checker<'_, '_> {
         }
         let Some(id) = self.struct_of(object.ty) else {
             let shown = self.display(object.ty);
+            let optional_help;
             let help = match self.types.kind(object.ty) {
+                TyKind::Option(inner) => {
+                    let inner = self.display(*inner);
+                    optional_help = format!(
+                        "this value may be `None`; check `if x is not None:` first, or get the `{inner}` with `.unwrap()`"
+                    );
+                    Some(optional_help.as_str())
+                }
                 TyKind::Enum(_) => {
                     Some("enum values have no fields to read directly; use `match` to get at a variant's fields")
                 }

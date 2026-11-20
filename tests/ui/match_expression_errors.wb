@@ -1,0 +1,21 @@
+# What a `match` expression needs: every case covered, one type for the values, the value on the
+# case's own line, and a place that is a whole assignment or `return`.
+enum Color:
+    Red
+    Green
+    Blue
+
+def name(c: Color) -> str:
+    return match c:
+        case Red: "red"
+        case Green: "green"
+
+def mixed(n: int) -> str:
+    label = match n:
+        case 1: "one"
+        case 2: 2
+        case _: "many"
+    return label
+
+def main():
+    pass

@@ -20,6 +20,7 @@
 mod builtins;
 mod closures;
 mod concurrency;
+mod consts;
 mod expr;
 mod generics;
 mod http;
@@ -357,8 +358,9 @@ struct ParamSig {
 }
 
 struct ConstInfo {
-    /// `None` when the constant's own definition had an error.
+    /// `None` when the constant's own definition had an error, or it has not been checked yet.
     value: Option<hir::Expr>,
+    state: consts::ConstState,
 }
 
 /// A top-level function declared in the first pass, whose signature is resolved later.
@@ -456,6 +458,8 @@ struct Checker<'a, 'm> {
     /// For method calls: which implemented traits provide a method of this name for this type.
     trait_methods: HashMap<(Ty, String), Vec<(TraitId, usize)>>,
     consts: Vec<ConstInfo>,
+    /// The constants being checked, innermost last, to show the chain when one uses itself.
+    const_stack: Vec<usize>,
     struct_items: Vec<(StructId, &'m ast::StructDecl)>,
     enum_items: Vec<(EnumId, &'m ast::EnumDecl)>,
     trait_items: Vec<(TraitId, &'m ast::TraitDecl)>,
@@ -670,24 +674,35 @@ fn closest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<
     let limit = (name.chars().count() / 3).max(1);
     candidates
         .filter(|candidate| *candidate != name)
-        .map(|candidate| (edit_distance(name, candidate), candidate))
+        // Case is ignored, so `Strr` and `Name` find `str` and `name`.
+        .map(|candidate| (edit_distance(&name.to_lowercase(), &candidate.to_lowercase()), candidate))
         .filter(|(distance, _)| *distance <= limit)
         .min()
         .map(|(_, candidate)| candidate)
 }
 
+/// Edit distance counting a swap of two neighbouring characters as one change, since that is
+/// the commonest typo (`nmae` for `name`).
 fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut current = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let substitution = previous[j] + usize::from(ca != *cb);
-            current.push(substitution.min(previous[j + 1] + 1).min(current[j] + 1));
-        }
-        previous = current;
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut table = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in table.iter_mut().enumerate() {
+        row[0] = i;
     }
-    previous[b.len()]
+    for (j, cell) in table[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut best = (table[i - 1][j - 1] + cost).min(table[i - 1][j] + 1).min(table[i][j - 1] + 1);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(table[i - 2][j - 2] + 1);
+            }
+            table[i][j] = best;
+        }
+    }
+    table[a.len()][b.len()]
 }
 
 impl<'a, 'm> Checker<'a, 'm> {
@@ -709,6 +724,7 @@ impl<'a, 'm> Checker<'a, 'm> {
             impl_index: HashMap::new(),
             trait_methods: HashMap::new(),
             consts: Vec::new(),
+            const_stack: Vec::new(),
             struct_items: Vec::new(),
             enum_items: Vec::new(),
             trait_items: Vec::new(),

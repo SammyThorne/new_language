@@ -1,0 +1,7 @@
+# `print` takes `sep`, `end` and `flush`; not `file`, and not twice.
+def main():
+    print("a", file=1)
+    print("a", color="red")
+    print("a", sep="", sep="-")
+    print("a", end=1)
+    print("a", flush="yes")

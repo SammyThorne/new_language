@@ -6,7 +6,7 @@
 //! `match` is exhaustive when a wildcard would not be useful after all its unguarded cases, and a
 //! case is unreachable when it is not useful after the cases before it.
 
-use super::{Checker, FnCx, Global, plural};
+use super::{Checker, FnCx, Global, error_expr, plural};
 use crate::hir::{self, LocalId, PatternKind as K};
 use crate::types::{Ty, TyKind};
 use lang_diag::{Diagnostic, Span, codes};
@@ -184,18 +184,7 @@ impl Checker<'_, '_> {
     ) -> (Vec<hir::Stmt>, bool) {
         let subject = self.expr(cx, subject, None);
         let ty = subject.ty;
-        if matches!(self.types.kind(ty), TyKind::Dyn(_) | TyKind::SelfType(_)) {
-            let shown = self.display(ty);
-            self.error(
-                Diagnostic::error(
-                    codes::BAD_PATTERN,
-                    format!("cannot `match` on a `{shown}` trait object yet"),
-                    subject.span,
-                    "a trait object",
-                )
-                .with_help("call the trait's methods instead, or match on a concrete enum"),
-            );
-        }
+        self.check_match_subject(&subject);
         let before = cx.assigned.clone();
         let mut lowered = Vec::new();
         let mut states = Vec::new();
@@ -232,6 +221,129 @@ impl Checker<'_, '_> {
         // do, so the missing case is the only error, not also a missing `return`.
         let diverges = states.iter().all(|(_, d)| *d);
         (vec![hir::Stmt::Match { subject, cases: lowered }], diverges)
+    }
+
+    fn check_match_subject(&mut self, subject: &hir::Expr) {
+        if matches!(self.types.kind(subject.ty), TyKind::Dyn(_) | TyKind::SelfType(_)) {
+            let shown = self.display(subject.ty);
+            self.error(
+                Diagnostic::error(
+                    codes::BAD_PATTERN,
+                    format!("cannot `match` on a `{shown}` trait object yet"),
+                    subject.span,
+                    "a trait object",
+                )
+                .with_help("call the trait's methods instead, or match on a concrete enum"),
+            );
+        }
+    }
+
+    /// `label = match status:` with a value on each `case` line (docs/11, milestone 1.7). It
+    /// becomes a block holding a `match` statement whose cases store their value in a hidden
+    /// local, which the block then yields. The cases must be exhaustive. Their values take the
+    /// type the context expects, or else the first one's, as the two branches of `a if c else b`
+    /// do.
+    pub(super) fn match_expr(
+        &mut self,
+        cx: &mut FnCx,
+        subject: &ast::Expr,
+        cases: &[ast::Case],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> hir::Expr {
+        let subject = self.expr(cx, subject, None);
+        let ty = subject.ty;
+        self.check_match_subject(&subject);
+        let before = cx.assigned.clone();
+        let mut lowered = Vec::new();
+        let mut values: Vec<hir::Expr> = Vec::new();
+        let mut states = Vec::new();
+        let mut pattern_errors = false;
+        let mut first_type = None;
+        for case in cases {
+            cx.assigned = before.clone();
+            let mut bindings = Vec::new();
+            let pattern_start = self.diags.error_count();
+            let pattern = self.pattern(cx, &case.pattern, ty, &mut bindings);
+            pattern_errors |= self.diags.error_count() > pattern_start;
+            for local in bindings {
+                cx.set_assigned(local);
+            }
+            let guard = case.guard.as_ref().map(|g| self.condition(cx, g));
+            let ast::StmtKind::Expr(body) = &case.body[0].kind else { unreachable!("the parser gives one value") };
+            let value = self.expr(cx, body, expected.or(first_type));
+            if first_type.is_none() && value.ty != Ty::NONE && !is_panic(&value) {
+                first_type = Some(value.ty);
+            }
+            states.push(std::mem::take(&mut cx.assigned));
+            lowered.push(hir::MatchCase { pattern, guard, body: Vec::new() });
+            values.push(value);
+        }
+        let exhaustive = self.types.contains_error(ty) || pattern_errors || self.check_cases(&lowered, cases, ty, span);
+        cx.assigned = match states.split_first() {
+            None => before.clone(),
+            Some((first, rest)) => {
+                let merged = rest.iter().fold(first.clone(), |merged, state| super::stmt::merge(&merged, state));
+                if exhaustive { merged } else { super::stmt::merge(&merged, &before) }
+            }
+        };
+        if values.iter().any(|v| v.ty == Ty::ERROR) {
+            return error_expr(span);
+        }
+
+        // The type of the whole: a case that panics has no value, and one that is `None` makes
+        // the others optional.
+        let live: Vec<usize> = (0..values.len()).filter(|&i| !is_panic(&values[i])).collect();
+        let result_ty = match first_type {
+            None => expected.filter(|_| live.is_empty()).unwrap_or(Ty::NONE),
+            Some(first) => {
+                let others_fit = live.iter().all(|&i| self.types.fits(values[i].ty, first));
+                if others_fit {
+                    first
+                } else if let Some(e) = expected.filter(|e| live.iter().all(|&i| self.coercible(values[i].ty, *e))) {
+                    e
+                } else if live.iter().all(|&i| values[i].ty == Ty::NONE || self.types.fits(values[i].ty, first)) {
+                    self.types.option(first)
+                } else {
+                    let bad = *live.iter().find(|&&i| !self.types.fits(values[i].ty, first)).unwrap();
+                    let (a, b) = (self.display(first), self.display(values[bad].ty));
+                    let first_span = live.iter().map(|&i| &values[i]).find(|v| v.ty == first).unwrap().span;
+                    self.error(
+                        Diagnostic::error(
+                            codes::TYPE_MISMATCH,
+                            format!("the cases have different types, `{a}` and `{b}`"),
+                            values[bad].span,
+                            format!("this is `{b}`"),
+                        )
+                        .with_label(first_span, format!("this is `{a}`")),
+                    );
+                    return error_expr(span);
+                }
+            }
+        };
+
+        let temp = (result_ty != Ty::NONE).then(|| cx.temp(result_ty, span));
+        for (case, value) in lowered.iter_mut().zip(values) {
+            case.body = match temp {
+                Some(local) if !is_panic(&value) => {
+                    let value = self.coerce(value, result_ty, None);
+                    vec![hir::Stmt::Assign { place: hir::Place::Local(local), value }]
+                }
+                _ => vec![hir::Stmt::Expr(value)],
+            };
+        }
+        let result = match temp {
+            Some(local) => hir::Expr { kind: hir::ExprKind::Local(local), ty: result_ty, span },
+            None => hir::Expr { kind: hir::ExprKind::None, ty: Ty::NONE, span },
+        };
+        hir::Expr {
+            kind: hir::ExprKind::Block {
+                stmts: vec![hir::Stmt::Match { subject, cases: lowered }],
+                value: Box::new(result),
+            },
+            ty: result_ty,
+            span,
+        }
     }
 
     /// Report a non-exhaustive `match` and unreachable cases. Returns whether it is exhaustive.
@@ -563,4 +675,9 @@ impl Checker<'_, '_> {
             None => Some(cx.add_local(&name.name, ty, name.span, false)),
         }
     }
+}
+
+/// Whether an expression is a call to `panic`, which never gives a value.
+fn is_panic(expr: &hir::Expr) -> bool {
+    matches!(expr.kind, hir::ExprKind::Builtin { op: hir::Builtin::Panic, .. })
 }

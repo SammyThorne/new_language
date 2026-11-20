@@ -163,6 +163,42 @@ word: cherry
 
 The compiler also checks that every path through a function with a return type returns a value, that a variable is assigned on every path before it is read, and that no code follows a `return`.
 
+A block that is a single simple statement can sit on the line of its header. `del` removes a list element or a dict entry, and `print` takes `sep` and `end`.
+
+```python
+def clamp(n: int, low: int, high: int) -> int:
+    if n < low: return low
+    elif n > high: return high
+    else: return n
+
+def main():
+    print(clamp(-5, 0, 10), clamp(50, 0, 10), clamp(7, 0, 10))
+
+    total = 0
+    for n in range(1, 5): total += n
+    print("total", total)
+
+    items = [10, 20, 30, 40]
+    del items[1]
+    ages = {"ada": 36, "alan": 41}
+    del ages["alan"]
+    print(items, ages)
+
+    print("a", "b", "c", sep="-")
+    print("no newline", end="")
+    print(" ... then one")
+```
+
+```text
+0 10 7
+total 10
+[10, 30, 40] {'ada': 36}
+a-b-c
+no newline ... then one
+```
+
+Only a simple statement fits after the `:` (an expression, an assignment, `return`, `pass`, `break`, `continue`, `assert` or `del`); an `if` inside an `if` still needs its own indented block.
+
 ## 4. Functions
 
 Parameters have types, and so does the return value unless the function returns nothing. Parameters can have defaults and can be passed by keyword. Functions are values: their type is written `def(int) -> int`.
@@ -257,6 +293,23 @@ Hello World Hello, there
 3.14|   3.142|1,234,567|   1234567|00042|0xff|25.0%|**ab**
 ['first line', 'second line']
 42! 18
+```
+
+A string with an `r` in front is raw: backslashes stay as written, which suits Windows paths and patterns for `re`. In an f-string, `!r` shows a value as `repr` does, with a string's quotes, and a format spec after it pads that text.
+
+```python
+def main():
+    path = r"C:\temp\new"
+    print(path, len(path))
+    name = "ada"
+    print(f"{name!r} and {name!s} and {name!r:>7}|")
+    print([1, 2], f"{[1, 2]!r}")
+```
+
+```text
+C:\temp\new 11
+'ada' and ada and   'ada'|
+[1, 2] [1, 2]
 ```
 
 Indexing and slicing count characters, not bytes. For binary data there is a separate `bytes` type: `"héllo".encode()` gives one, and `data.decode()` turns it back into text if it is valid UTF-8.
@@ -516,6 +569,29 @@ Rect(width=2.0, height=3.0) 6.00
 Dot 0.00
 zero negative small big
 origin on an axis elsewhere
+```
+
+A `match` can also give a value. As the whole right-hand side of an assignment or a `return`, each `case` has its value on its own line, and the cases must cover everything.
+
+```python
+def label(code: int) -> str:
+    return match code:
+        case 200: "ok"
+        case 404: "not found"
+        case _: "other"
+
+def main():
+    print(label(200), label(404), label(500))
+    n = 7
+    parity = match n % 2:
+        case 0: "even"
+        case _: "odd"
+    print(n, parity)
+```
+
+```text
+ok not found other
+7 odd
 ```
 
 Patterns can be literals, variants with their fields, tuples, `_` for anything, a name that binds the value, alternatives joined by `|`, and a guard written `if`. Variants are usually written bare (`Circle(1.0)`) and can be qualified (`Shape.Circle(1.0)`) where two enums share a variant name.
@@ -1281,7 +1357,7 @@ import re
 import time
 
 def main():
-    date = re.compile("(?P<year>\\d{4})-(?P<month>\\d{2})").unwrap()
+    date = re.compile(r"(?P<year>\d{4})-(?P<month>\d{2})").unwrap()
     m = date.find("due 2026-11-18").unwrap()
     print(m.text, m.named("year"), m.group(2).unwrap())
     print(date.replace_all("2026-11 and 2027-01", "$month/$year"))
@@ -1303,7 +1379,7 @@ def main():
 slept at least 10 ms: True
 ```
 
-`re` has the usual Perl-style syntax, including named groups, but no backreferences or lookaround. That is what lets it guarantee matching in time linear in the text, so a pattern can't make a server spin. A compiled `re.Regex` can be shared between tasks. Patterns are ordinary strings, so backslashes are doubled.
+`re` has the usual Perl-style syntax, including named groups, but no backreferences or lookaround. That is what lets it guarantee matching in time linear in the text, so a pattern can't make a server spin. A compiled `re.Regex` can be shared between tasks. Patterns are ordinary strings, so a raw string, `r"\d+"`, saves doubling the backslashes.
 
 `log` writes one line per message to standard error, with a UTC timestamp and the level: `debug`, `info`, `warn` or `error`. The default level is `info`. `log.set_level` changes it, as does the `WEBY_LOG` environment variable.
 

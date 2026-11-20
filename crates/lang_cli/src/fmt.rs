@@ -114,7 +114,9 @@ fn scan(text: &str) -> Option<Vec<Line>> {
                 }
                 let word = &text[start..i];
                 // A string prefix: `f"..."`.
-                if matches!(word, "f" | "F" | "b" | "r") && matches!(bytes.get(i), Some(b'"' | b'\'')) {
+                if matches!(word.to_ascii_lowercase().as_str(), "f" | "b" | "r" | "rb" | "br" | "rf" | "fr")
+                    && matches!(bytes.get(i), Some(b'"' | b'\''))
+                {
                     let end = string_end(bytes, i)?;
                     pieces.push(Piece::Str(text[start..end].to_string()));
                     i = end;
@@ -406,6 +408,13 @@ mod tests {
             "@http.get('/a', status=201)\ndef g() -> str?:\n    pass\n",
         );
         check("if not x and -y>2 :\n\tpass\n".replace('\t', "    ").as_str(), "if not x and -y > 2:\n    pass\n");
+    }
+
+    #[test]
+    fn one_line_blocks_stay_on_one_line() {
+        check("if x>0:   return 1\nelse:return 2\n", "if x > 0: return 1\nelse: return 2\n");
+        check("def f():\n  for i in xs:total+=i\n", "def f():\n    for i in xs: total += i\n");
+        check("match v:\n  case 1:pass\n  case _ :print(v)\n", "match v:\n    case 1: pass\n    case _: print(v)\n");
     }
 
     /// Every source file in the repository: formatting keeps its tokens and is idempotent.

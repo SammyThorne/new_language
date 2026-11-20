@@ -294,7 +294,7 @@ The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real socke
 | [docs/web-performance.md](docs/web-performance.md) | What a web service can do: throughput, latency, CPU per request, memory |
 | [docs/optimization-handoff.md](docs/optimization-handoff.md) | State of the performance work and open leads, for planning the next round |
 | [docs/10-final-optimization-plan.md](docs/10-final-optimization-plan.md) | The final optimisation pass: evidence, five milestones, what is left out and why |
-| [docs/11-release-polish-plan.md](docs/11-release-polish-plan.md) | The language and compiler work before release: gaps found by probing, five milestones (not yet started) |
+| [docs/11-release-polish-plan.md](docs/11-release-polish-plan.md) | The language and compiler work before release: gaps found by probing, five milestones (milestone 1 done) |
 | [editors/README.md](editors/README.md) | Editor support and the language server |
 
 The name "Weby" and the `.wb` extension may still change. The name is kept out of crate names and runtime symbols and lives in one small crate of constants, so it can be changed later with a short checklist ([docs/03-compiler-architecture.md](docs/03-compiler-architecture.md#renaming-the-language)).

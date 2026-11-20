@@ -1,0 +1,5 @@
+# After `!r` the spec applies to text, so a number format is refused.
+def main():
+    x = 1
+    print(f"{x!r:.2f}")
+    print(f"{x!r:>5}")

@@ -1,0 +1,55 @@
+error[E0102]: `del n` is not supported
+ --> tests/ui/del_errors.wb:5:9
+  |
+5 |     del n
+  |         ^ not supported
+  |
+  = help: a variable cannot be removed; leave it alone, or reassign it
+
+error[E0102]: `del` cannot remove a slice
+ --> tests/ui/del_errors.wb:6:9
+  |
+6 |     del xs[0:1]
+  |         ^^^^^^^ not supported
+  |
+  = help: build the list without those elements, for example `xs = xs[:a] + xs[b:]`
+
+error[E0102]: `del` cannot remove a field
+ --> tests/ui/del_errors.wb:7:9
+  |
+7 |     del xs.size
+  |         ^^^^^^^ not supported
+  |
+  = help: a struct's fields always exist; give an optional field `None` instead
+
+error[E0300]: expected `int`, found `str`
+ --> tests/ui/del_errors.wb:8:12
+  |
+8 |     del xs["a"]
+  |            ^^^ expected `int`, found `str`
+
+error[E0320]: `del` cannot remove an element of `int`
+ --> tests/ui/del_errors.wb:9:9
+  |
+9 |     del n[0]
+  |         ^^^^ has type `int`
+  |
+  = help: only lists and dicts have elements to remove
+
+error[E0320]: `del` cannot remove an element of `tuple[int, int]`
+  --> tests/ui/del_errors.wb:11:9
+   |
+11 |     del t[0]
+   |         ^^^^ has type `tuple[int, int]`
+   |
+   = help: this value cannot be changed after it is made
+
+error[E0102]: `del` needs a list element or a dict entry
+  --> tests/ui/del_errors.wb:12:9
+   |
+12 |     del 5
+   |         ^ not supported
+   |
+   = help: write `del xs[i]` or `del d[key]`
+
+error: could not compile `tests/ui/del_errors.wb` due to 7 errors

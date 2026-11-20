@@ -1,0 +1,7 @@
+# Only `!r` and `!s` are f-string conversions; a spec after `!r` applies to the text.
+def main():
+    x = 1
+    print(f"{x!a}")
+    print(f"{x!q}")
+    print(f"{x!}")
+    print(f"{x!rr}")

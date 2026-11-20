@@ -272,6 +272,18 @@ pub unsafe extern "C-unwind" fn lrt_builder_print(b: *mut Builder) {
     crate::out::write(unsafe { builder(b) }.bytes());
 }
 
+/// Write the builder's text to standard output, and flush it when `flush` is not zero.
+///
+/// # Safety
+/// `b` must be a live builder from `lrt_builder_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_builder_print_flush(b: *mut Builder, flush: i64) {
+    crate::out::write(unsafe { builder(b) }.bytes());
+    if flush != 0 {
+        crate::out::flush();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

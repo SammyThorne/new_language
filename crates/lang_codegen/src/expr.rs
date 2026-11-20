@@ -186,15 +186,24 @@ impl<'ctx> Codegen<'ctx, '_> {
                 for part in parts {
                     match part {
                         FPart::Literal(text) => self.push_text(builder, text),
-                        FPart::Value { expr, spec: None } => {
+                        FPart::Value { expr, spec: None, repr } => {
                             let value = self.expr(expr);
-                            self.push_value(builder, expr.ty, value, false);
+                            self.push_value(builder, expr.ty, value, *repr);
                         }
-                        FPart::Value { expr, spec: Some(spec) } => {
-                            let value = self.value(expr);
+                        FPart::Value { expr, spec: Some(spec), repr } => {
+                            let value = if *repr {
+                                // The text `repr` gives, which the spec then pads like a string.
+                                let text = self.builder_new();
+                                let shown = self.expr(expr);
+                                self.push_value(text, expr.ty, shown, true);
+                                self.call_rt("lrt_builder_finish", &[text.into()]).unwrap()
+                            } else {
+                                self.value(expr)
+                            };
+                            let ty = if *repr { Ty::STR } else { expr.ty };
                             let spec = self.str_const(spec);
                             let [spec_ptr, spec_len] = self.str_parts(spec.into());
-                            match expr.ty {
+                            match ty {
                                 Ty::INT => self.call_rt(
                                     "lrt_builder_push_format_int",
                                     &[builder.into(), value, spec_ptr, spec_len],

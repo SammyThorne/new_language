@@ -126,7 +126,7 @@ impl<'m> Checker<'_, 'm> {
                         continue;
                     }
                     let index = self.consts.len();
-                    self.consts.push(ConstInfo { value: None });
+                    self.consts.push(ConstInfo { value: None, state: super::consts::ConstState::Pending });
                     self.globals.insert(decl.name.name.clone(), (Global::Const(index), decl.name.span));
                     self.export(&decl.name, Global::Const(index), decl.visibility);
                     self.const_items.push((index, decl));
@@ -1144,43 +1144,6 @@ impl<'m> Checker<'_, 'm> {
     }
 
     // ---- constants, defaults, main ------------------------------------------------------
-
-    pub(super) fn check_consts(&mut self) {
-        for (index, decl) in self.const_items.clone() {
-            self.enter_module(self.module_of(decl.name.span));
-            let mut cx = FnCx::detached();
-            let literal = match &decl.value.kind {
-                ast::ExprKind::Int(_) | ast::ExprKind::Float(_) | ast::ExprKind::Str(_) | ast::ExprKind::Bool(_) => {
-                    true
-                }
-                ast::ExprKind::Unary { op: ast::UnaryOp::Neg, operand } => {
-                    matches!(operand.kind, ast::ExprKind::Int(_) | ast::ExprKind::Float(_))
-                }
-                _ => false,
-            };
-            if !literal {
-                self.error(
-                    Diagnostic::error(
-                        codes::CONST_NOT_LITERAL,
-                        format!("the value of constant `{}` must be a literal", decl.name.name),
-                        decl.value.span,
-                        "not a literal",
-                    )
-                    .with_help("use a number, string or `True`/`False`; computed constants are not supported yet"),
-                );
-                continue;
-            }
-            let value = match &decl.ty {
-                Some(hint) => {
-                    let ty = self.resolve_value_type(hint);
-                    let reason = Some((hint.span, "expected because of this type hint".to_string()));
-                    self.expect(&mut cx, &decl.value, ty, reason)
-                }
-                None => self.expr(&mut cx, &decl.value, None),
-            };
-            self.consts[index].value = Some(value);
-        }
-    }
 
     pub(super) fn check_field_defaults(&mut self) {
         for (id, decl) in self.struct_items.clone() {

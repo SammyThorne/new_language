@@ -921,8 +921,12 @@ impl Parser<'_> {
 
     // ---- statements ---------------------------------------------------------------------
 
-    /// `NEWLINE INDENT stmt+ DEDENT`, after the `:` has been consumed.
+    /// A block, after the `:` has been consumed: either `NEWLINE INDENT stmt+ DEDENT`, or one
+    /// simple statement on the same line (`if done: return`).
     fn block(&mut self) -> PResult<Vec<Stmt>> {
+        if !self.at(&TokenKind::Newline) {
+            return self.inline_block();
+        }
         self.block_start()?;
         let mut stmts = Vec::new();
         loop {
@@ -943,6 +947,37 @@ impl Parser<'_> {
             }
         }
         Ok(stmts)
+    }
+
+    /// The body of a block written on the line of its header: one simple statement. A compound
+    /// statement, which needs a block of its own, has to go on the following lines.
+    fn inline_block(&mut self) -> PResult<Vec<Stmt>> {
+        let kind = self.peek().clone();
+        let compound = matches!(
+            kind,
+            TokenKind::If
+                | TokenKind::While
+                | TokenKind::For
+                | TokenKind::With
+                | TokenKind::Match
+                | TokenKind::Def
+                | TokenKind::Elif
+                | TokenKind::Else
+                | TokenKind::Case
+        );
+        if compound {
+            let span = self.error_span();
+            return Err(self.error(
+                format!("{} cannot follow `:` on the same line", kind.describe()),
+                span,
+                "starts a block of its own",
+                Some("put it on the following lines, indented; only a single simple statement fits after `:`"),
+            ));
+        }
+        if matches!(kind, TokenKind::Eof | TokenKind::Dedent | TokenKind::Indent) {
+            return Err(self.unexpected("expected a statement after `:`"));
+        }
+        Ok(vec![self.statement()?])
     }
 
     /// `assert cond` or `assert cond, message`, which mean
@@ -974,6 +1009,11 @@ impl Parser<'_> {
         let kind = match self.peek().clone() {
             TokenKind::Return => {
                 self.bump();
+                if self.at(&TokenKind::Match) {
+                    let value = self.match_expr()?;
+                    let span = start.to(value.span);
+                    return Ok(Stmt { kind: StmtKind::Return(Some(value)), span });
+                }
                 let value = if self.at_line_end() { None } else { Some(self.expr_list()?) };
                 let span = start.to(self.prev_span());
                 self.end_of_statement()?;
@@ -1011,6 +1051,13 @@ impl Parser<'_> {
                 StmtKind::Pass
             }
             TokenKind::Assert => return self.assert_stmt(),
+            TokenKind::Del => {
+                self.bump();
+                let target = self.expr()?;
+                let span = start.to(self.prev_span());
+                self.end_of_statement()?;
+                return Ok(Stmt { kind: StmtKind::Del(target), span });
+            }
             kind @ (TokenKind::Elif | TokenKind::Else) => {
                 return Err(self.error(
                     format!("{} without a matching `if`", kind.describe()),
@@ -1100,6 +1147,9 @@ impl Parser<'_> {
         self.expect(TokenKind::Colon, "after the value being matched")?;
         self.block_start()?;
         let mut cases = Vec::new();
+        // Whether a line inside the block was already reported, so that an empty list of cases
+        // is not reported a second time.
+        let mut reported = false;
         loop {
             match self.peek() {
                 TokenKind::Dedent => {
@@ -1112,15 +1162,22 @@ impl Parser<'_> {
                 }
                 TokenKind::Case => match self.case() {
                     Ok(case) => cases.push(case),
-                    Err(Reported) => self.skip_statement(),
+                    Err(Reported) => {
+                        reported = true;
+                        self.skip_statement();
+                    }
                 },
                 _ => {
                     self.unexpected("expected `case`");
+                    reported = true;
                     self.skip_statement();
                 }
             }
         }
         if cases.is_empty() {
+            if reported {
+                return Err(Reported);
+            }
             return Err(self.error("a `match` needs at least one `case`", header, "no cases", None));
         }
         Ok(Stmt { kind: StmtKind::Match { subject, cases }, span: header })
@@ -1239,6 +1296,85 @@ impl Parser<'_> {
         Ok(pattern)
     }
 
+    /// What follows `=` or `return`: an expression list ending the statement, or a `match`
+    /// expression, which ends with its indented block instead.
+    fn value_of_statement(&mut self) -> PResult<Expr> {
+        if self.at(&TokenKind::Match) {
+            return self.match_expr();
+        }
+        let value = self.expr_list()?;
+        self.end_of_statement()?;
+        Ok(value)
+    }
+
+    /// `match subject:` and a block of `case pattern: value` lines, one value per case.
+    fn match_expr(&mut self) -> PResult<Expr> {
+        let start = self.bump().span;
+        let subject = self.expr_list()?;
+        let header = start.to(self.prev_span());
+        self.expect(TokenKind::Colon, "after the value being matched")?;
+        self.block_start()?;
+        let mut cases = Vec::new();
+        let mut reported = false;
+        let mut end = header;
+        loop {
+            match self.peek() {
+                TokenKind::Dedent => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => break,
+                TokenKind::Newline => {
+                    self.bump();
+                }
+                TokenKind::Case => match self.case_value() {
+                    Ok((case, span)) => {
+                        end = span;
+                        cases.push(case);
+                    }
+                    Err(Reported) => {
+                        reported = true;
+                        self.skip_statement();
+                    }
+                },
+                _ => {
+                    self.unexpected("expected `case`");
+                    reported = true;
+                    self.skip_statement();
+                }
+            }
+        }
+        if cases.is_empty() {
+            if reported {
+                return Err(Reported);
+            }
+            return Err(self.error("a `match` needs at least one `case`", header, "no cases", None));
+        }
+        Ok(Expr { kind: ExprKind::Match { subject: Box::new(subject), cases }, span: start.to(end) })
+    }
+
+    /// `case pattern: value` of a `match` expression, with the value as the case's only statement.
+    fn case_value(&mut self) -> PResult<(Case, Span)> {
+        self.bump();
+        let pattern = self.pattern()?;
+        let guard = if self.eat(&TokenKind::If) { Some(self.expr()?) } else { None };
+        self.expect(TokenKind::Colon, "after the pattern")?;
+        if self.at(&TokenKind::Newline) {
+            let span = self.error_span();
+            return Err(self.error(
+                "a `match` expression's case needs its value on the same line",
+                span,
+                "expected a value",
+                Some("write `case pattern: value`; use a `match` statement for cases with several statements"),
+            ));
+        }
+        let value = self.expr()?;
+        let span = value.span;
+        self.end_of_statement()?;
+        let body = vec![Stmt { kind: StmtKind::Expr(value), span }];
+        Ok((Case { pattern, guard, body }, span))
+    }
+
     fn annotated_assignment(&mut self) -> PResult<Stmt> {
         let name = self.expect_name("a variable name")?;
         self.bump(); // `:`
@@ -1255,9 +1391,8 @@ impl Parser<'_> {
             return Err(self.unexpected("expected `=`"));
         }
         self.bump();
-        let value = self.expr_list()?;
+        let value = self.value_of_statement()?;
         let span = name.span.to(value.span);
-        self.end_of_statement()?;
         let target = Target { span: name.span, kind: TargetKind::Name(name) };
         Ok(Stmt { kind: StmtKind::Assign { target, ty: Some(ty), value }, span })
     }
@@ -1292,6 +1427,11 @@ impl Parser<'_> {
         if self.at(&TokenKind::Assign) {
             self.bump();
             let target = self.target_from(lhs)?;
+            if self.at(&TokenKind::Match) {
+                let value = self.match_expr()?;
+                let span = target.span.to(value.span);
+                return Ok(Stmt { kind: StmtKind::Assign { target, ty: None, value }, span });
+            }
             let value = self.expr_list()?;
             if self.at(&TokenKind::Assign) {
                 let span = self.span();
@@ -1666,6 +1806,14 @@ impl Parser<'_> {
                 return Ok(Expr { kind: ExprKind::Dict(pairs), span: span.to(close) });
             }
             TokenKind::Spawn => return Err(self.not_supported("`spawn` is", span)),
+            TokenKind::Match => {
+                return Err(self.error(
+                    "a `match` expression can only be the whole value of an assignment or a `return`",
+                    span,
+                    "not allowed here",
+                    Some("assign it first: `label = match x:` with a `case pattern: value` on each line"),
+                ));
+            }
             _ => return Err(self.unexpected("expected an expression")),
         };
         self.bump();
@@ -1697,7 +1845,7 @@ impl Parser<'_> {
         for piece in pieces {
             match piece {
                 FPiece::Literal(text) => parts.push(FStringPart::Literal(text)),
-                FPiece::Code { text, offset, spec } => {
+                FPiece::Code { text, offset, spec, conversion } => {
                     let tokens = lex_fragment(span.file, &text, offset, self.diags);
                     let mut sub = Parser { tokens: &tokens, pos: 0, line_start: offset as u32, diags: self.diags };
                     let expr = match sub.expr() {
@@ -1716,7 +1864,7 @@ impl Parser<'_> {
                         let len = text.len();
                         (text, Span::new(span.file, at, at + len))
                     });
-                    parts.push(FStringPart::Expr { expr, spec });
+                    parts.push(FStringPart::Expr { expr, spec, conversion });
                 }
             }
         }
@@ -1779,6 +1927,7 @@ mod tests {
             }
             ExprKind::Unary { op, operand } => format!("({} {})", op.symbol(), show(operand)),
             ExprKind::Binary { op, lhs, rhs } => format!("({} {} {})", show(lhs), op.symbol(), show(rhs)),
+            ExprKind::Match { subject, cases } => format!("match {} [{} cases]", show(subject), cases.len()),
             ExprKind::IfElse { cond, then, otherwise } => {
                 format!("({} if {} else {})", show(then), show(cond), show(otherwise))
             }
@@ -1849,6 +1998,95 @@ impl Named for Shape:
         let Item::Impl(imp) = &module.items[2] else { panic!() };
         assert_eq!(imp.trait_name.as_ref().unwrap().name, "Named");
         assert_eq!(imp.target.name, "Shape");
+    }
+
+    #[test]
+    fn one_line_blocks() {
+        let text = "\
+def f(x: int) -> int:
+    if x > 0: return 1
+    elif x < 0: return -1
+    else: return 0
+
+def g():
+    for i in range(3): total += i
+    while n > 0: n -= 1
+    with m.lock() as v: v += 1
+    match x:
+        case 1: pass
+        case _: print(x)
+    if a: assert b, \"msg\"
+    if a: y: int = 2
+    while True: break
+    for i in xs: continue
+";
+        let (module, diags) = parse_text(text);
+        assert!(diags.is_empty(), "{:?}", codes_of(&diags));
+        let StmtKind::If { branches, otherwise } = &function(&module, 0).body[0].kind else { panic!() };
+        assert_eq!(branches.len(), 2);
+        assert!(branches.iter().all(|(_, body)| body.len() == 1));
+        assert!(otherwise.as_ref().is_some_and(|body| body.len() == 1));
+        let body = &function(&module, 1).body;
+        assert!(matches!(body[0].kind, StmtKind::For { .. }));
+        let StmtKind::Match { cases, .. } = &body[3].kind else { panic!() };
+        assert_eq!(cases.len(), 2);
+        assert!(cases.iter().all(|c| c.body.len() == 1));
+    }
+
+    #[test]
+    fn match_as_an_expression() {
+        let text = "\
+def f(x: int) -> str:
+    a = match x:
+        case 1: \"one\"
+        case n if n > 5: \"big\"
+        case _: \"other\"
+    b: str = match x:
+        case _: \"z\"
+    return match x:
+        case 1 | 2: \"low\"
+        case _: a
+";
+        let (module, diags) = parse_text(text);
+        assert!(diags.is_empty(), "{:?}", codes_of(&diags));
+        let body = &function(&module, 0).body;
+        let StmtKind::Assign { value, .. } = &body[0].kind else { panic!() };
+        let ExprKind::Match { cases, .. } = &value.kind else { panic!() };
+        assert_eq!(cases.len(), 3);
+        assert!(cases[1].guard.is_some());
+        assert!(matches!(&cases[0].body[0].kind, StmtKind::Expr(_)));
+        assert!(matches!(&body[1].kind, StmtKind::Assign { ty: Some(_), .. }));
+        let StmtKind::Return(Some(value)) = &body[2].kind else { panic!() };
+        assert!(matches!(value.kind, ExprKind::Match { .. }));
+    }
+
+    #[test]
+    fn match_expression_errors() {
+        for (text, expected) in [
+            ("def f():\n    print(match x:\n        case 1: 2)\n", 1),
+            ("def f():\n    y = match x:\n        case 1:\n            2\n", 1),
+            ("def f():\n    y = match x:\n    z = 1\n", 1),
+        ] {
+            let (_, diags) = parse_text(text);
+            assert!(!diags.is_empty(), "{text:?}");
+            assert_eq!(diags.sorted().len().min(expected), expected, "{text:?}: {:?}", codes_of(&diags));
+        }
+    }
+
+    #[test]
+    fn compound_statement_after_a_colon_is_an_error() {
+        for text in [
+            "def f():\n    if a: if b: pass\n",
+            "def f():\n    if a: for i in xs: pass\n",
+            "def f():\n    if a: else: pass\n",
+            "def f():\n    match x:\n        case 1: case 2: pass\n",
+        ] {
+            let (_, diags) = parse_text(text);
+            assert_eq!(codes_of(&diags), ["E0100"], "{text:?}");
+        }
+        // A failed case does not also report an empty `match`.
+        let (_, diags) = parse_text("def f():\n    match x:\n        case 1: if a: pass\n");
+        assert_eq!(codes_of(&diags), ["E0100"]);
     }
 
     #[test]

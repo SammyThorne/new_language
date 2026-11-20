@@ -1,0 +1,35 @@
+# `del xs[i]` and `del d[key]` (docs/11, milestone 1.3).
+# expect: [1, 3, 4]
+# expect: [1, 3]
+# expect: [3]
+# expect: {'a': 1, 'c': 3}
+# expect: 2 {1: 'x'}
+# expect: grid [[1, 2], [4]]
+# expect: user dict {'name': 'x'}
+# expect: gone
+# expect-exit: 101
+# expect-stderr: panic: key 'z' is not in the dict
+def main():
+    xs = [1, 2, 3, 4]
+    del xs[1]
+    print(xs)
+    del xs[-1]
+    print(xs)
+    del xs[0]
+    print(xs)
+    d = {"a": 1, "b": 2, "c": 3}
+    del d["b"]
+    print(d)
+    ints = {1: "x", 2: "y"}
+    del ints[2]
+    print(len(ints) + 1, ints)
+    grid = [[1, 2, 3], [4, 5]]
+    del grid[0][2]
+    del grid[1][1]
+    print("grid", grid)
+    nested = {"user": {"name": "x", "age": "3"}}
+    del nested["user"]["age"]
+    print("user dict", nested["user"])
+    if "b" not in d:
+        print("gone")
+    del d["z"]

@@ -14,7 +14,16 @@ use lang_format::{Kind, Spec};
 use lang_syntax::ast;
 
 /// Built-in functions from the design that are not implemented yet.
-const PLANNED_FUNCTIONS: &[&str] = &["open", "input", "map", "filter", "reversed", "set"];
+/// Python functions this language does not have yet or has in another form, and what to write.
+fn planned_function_help(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "open" => "open a file with `io.open(path)` after `import io`; it gives a `Result`",
+        "map" => "use a list comprehension: `[f(x) for x in items]`",
+        "filter" => "use a list comprehension with a condition: `[x for x in items if keep(x)]`",
+        "reversed" | "set" => "`{name}` is not available yet",
+        _ => return None,
+    })
+}
 
 fn mk(kind: hir::ExprKind, ty: Ty, span: Span) -> hir::Expr {
     hir::Expr { kind, ty, span }
@@ -220,6 +229,7 @@ impl Checker<'_, '_> {
             ast::ExprKind::Unary { op, operand } => self.unary(cx, *op, operand, span, expected),
             ast::ExprKind::Binary { op, lhs, rhs } => self.binary(cx, *op, lhs, rhs, span),
             ast::ExprKind::IfElse { cond, then, otherwise } => self.if_else(cx, cond, then, otherwise, span, expected),
+            ast::ExprKind::Match { subject, cases } => self.match_expr(cx, subject, cases, span, expected),
             ast::ExprKind::Try(inner) => self.try_expr(cx, inner, span),
             ast::ExprKind::Lambda { params, body } => self.lambda(cx, params, body, expected, span),
             ast::ExprKind::Spawn(call) => self.spawn_expr(cx, call, span),
@@ -476,7 +486,9 @@ impl Checker<'_, '_> {
             "false" => Some("did you mean `False`?".to_string()),
             "null" | "nil" | "none" => Some("did you mean `None`?".to_string()),
             "self" => Some("`self` is only available in methods that take it as their first parameter".to_string()),
-            planned if PLANNED_FUNCTIONS.contains(&planned) => Some(format!("`{planned}` is not available yet")),
+            planned if planned_function_help(planned).is_some() => {
+                Some(planned_function_help(planned).unwrap().replace("{name}", planned))
+            }
             _ => {
                 let candidates = cx
                     .scope
@@ -1381,6 +1393,8 @@ impl Checker<'_, '_> {
         let mut values: Vec<Option<hir::Expr>> = vec![None; fields.len()];
         let mut positional = 0;
         let mut seen_keyword = false;
+        // Fields a misspelt name was probably meant for, whose absence is not reported again.
+        let mut meant: Vec<&str> = Vec::new();
         for arg in args {
             let index = match &arg.name {
                 None => {
@@ -1425,6 +1439,7 @@ impl Checker<'_, '_> {
                         .with_label(owner_span, format!("`{owner}` is defined here"));
                         if let Some(s) = super::closest(&name.name, fields.iter().map(|f| f.name.as_str())) {
                             diagnostic = diagnostic.with_help(format!("did you mean `{s}`?"));
+                            meant.push(s);
                         }
                         self.error(diagnostic);
                         self.expr(cx, &arg.value, None);
@@ -1453,6 +1468,7 @@ impl Checker<'_, '_> {
             .zip(&values)
             .filter(|(field, value)| value.is_none() && field.default.is_none())
             .map(|(field, _)| field.name.as_str())
+            .filter(|name| !meant.contains(name))
             .collect();
         if !missing.is_empty() {
             let list = missing.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", ");
@@ -1466,6 +1482,10 @@ impl Checker<'_, '_> {
                 )
                 .with_label(owner_span, format!("`{owner}` is defined here")),
             );
+            return None;
+        }
+        // A field left out for a misspelt name has already been reported, with the likely fix.
+        if !meant.is_empty() && values.iter().zip(fields).any(|(v, f)| v.is_none() && f.default.is_none()) {
             return None;
         }
         Some(
@@ -1861,8 +1881,8 @@ impl Checker<'_, '_> {
         for part in parts {
             match part {
                 ast::FStringPart::Literal(text) => out.push(hir::FPart::Literal(text.clone())),
-                ast::FStringPart::Expr { expr, spec } => {
-                    let value = self.expr(cx, expr, None);
+                ast::FStringPart::Expr { expr, spec, conversion } => {
+                    let mut value = self.expr(cx, expr, None);
                     if value.ty == Ty::ERROR {
                         continue;
                     }
@@ -1870,10 +1890,18 @@ impl Checker<'_, '_> {
                         self.not_displayable(value.ty, value.span);
                         continue;
                     }
+                    let repr = *conversion == Some('r');
+                    // `!s` makes a string first, which a spec then applies to; without a spec
+                    // it changes nothing.
+                    if *conversion == Some('s') && spec.is_some() && value.ty != Ty::STR {
+                        let span = value.span;
+                        value = mk(K::Builtin { op: hir::Builtin::ToStr, args: vec![value] }, Ty::STR, span);
+                    }
                     let spec = match spec {
                         None => None,
                         Some((text, spec_span)) => {
                             let kind = match value.ty {
+                                _ if repr => Some(Kind::Str),
                                 Ty::INT => Some(Kind::Int),
                                 Ty::FLOAT => Some(Kind::Float),
                                 Ty::STR => Some(Kind::Str),
@@ -1899,7 +1927,7 @@ impl Checker<'_, '_> {
                             Some(text.clone())
                         }
                     };
-                    out.push(hir::FPart::Value { expr: value, spec });
+                    out.push(hir::FPart::Value { expr: value, spec, repr });
                 }
             }
         }
@@ -2398,7 +2426,7 @@ impl Checker<'_, '_> {
         mk(K::IfElse { cond: Box::new(cond), then: Box::new(then), otherwise: Box::new(otherwise) }, ty, span)
     }
 
-    fn coercible(&self, from: Ty, to: Ty) -> bool {
+    pub(super) fn coercible(&self, from: Ty, to: Ty) -> bool {
         self.types.fits(from, to)
             || self.types.option_inner(to).is_some_and(|inner| from == Ty::NONE || self.types.fits(from, inner))
     }

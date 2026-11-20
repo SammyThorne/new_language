@@ -13,11 +13,12 @@ pub enum FPiece {
     Literal(String),
     /// The source text of `{expression}` and the byte offset in the file where it starts, so
     /// the parser can lex and parse it with correct positions. `spec` is the text after `:`, with
-    /// its offset.
+    /// its offset. `conversion` is the letter of `!r` or `!s`.
     Code {
         text: String,
         offset: usize,
         spec: Option<(String, usize)>,
+        conversion: Option<char>,
     },
 }
 
@@ -45,6 +46,7 @@ pub enum TokenKind {
     Const,
     Continue,
     Def,
+    Del,
     Elif,
     Else,
     Enum,
@@ -124,6 +126,7 @@ pub fn keyword(word: &str) -> Option<TokenKind> {
         "break" => Break,
         "case" => Case,
         "const" => Const,
+        "del" => Del,
         "continue" => Continue,
         "def" => Def,
         "elif" => Elif,
@@ -172,6 +175,7 @@ impl TokenKind {
             Const => "const",
             Continue => "continue",
             Def => "def",
+            Del => "del",
             Elif => "elif",
             Else => "else",
             Enum => "enum",

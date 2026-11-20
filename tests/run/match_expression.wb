@@ -1,0 +1,81 @@
+# `match` as the value of an assignment or a `return` (docs/11, milestone 1.7).
+# expect: ok not found other
+# expect: 3 -2 zero
+# expect: circle 3.0 square 4.0
+# expect: found 5 none
+# expect: big small
+# expect: 11 20
+# expect: [1, 2] []
+# expect: short
+# expect: yes
+@derive(Display)
+enum Shape:
+    Circle(r: float)
+    Square(s: float)
+
+def label(code: int) -> str:
+    return match code:
+        case 200: "ok"
+        case 404: "not found"
+        case _: "other"
+
+def sign(n: int) -> int:
+    return match n:
+        case 0: 0
+        case x if x > 0: 1
+        case _: -1
+
+def describe(s: Shape) -> str:
+    text = match s:
+        case Circle(r): f"circle {r * 3.0 / 3.0}"
+        case Square(side): f"square {side}"
+    return text
+
+def lookup(d: dict[str, int], key: str) -> str:
+    found = match d.get(key):
+        case Some(v): f"found {v}"
+        case None: "none"
+    return found
+
+def size(n: int) -> str:
+    kind: str = match n > 100:
+        case True: "big"
+        case False: "small"
+    return kind
+
+def maybe(n: int) -> list[int]:
+    result: list[int] = match n:
+        case 0: []
+        case _: [n, n + 1]
+    return result
+
+def parse(s: str) -> int:
+    value = match int.parse(s):
+        case Ok(v): v
+        case Err(_): panic("bad number")
+    return value
+
+def pair(a: int, b: int) -> str:
+    return match (a, b):
+        case (0, 0): "zero"
+        case (x, 0) | (0, x): f"axis {x}"
+        case _: "plane"
+
+def main():
+    print(f"{label(200)} {label(404)} {label(1)}")
+    print(f"{sign(7) * 3} {sign(-4) * 2} {pair(0, 0)}")
+    print(f"{describe(Shape.Circle(3.0))} {describe(Shape.Square(4.0))}")
+    ages = {"a": 5}
+    print(f"{lookup(ages, 'a')} {lookup(ages, 'b')}")
+    print(f"{size(500)} {size(5)}")
+    print(f"{parse('11')} {parse('20')}")
+    print(f"{maybe(1)} {maybe(0)}")
+    n = 3
+    width = match n:
+        case 1 | 2 | 3: "short"
+        case _: "long"
+    print(width)
+    flag: bool = match "a":
+        case "a": True
+        case _: False
+    print("yes" if flag else "no")

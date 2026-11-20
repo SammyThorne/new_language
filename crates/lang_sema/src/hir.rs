@@ -447,6 +447,9 @@ pub enum FPart {
     Value {
         expr: Expr,
         spec: Option<String>,
+        /// `{x!r}`: the value as `repr` shows it, with a string's quotes. A spec then applies to
+        /// that text as it would to a string.
+        repr: bool,
     },
 }
 
@@ -504,6 +507,9 @@ pub enum BinaryOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Builtin {
     Print,
+    /// `print(values..., sep=..., end=..., flush=...)`: the values, then the separator (`str`),
+    /// the ending (`str`) and whether to flush (`bool`), which are always present.
+    PrintWith,
     Panic,
     Len,
     /// `str(x)`
@@ -542,6 +548,8 @@ pub enum Builtin {
     DictGet,
     DictGetOr,
     DictPop,
+    /// `del d[key]`: removes the entry, and panics if the key is absent.
+    DictDelete,
     DictKeys,
     DictValues,
     DictItems,

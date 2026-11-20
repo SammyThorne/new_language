@@ -190,7 +190,7 @@ impl<'a> Lexer<'a> {
         } else if c.is_ascii_digit() {
             self.number(start);
         } else if c == '"' || c == '\'' {
-            let value = self.string(start);
+            let value = self.string(start, false);
             self.push(TokenKind::Str(value), start, self.pos);
         } else {
             self.punctuation(start, c);
@@ -207,28 +207,38 @@ impl<'a> Lexer<'a> {
         }
         let word = &self.text[start..self.pos];
 
-        // String prefixes: `f"..."`, and the unsupported `b"..."`, `r"..."` and combinations.
+        // String prefixes: `f"..."` and `r"..."`, and the unsupported `b"..."` and combinations.
         if matches!(self.byte(0), Some(b'"' | b'\'')) && matches!(word, "f" | "F") {
             let pieces = self.fstring(start);
             self.push(TokenKind::FString(pieces), start, self.pos);
             return;
         }
+        if matches!(self.byte(0), Some(b'"' | b'\'')) && matches!(word, "r" | "R") {
+            let value = self.string(start, true);
+            self.push(TokenKind::Str(value), start, self.pos);
+            return;
+        }
         if matches!(self.byte(0), Some(b'"' | b'\''))
-            && matches!(word.to_ascii_lowercase().as_str(), "b" | "r" | "rb" | "br" | "fr" | "rf")
+            && matches!(word.to_ascii_lowercase().as_str(), "b" | "rb" | "br" | "fr" | "rf")
         {
-            let what = match word.to_ascii_lowercase().as_str() {
-                "fr" | "rf" => "raw f-strings are",
-                "b" | "rb" | "br" => "bytes literals are",
-                _ => "raw strings are",
+            let lower = word.to_ascii_lowercase();
+            let (what, help) = match lower.as_str() {
+                "fr" | "rf" => {
+                    ("raw f-strings are", "write the text as a raw string and join the values to it with `+`")
+                }
+                _ => ("bytes literals are", "make bytes from text with `\"...\".encode()`"),
             };
             let prefix_span = self.span(start, self.pos);
-            self.diags.push(Diagnostic::error(
-                codes::NOT_SUPPORTED_SYNTAX,
-                format!("{what} not supported yet"),
-                prefix_span,
-                "string prefix",
-            ));
-            let value = self.string(self.pos);
+            self.diags.push(
+                Diagnostic::error(
+                    codes::NOT_SUPPORTED_SYNTAX,
+                    format!("{what} not supported yet"),
+                    prefix_span,
+                    "string prefix",
+                )
+                .with_help(help),
+            );
+            let value = self.string(start, lower.contains('r'));
             self.push(TokenKind::Str(value), start, self.pos);
             return;
         }
@@ -319,8 +329,10 @@ impl<'a> Lexer<'a> {
     }
 
     /// Lex a string literal starting at the opening quote under `self.pos`. `start` is where the
-    /// whole literal, including any prefix, begins.
-    fn string(&mut self, start: usize) -> String {
+    /// whole literal, including any prefix, begins. In a `raw` string a backslash is an ordinary
+    /// character, except that it keeps a quote or backslash after it from ending the string or
+    /// pairing off: `r"a\"b"` is `a\"b` and `r"\\"` is two backslashes.
+    fn string(&mut self, start: usize, raw: bool) -> String {
         let quote = self.byte(0).unwrap();
         let triple = self.byte(1) == Some(quote) && self.byte(2) == Some(quote);
         let open_len = if triple { 3 } else { 1 };
@@ -337,6 +349,14 @@ impl<'a> Lexer<'a> {
                 b'\n' if !triple => {
                     self.unterminated(open_span);
                     return value;
+                }
+                b'\\' if raw => {
+                    value.push('\\');
+                    self.pos += 1;
+                    if let Some(next @ (b'\\' | b'"' | b'\'')) = self.byte(0) {
+                        value.push(next as char);
+                        self.pos += 1;
+                    }
                 }
                 b'\\' => self.escape(&mut value),
                 _ if b == quote => {
@@ -444,6 +464,8 @@ impl<'a> Lexer<'a> {
         let mut depth = 0usize;
         let mut in_string: Option<u8> = None;
         let mut spec_start = None;
+        // `!r` or `!s` after the expression: where the expression ends, and the letter.
+        let mut conversion: Option<(usize, char)> = None;
         while let Some(b) = self.byte(0) {
             if b == b'\n' && !triple {
                 break;
@@ -487,13 +509,23 @@ impl<'a> Lexer<'a> {
                     spec_start = Some(self.pos + 1);
                 }
                 b'!' if depth == 0 && self.byte(1) != Some(b'=') => {
-                    let span = self.span(self.pos, self.pos + 1);
-                    self.diags.push(Diagnostic::error(
-                        codes::NOT_SUPPORTED_SYNTAX,
-                        "conversions such as `!r` in f-strings are not supported yet",
-                        span,
-                        "not supported yet",
-                    ));
+                    let letter = self.byte(1).map(char::from);
+                    if matches!(letter, Some('r' | 's')) && matches!(self.byte(2), Some(b':' | b'}')) {
+                        conversion = Some((self.pos, letter.unwrap()));
+                        self.pos += 2;
+                        continue;
+                    }
+                    let span = self.span(self.pos, self.pos + if letter.is_some() { 2 } else { 1 });
+                    let (message, help) = match letter {
+                        Some('a') => (
+                            "the `!a` conversion is not supported",
+                            "use `!r`, which shows a string with quotes, as `repr` does",
+                        ),
+                        _ => ("unknown conversion in an f-string", "the conversions are `!r` and `!s`"),
+                    };
+                    self.diags.push(
+                        Diagnostic::error(codes::NOT_SUPPORTED_SYNTAX, message, span, "not supported").with_help(help),
+                    );
                     return None;
                 }
                 _ => {}
@@ -512,7 +544,7 @@ impl<'a> Lexer<'a> {
             );
             return None;
         }
-        let code_end = spec_start.map_or(self.pos, |s| s - 1);
+        let code_end = conversion.map(|(at, _)| at).unwrap_or_else(|| spec_start.map_or(self.pos, |s| s - 1));
         let text = self.text[code_start..code_end].to_string();
         let spec = spec_start.map(|s| (self.text[s..self.pos].to_string(), self.base + s));
         self.pos += 1;
@@ -525,7 +557,7 @@ impl<'a> Lexer<'a> {
             ));
             return None;
         }
-        Some(FPiece::Code { text, offset: self.base + code_start, spec })
+        Some(FPiece::Code { text, offset: self.base + code_start, spec, conversion: conversion.map(|(_, c)| c) })
     }
 
     fn unterminated(&mut self, open_span: Span) {
@@ -785,6 +817,25 @@ mod tests {
     }
 
     #[test]
+    fn raw_strings_keep_their_backslashes() {
+        assert_eq!(ok(r#"r"\d+\s" R'a\nb'"#), r#"Str("\\d+\\s") Str("a\\nb") NEWLINE EOF"#);
+        // A backslash before the quote keeps both characters and does not end the string.
+        assert_eq!(ok(r#"r"a\"b""#), r#"Str("a\\\"b") NEWLINE EOF"#);
+        // A pair of backslashes stays a pair and leaves the quote to end the string.
+        assert_eq!(ok(r#"r"\\""#), r#"Str("\\\\") NEWLINE EOF"#);
+        assert_eq!(ok("r\"\"\"x\\ny\"\"\""), r#"Str("x\\ny") NEWLINE EOF"#);
+        // `r` is still an ordinary name when no quote follows.
+        assert_eq!(ok("r + b"), "Name(r) + Name(b) NEWLINE EOF");
+        let (_, diags) = kinds(r#"r"open\""#);
+        assert_eq!(diags.sorted()[0].code, codes::UNTERMINATED_STRING);
+        // The other prefixes are still refused, with advice.
+        for text in [r#"b"x""#, r#"rb"x""#, r#"rf"x""#] {
+            let (_, diags) = kinds(text);
+            assert_eq!(diags.sorted()[0].code, codes::NOT_SUPPORTED_SYNTAX, "{text}");
+        }
+    }
+
+    #[test]
     fn operators_use_longest_match() {
         assert_eq!(ok("a //= b ** c -> d != e"), "Name(a) //= Name(b) ** Name(c) -> Name(d) != Name(e) NEWLINE EOF");
     }
@@ -804,9 +855,9 @@ mod tests {
             pieces,
             &[
                 FPiece::Literal("a".into()),
-                FPiece::Code { text: "x + 1".into(), offset: 4, spec: None },
+                FPiece::Code { text: "x + 1".into(), offset: 4, spec: None, conversion: None },
                 FPiece::Literal("b{}".into()),
-                FPiece::Code { text: "y".into(), offset: 16, spec: Some((">5".into(), 18)) },
+                FPiece::Code { text: "y".into(), offset: 16, spec: Some((">5".into(), 18)), conversion: None },
             ]
         );
         let (_, diags) = kinds("f\"{x\"");

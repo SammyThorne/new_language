@@ -1,0 +1,17 @@
+error[E0100]: `for` cannot follow `:` on the same line
+ --> tests/ui/one_line_compound.wb:5:15
+  |
+5 |     if x > 0: for i in range(3): print(i)
+  |               ^^^ starts a block of its own
+  |
+  = help: put it on the following lines, indented; only a single simple statement fits after `:`
+
+error[E0100]: `if` cannot follow `:` on the same line
+ --> tests/ui/one_line_compound.wb:7:17
+  |
+7 |         case 1: if x > 0: print(x)
+  |                 ^^ starts a block of its own
+  |
+  = help: put it on the following lines, indented; only a single simple statement fits after `:`
+
+error: could not compile `tests/ui/one_line_compound.wb` due to 2 errors

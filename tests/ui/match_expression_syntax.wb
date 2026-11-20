@@ -1,0 +1,13 @@
+# A `match` expression's case has its value on the same line, and the whole expression is
+# the value of an assignment or a `return`.
+def next_line(n: int) -> str:
+    label = match n:
+        case 1:
+            "one"
+        case _: "many"
+    return label
+
+def elsewhere(n: int):
+    print(match n:
+        case 1: "one"
+        case _: "many")

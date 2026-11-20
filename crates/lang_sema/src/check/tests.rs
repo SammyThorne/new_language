@@ -305,5 +305,9 @@ def main():
 fn suggestions() {
     assert_eq!(closest("prnt", ["print", "main"].into_iter()), Some("print"));
     assert_eq!(closest("xyz", ["print"].into_iter()), None);
+    // A swapped pair is one change, and case does not count.
+    assert_eq!(closest("nmae", ["name", "age"].into_iter()), Some("name"));
+    assert_eq!(closest("Strr", ["str", "int"].into_iter()), Some("str"));
+    assert_eq!(closest("Name", ["name"].into_iter()), Some("name"));
     assert_eq!(edit_distance("kitten", "sitting"), 3);
 }
