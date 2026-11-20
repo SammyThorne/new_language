@@ -39,7 +39,7 @@ As of 2026-11-20.
 
 | Milestone | State | Notes |
 |---|---|---|
-| M0 | Done | Workspace, runtime, LLVM object emission, linking, end-to-end test harness. Continuous integration is not set up, because the repository has no remote yet |
+| M0 | Done | Workspace, runtime, LLVM object emission, linking, end-to-end test harness. Continuous integration runs the tests, lints and stress programs on GitHub (`.github/workflows/ci.yml`) |
 | M1 | Done | Everything listed below, with `float` formatted exactly as CPython does. The first benchmark is recorded in [bench/README.md](../bench/README.md) |
 | M2 | Done | Everything listed below. Gate 1 passed. Sets were not in the milestone and are not included |
 | M3 | Done | Everything listed below, with two differences. `match` is compiled as a test per case in order, not as a decision tree (D31). `Option` and `Result` behave as enums in `match`, `?` and their methods, but stay built into the compiler until generics exist (M4) |

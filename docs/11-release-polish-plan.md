@@ -545,7 +545,7 @@ Panic backtraces must still name the program's functions and lines (there is a t
 
 ### Done
 
-Carried out on 2026-11-20 as D95 in [08](08-decisions-and-risks.md). 5.1, 5.3, 5.4 (the unused import warning), 5.5 (with `weby explain`), 5.6 and 5.7 are done. 5.2 (preemption) was built as a prototype, measured at 25% on `sieve` against a limit of 2%, and dropped; the second warning of 5.4 (unused private functions) was not attempted, because the route adapters call user functions from generated source. The executable size item went further than hoped, 4.4 MB to 0.5 MB, because the program's own debug information is 5 KB and the rest comes from the runtime archive. The two decisions for the owner, the version number and continuous integration, are not taken: see 5.7.
+Carried out on 2026-11-20 as D95 in [08](08-decisions-and-risks.md). 5.1, 5.3, 5.4 (the unused import warning), 5.5 (with `weby explain`), 5.6 and 5.7 are done. 5.2 (preemption) was built as a prototype, measured at 25% on `sieve` against a limit of 2%, and dropped; the second warning of 5.4 (unused private functions) was not attempted, because the route adapters call user functions from generated source. The executable size item went further than hoped, 4.4 MB to 0.5 MB, because the program's own debug information is 5 KB and the rest comes from the runtime archive. The two decisions for the owner were then taken: the version became 1.0.0 and `.github/workflows/ci.yml` was added (tests, lints and a short stress run; the benchmark checks compare against numbers recorded on one machine, so they stay a local step).
 
 ### Exit criteria
 

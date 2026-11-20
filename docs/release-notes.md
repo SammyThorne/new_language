@@ -1,6 +1,6 @@
 # Release notes
 
-The first release of Weby, a compiled, Python-shaped language for web backends. `weby --version` reports 0.1.0. This page says what the language has, what it does not, and how to install it. The state of each part, with the reasoning behind the choices, is in the [roadmap](06-roadmap.md) and the [decision log](08-decisions-and-risks.md); [Weby by example](examples.md) teaches the language, and every program in it is compiled and run by the test suite.
+The first release of Weby, a compiled, Python-shaped language for web backends. `weby --version` reports 1.0.0. This page says what the language has, what it does not, and how to install it. The state of each part, with the reasoning behind the choices, is in the [roadmap](06-roadmap.md) and the [decision log](08-decisions-and-risks.md); [Weby by example](examples.md) teaches the language, and every program in it is compiled and run by the test suite.
 
 ## What the language has
 

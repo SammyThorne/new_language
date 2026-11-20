@@ -1,0 +1,58 @@
+# Continuous integration: every push to main and every pull request builds the compiler and
+# runtime, runs every test (unit tests, the tests/run programs in all five modes, the tests/ui
+# golden files, the guide's examples, the HTTP servers) and the lints, and runs the concurrency
+# stress programs. The benchmark checks (bench/run.py --check, bench/http/counts.py --check) are
+# not run here: they compare against numbers recorded on one machine and need pinned cores.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  LLVM_SYS_191_PREFIX: /usr/lib/llvm-19
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 19, the Boehm collector and a C compiler
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | sudo tee /etc/apt/sources.list.d/llvm19.list
+          sudo apt-get update
+          sudo apt-get install -y build-essential llvm-19-dev libgc1 libpolly-19-dev libzstd-dev binutils
+
+      - name: Check the tools
+        run: make check-deps
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting and lints
+        run: make lint
+
+      - name: Build
+        run: make debug
+
+      - name: Tests
+        run: make test
+
+      - name: Stress the concurrency programs
+        run: make stress RUNS=100
