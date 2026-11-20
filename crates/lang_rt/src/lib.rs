@@ -15,6 +15,7 @@ pub mod builder;
 pub mod bytes;
 pub mod client;
 pub mod dict;
+pub mod docs;
 pub mod fiber;
 pub mod gc;
 pub mod http;

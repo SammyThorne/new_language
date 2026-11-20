@@ -60,6 +60,12 @@ def respond_raw(handle: int, status: int, content_type: str, headers: str, body:
 @extern("lrt_io_error")
 def last_error() -> str
 
+@extern("lrt_docs_asset")
+def docs_asset(index: int) -> str
+
+@extern("lrt_docs_hash")
+def docs_hash(text: str) -> int
+
 @extern("lrt_http_client")
 def client_raw(method: str, url: str, headers: str, body: str) -> int
 
@@ -675,14 +681,19 @@ impl Server:
         version: str = "0.1.0",
         description: str = "",
         servers: list[str] = [],
+        ui: bool = True,
+        try_it_out: bool = True,
         hide_ws: bool = True,
     ):
         """
-        Serve an OpenAPI 3.1 description of this server's routes at `path + "/openapi.json"`
-        and `path + "/openapi.yaml"`. It is built from the routes' types, annotations and
-        docstrings when first asked for, so `docs` can come before or after `mount`. `servers`
-        are the base URLs listed in it; WebSocket endpoints are listed only with
-        `hide_ws=False`. The routes go through the server's middleware like any other.
+        Serve an API documentation page at `path`, and the OpenAPI 3.1 description it shows
+        at `path + "/openapi.json"` and `path + "/openapi.yaml"`. The description is built from
+        the routes' types, annotations and docstrings when first asked for, so `docs` can come
+        before or after `mount`. `servers` are the base URLs listed in it (and the one "Try it
+        out" sends to; by default the page's own). `ui=False` serves only the description;
+        `try_it_out=False` makes the page read-only. WebSocket endpoints are listed only with
+        `hide_ws=False`. The routes go through the server's middleware like any other, so
+        protect them as you would the API.
         """
         base = path
         while base.ends_with("/"):
@@ -691,6 +702,25 @@ impl Server:
         server = self
         self.docs_route(base + "/openapi.json", lambda req: Ok(server.openapi_reply(False)))
         self.docs_route(base + "/openapi.yaml", lambda req: Ok(server.openapi_reply(True)))
+        if not ui:
+            return
+        page_text = (
+            docs_asset(0)
+            .replace("{{base}}", html_escape(base))
+            .replace("{{openapi_url}}", html_escape(base + "/openapi.json"))
+            .replace("{{try_it_out}}", "true" if try_it_out else "false")
+            .replace("{{title}}", html_escape(title))
+        )
+        page = docs_file(page_text, "text/html; charset=utf-8", True)
+        css = docs_file(docs_asset(1), "text/css; charset=utf-8", False)
+        core = docs_file(docs_asset(2), "text/javascript; charset=utf-8", False)
+        viewer = docs_file(docs_asset(3), "text/javascript; charset=utf-8", False)
+        if base != "":
+            self.docs_route(base, lambda req: Ok(serve_docs_file(page, req)))
+        self.docs_route(base + "/", lambda req: Ok(serve_docs_file(page, req)))
+        self.docs_route(base + "/viewer.css", lambda req: Ok(serve_docs_file(css, req)))
+        self.docs_route(base + "/core.js", lambda req: Ok(serve_docs_file(core, req)))
+        self.docs_route(base + "/viewer.js", lambda req: Ok(serve_docs_file(viewer, req)))
 
     def openapi_json(
         self,
@@ -727,10 +757,10 @@ impl Server:
                 case None:
                     pass
         if not yaml:
-            return Response(200, self.docs_json, "application/json")
+            return Response(200, self.docs_json, "application/json").with_header("Cache-Control", "no-cache")
         if self.docs_yaml == "":
             self.docs_yaml = yaml_of_json(self.docs_json)
-        return Response(200, self.docs_yaml, "application/yaml")
+        return Response(200, self.docs_yaml, "application/yaml").with_header("Cache-Control", "no-cache")
 
     def document(self, settings: DocsSettings) -> str:
         """The OpenAPI document, as JSON text, joined from what `mount` recorded. Call-style
@@ -827,6 +857,39 @@ impl Group:
         return nested
 
 # ---- API documentation --------------------------------------------------------------------
+
+struct DocsFile:
+    """A file of the documentation page, with its `ETag`."""
+    body: str
+    content_type: str
+    etag: str
+    # The page itself, which gets the security headers.
+    page: bool
+
+def docs_file(body: str, content_type: str, page: bool) -> DocsFile:
+    return DocsFile(body, content_type, f"\"{docs_hash(body)}\"", page)
+
+def serve_docs_file(file: DocsFile, req: Request) -> Response:
+    """The file, or `304 Not Modified` when the browser has this version. Browsers check each
+    time (`no-cache`), so a server with a newer viewer is never stuck behind an old one."""
+    response = Response(200, file.body, file.content_type)
+    match req.header("If-None-Match"):
+        case Some(tags):
+            if tags.contains(file.etag):
+                response = Response(304, "", "")
+        case None:
+            pass
+    response.headers["ETag"] = file.etag
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if file.page:
+        # No inline script or style; requests from "Try it out" may go to any server listed.
+        response.headers["Content-Security-Policy"] = "default-src 'self'; connect-src *; img-src 'self' data:"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+def html_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
 
 # The methods an OpenAPI path item can have, each between spaces.
 const OPENAPI_METHODS = " get put post delete options head patch trace "

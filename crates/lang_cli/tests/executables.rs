@@ -66,6 +66,47 @@ fn backtraces_still_name_the_programs_functions() {
     }
 }
 
+/// A phrase of the documentation viewer's script, to find out whether a program carries it.
+const VIEWER_MARK: &[u8] = b"Filter by path, method, summary or tag";
+
+fn build_release(source: &PathBuf, output: &PathBuf) {
+    let status =
+        Command::new(compiler()).arg("build").arg("--release").arg(source).arg("-o").arg(output).status().unwrap();
+    assert!(status.success());
+}
+
+fn carries_viewer(program: &PathBuf) -> bool {
+    std::fs::read(program).unwrap().windows(VIEWER_MARK.len()).any(|w| w == VIEWER_MARK)
+}
+
+#[test]
+fn only_programs_that_serve_documentation_carry_the_viewer() {
+    common::build_runtime();
+    let root = common::repo_root();
+    // Optimised, a server that does not call `docs` leaves the viewer's files out: LLVM drops the
+    // unused `docs` code, and then `--gc-sections` the runtime's assets.
+    let bench = scratch("bench_server");
+    build_release(&root.join(format!("bench/http/server.{SOURCE_EXTENSION}")), &bench);
+    assert!(!carries_viewer(&bench), "the benchmark server carries the documentation viewer");
+
+    // The todo service serves it, at a cost of under 100 KB against the same service without.
+    let source = std::fs::read_to_string(root.join(format!("tests/http/todo_annotations.{SOURCE_EXTENSION}"))).unwrap();
+    let docs_call = source.lines().find(|l| l.contains("server.docs(")).expect("the todo service calls `docs`");
+    let without_source = scratch(&format!("todo_plain.{SOURCE_EXTENSION}"));
+    std::fs::write(&without_source, source.replace(docs_call, "")).unwrap();
+    let (with, without) = (scratch("todo_docs"), scratch("todo_plain"));
+    build_release(&root.join(format!("tests/http/todo_annotations.{SOURCE_EXTENSION}")), &with);
+    build_release(&without_source, &without);
+    assert!(carries_viewer(&with), "the todo service does not carry the viewer");
+    assert!(!carries_viewer(&without));
+    // With the optimised runtime the documentation costs 101 KB (44 KB of it the viewer's files);
+    // the tests link the unoptimised one, whose string and dictionary code is larger, and it
+    // costs 169 KB. The bound catches the files or the document code being carried twice.
+    let (with_size, without_size) =
+        (std::fs::metadata(&with).unwrap().len(), std::fs::metadata(&without).unwrap().len());
+    assert!(with_size < without_size + 220_000, "{with_size} bytes with the documentation, {without_size} without");
+}
+
 #[test]
 fn explain_prints_a_section_of_the_reference() {
     let ok = Command::new(compiler()).args(["explain", "e0300"]).output().unwrap();

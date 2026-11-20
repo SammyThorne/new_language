@@ -199,5 +199,40 @@ fn todo_service_documents_itself() {
             }
         }
     }
+
+    // The page and its files: each with its type, a validator, and the security headers on the
+    // page; a browser that has the current version gets `304`.
+    let page = request(&mut stream, &mut reader, "GET", "/docs", None);
+    assert_eq!((page.status, page.header("content-type")), (200, Some("text/html; charset=utf-8")));
+    let policy = page.header("content-security-policy").unwrap_or("");
+    assert!(policy.contains("default-src 'self'") && !policy.contains("unsafe-inline"), "{policy}");
+    assert_eq!(page.header("referrer-policy"), Some("no-referrer"));
+    assert!(page.body.contains("<title>Todo API · API documentation</title>"), "{}", page.body);
+    assert!(page.body.contains(r#"<meta name="openapi-url" content="/docs/openapi.json">"#));
+    assert!(!page.body.contains("{{"), "a placeholder is left: {}", page.body);
+    let slash = request(&mut stream, &mut reader, "GET", "/docs/", None);
+    assert_eq!(slash.body, page.body);
+    for (path, content_type) in [
+        ("/docs", "text/html; charset=utf-8"),
+        ("/docs/viewer.css", "text/css; charset=utf-8"),
+        ("/docs/core.js", "text/javascript; charset=utf-8"),
+        ("/docs/viewer.js", "text/javascript; charset=utf-8"),
+    ] {
+        let file = request(&mut stream, &mut reader, "GET", path, None);
+        assert_eq!((file.status, file.header("content-type")), (200, Some(content_type)), "{path}");
+        assert!(!file.body.is_empty(), "{path}");
+        assert_eq!(file.header("cache-control"), Some("no-cache"), "{path}");
+        assert_eq!(file.header("x-content-type-options"), Some("nosniff"), "{path}");
+        let etag = file.header("etag").unwrap_or_else(|| panic!("{path} has no ETag")).to_string();
+        assert!(etag.starts_with('"') && etag.ends_with('"'), "{path}: {etag}");
+        let again = format!("GET {path} HTTP/1.1\r\nHost: test\r\nIf-None-Match: {etag}\r\n\r\n");
+        stream.write_all(again.as_bytes()).unwrap();
+        let cached = read_response(&mut reader, false);
+        assert_eq!((cached.status, cached.body.as_str()), (304, ""), "{path}");
+        assert_eq!(cached.header("etag"), Some(etag.as_str()), "{path}");
+        let stale = format!("GET {path} HTTP/1.1\r\nHost: test\r\nIf-None-Match: \"1\"\r\n\r\n");
+        stream.write_all(stale.as_bytes()).unwrap();
+        assert_eq!(read_response(&mut reader, false).status, 200, "{path}");
+    }
     server.stop(program);
 }

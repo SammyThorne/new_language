@@ -5,7 +5,12 @@
 # expect: 200 application/yaml openapi: "3.1.0"
 # expect: ping default
 # expect: after: 2
-# expect: 404 not found
+# expect: 200 text/html; charset=utf-8 True True
+# expect: page: <meta name="openapi-url" content="/api-docs/openapi.json">
+# expect: page: <meta name="try-it-out" content="false">
+# expect: page: <title>&quot;Notes&quot; &lt;script&gt;&amp; · API documentation</title>
+# expect: 200 text/javascript; charset=utf-8 True
+# expect: no page: 404
 import http
 import json
 
@@ -36,7 +41,11 @@ def main():
     server = http.Server()
     server.mount(Notes())
     server.get("/ping", lambda req: Ok(http.text("pong")))
-    server.docs("/api-docs/", title="Notes", version="2.0")
+    # A title the page must escape.
+    title = '"Notes" <script>&'
+    server.docs("/api-docs/", title=title, version="2.0", try_it_out=False)
+    plain = http.Server()
+    plain.docs("/", ui=False)
 
     doc = json.parse(server.openapi_json(title="Notes", version="2.0")).unwrap()
     paths: list[str] = []
@@ -59,7 +68,7 @@ def main():
 
     # The routes `docs` added, with a trailing slash in its path ignored.
     served = server.handle(http.test_request("GET", "/api-docs/openapi.json"))
-    print(f"{served.status} {served.content_type} {served.body == server.openapi_json(title='Notes', version='2.0')}")
+    print(f"{served.status} {served.content_type} {served.body == server.openapi_json(title=title, version='2.0')}")
     yaml = server.handle(http.test_request("GET", "/api-docs/openapi.yaml"))
     print(f"{yaml.status} {yaml.content_type} {yaml.body.split('\n')[0]}")
     ping = json.parse(served.body).unwrap()["paths"]["/ping"]["get"]["responses"]
@@ -81,5 +90,12 @@ def main():
         case _:
             pass
     print(f"after: {late}")
-    missing = server.handle(http.test_request("GET", "/api-docs"))
-    print(f"{missing.status} {json.parse(missing.body).unwrap()['error'].as_str().unwrap()}")
+    page = server.handle(http.test_request("GET", "/api-docs"))
+    slash = server.handle(http.test_request("GET", "/api-docs/"))
+    print(f"{page.status} {page.content_type} {page.body == slash.body} {page.headers['Content-Security-Policy'].contains('default-src')}")
+    for line in page.body.split("\n"):
+        if line.starts_with("<title>") or line.starts_with("<meta name=\"openapi-url") or line.starts_with("<meta name=\"try"):
+            print(f"page: {line}")
+    script = server.handle(http.test_request("GET", "/api-docs/core.js"))
+    print(f"{script.status} {script.content_type} {script.body.contains('function markdown')}")
+    print(f"no page: {plain.handle(http.test_request('GET', '/')).status}")

@@ -962,6 +962,17 @@ Milestones 2 and 3 of the [OpenAPI plan](12-openapi-docs-plan.md), built and com
 
 **Limits.** A generic struct cannot be a handler's return or body type directly (the route checker runs before generic instances are set up; this predates the documentation) but can be a field. Field defaults are documented only when they are literals.
 
+### D98. The API documentation page: our own viewer, served from the runtime (OpenAPI plan, milestone 4)
+
+Milestone 4 of the [OpenAPI plan](12-openapi-docs-plan.md). `server.docs(...)` serves the page as well as the document unless it is given `ui=False`.
+
+**Four plain files, no build step.** `crates/lang_rt/assets/viewer/` holds the page template, a style sheet, `core.js` (everything that works something out: references, examples from schemas, the request a form describes, `curl` commands, the Markdown of descriptions, with no DOM so that `node --test` can test it) and `viewer.js` (the DOM). They are plain JavaScript and CSS with no framework, 44 KB in total. The page builds everything with DOM calls; the only HTML made from text is `markdown`'s, which escapes first and allows `http`, `https` and relative links only. "Try it out" sends with `fetch` to the document's first server, or the page's own origin. Credentials typed into "Authorize" stay in memory.
+
+**Served from the runtime.** `include_str!` puts the files in `lang_rt` (`docs.rs`), and the `http` module reaches them through `lrt_docs_asset(index)`, as strings that need no copy. Only `docs` calls it, so an optimised program that never calls `docs` has no reference to them, and `--gc-sections` leaves them out. `docs` fills the template's placeholders once (the title HTML-escaped, the document's URL, whether "Try it out" is shown), and hashes each file once for its `ETag`. Every response says `Cache-Control: no-cache`, so a browser revalidates and gets `304` while the file is unchanged, and an upgraded server is never shadowed by an old cached viewer. The page has no inline script or style, so its policy can be `default-src 'self'` (with `connect-src *` for "Try it out"); the template passes settings in `<meta>` tags instead.
+
+**Tested at three levels.** `core.test.js` (run when `node` is installed), HTTP tests of each file's headers and `304`, and, when an environment variable names a Chromium, a headless load that must build every operation without a script error. A manual script, `tests/http/docs_page_check.md`, covers what tests cannot see: the look, dark mode, phone width, the keyboard.
+
+**Cost.** 101 KB more in an optimised executable that serves documentation, nothing in one that does not. A request for a file allocates about 1 KB, for its headers.
 
 ## Risks
 
