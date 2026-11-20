@@ -1,0 +1,43 @@
+import http
+
+@frozen
+struct Api:
+    name: str
+
+impl Api:
+    @http.get("/a", tags="todos")
+    def tags_not_a_list(self) -> str:
+        return "a"
+
+    @http.get("/b", tags=["todos", 3])
+    def tags_not_strings(self) -> str:
+        return "b"
+
+    @http.get("/c", deprecated=1)
+    def deprecated_not_a_bool(self) -> str:
+        return "c"
+
+    @http.get("/d", errors=[404, 302])
+    def errors_not_error_statuses(self) -> str:
+        return "d"
+
+    @http.get("/e", errors=404)
+    def errors_not_a_list(self) -> str:
+        return "e"
+
+    @http.ws("/f", errors=[404])
+    def errors_on_a_websocket(self, ws: http.WebSocket):
+        pass
+
+    @http.get("/g", summary="no such keyword")
+    def unknown_keyword(self) -> str:
+        return "g"
+
+    @http.get("/ok", tags=["todos", "admin"], deprecated=True, errors=[409, 404, 404])
+    def fine(self) -> str:
+        """Everything here is accepted."""
+        return "ok"
+
+def main():
+    server = http.Server()
+    server.mount(Api("x"))

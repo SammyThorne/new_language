@@ -22,7 +22,7 @@ error[E0340]: parameter `ws` is a WebSocket, but this is not a WebSocket endpoin
    |
    = help: declare WebSocket endpoints with `@http.ws("/path")`
 
-error[E0340]: `@http.ws` takes a path
+error[E0340]: `@http.ws` takes a path and, optionally, `tags=` and `deprecated=`
   --> tests/ui/ws_errors.wb:15:16
    |
 15 | @http.ws("/d", status=101)

@@ -145,6 +145,7 @@ There is no reflection and no scanning at startup.
 |---|---|
 | `@http.get(path)`, `@http.post(path)`, `@http.put(path)`, `@http.patch(path)`, `@http.delete(path)` | On a function or a method: a route for that HTTP method and path. Paths support `{name}` segments and a trailing `{rest...}` wildcard |
 | `status=201` | Optional argument: the status for a successful response. The default is 200, or 204 when the handler returns nothing |
+| `tags=["todos"]`, `deprecated=True`, `errors=[404, 409]` | Optional arguments for the API documentation (docs/12): the operation's tags, whether it is deprecated, and the error statuses it can return besides the `400` the compiler generates. The handler's docstring gives the summary (its first paragraph) and the description (the rest). They change nothing about how requests are served |
 | `@http.ws(path)` | A WebSocket endpoint (below) |
 | `server.mount(value)` | Registers every annotated method of the value's type, bound to that value |
 | `server.mount(function)` | Registers one annotated function |

@@ -122,6 +122,19 @@ pub(super) struct Route {
     /// An `@http.ws` endpoint.
     ws: bool,
     span: Span,
+    /// What the documentation says about it (docs/12): `tags=`, `deprecated=`, `errors=`, and
+    /// the handler's docstring split into a summary line and the rest.
+    #[allow(dead_code)] // read by the OpenAPI generator (docs/12, milestone 2)
+    doc: RouteDoc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct RouteDoc {
+    pub tags: Vec<String>,
+    pub deprecated: bool,
+    pub errors: Vec<i64>,
+    pub summary: String,
+    pub description: String,
 }
 
 const ROUTE_METHODS: &[&str] = &["get", "post", "put", "patch", "delete"];
@@ -244,6 +257,7 @@ impl<'m> Checker<'_, 'm> {
         let method = if ws { "GET".to_string() } else { verb.to_ascii_uppercase() };
         let mut path = None;
         let mut status = None;
+        let mut doc = RouteDoc::default();
         for arg in &annotation.args {
             match (&arg.keyword, &arg.value) {
                 (None, ast::AnnotationValue::Str(text)) if path.is_none() => path = Some(text.clone()),
@@ -252,16 +266,76 @@ impl<'m> Checker<'_, 'm> {
                 {
                     status = Some(*code)
                 }
+                (Some(k), value) if k.name == "tags" => {
+                    let tags = match value {
+                        ast::AnnotationValue::List(items) => items
+                            .iter()
+                            .map(|item| match item {
+                                ast::AnnotationValue::Str(text) if !text.is_empty() => Some(text.clone()),
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>(),
+                        _ => None,
+                    };
+                    let Some(tags) = tags else {
+                        self.route_error(
+                            "`tags=` takes a list of strings",
+                            arg.span,
+                            "not a list of strings",
+                            Some("for example `tags=[\"todos\"]`"),
+                        );
+                        return None;
+                    };
+                    doc.tags = tags;
+                }
+                (Some(k), value) if k.name == "deprecated" => {
+                    let ast::AnnotationValue::Bool(flag) = value else {
+                        self.route_error(
+                            "`deprecated=` takes `True` or `False`",
+                            arg.span,
+                            "not a boolean",
+                            Some("for example `deprecated=True`"),
+                        );
+                        return None;
+                    };
+                    doc.deprecated = *flag;
+                }
+                (Some(k), value) if k.name == "errors" && !ws => {
+                    let errors = match value {
+                        ast::AnnotationValue::List(items) => items
+                            .iter()
+                            .map(|item| match item {
+                                ast::AnnotationValue::Int(code) if (400..600).contains(code) => Some(*code),
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>(),
+                        _ => None,
+                    };
+                    let Some(mut errors) = errors else {
+                        self.route_error(
+                            "`errors=` takes a list of error statuses, from 400 to 599",
+                            arg.span,
+                            "not a list of error statuses",
+                            Some("for example `errors=[404, 409]`"),
+                        );
+                        return None;
+                    };
+                    errors.sort_unstable();
+                    errors.dedup();
+                    doc.errors = errors;
+                }
                 _ => {
                     self.route_error(
                         if ws {
-                            "`@http.ws` takes a path"
+                            "`@http.ws` takes a path and, optionally, `tags=` and `deprecated=`"
                         } else {
-                            "a route annotation takes a path and, optionally, `status=`"
+                            "a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=` and `errors=`"
                         },
                         arg.span,
                         "not expected here",
-                        Some(if ws {
+                        Some(if arg.keyword.as_ref().is_some_and(|k| k.name == "summary" || k.name == "description") {
+                            "the summary and description come from the handler's docstring: its first line, and the rest"
+                        } else if ws {
                             "for example `@http.ws(\"/chat\")`"
                         } else {
                             "for example `@http.post(\"/todos\", status=201)`"
@@ -472,7 +546,10 @@ impl<'m> Checker<'_, 'm> {
             return None;
         };
         let handler = if is_method { Ok(function.name.name.clone()) } else { Err(func) };
-        Some(Route { method, path, status, handler, params, reply, fallible, ws, span })
+        if let Some(text) = docstring(function) {
+            (doc.summary, doc.description) = split_docstring(text);
+        }
+        Some(Route { method, path, status, handler, params, reply, fallible, ws, span, doc })
     }
 
     /// The `{name}` segments of a route path, after checking its syntax.
@@ -759,5 +836,69 @@ impl<'m> Checker<'_, 'm> {
             }
             _ => self.display(ty),
         }
+    }
+}
+
+/// A function's docstring: its first statement, if that is a plain string.
+fn docstring(function: &ast::Function) -> Option<&str> {
+    match &function.body.first()?.kind {
+        ast::StmtKind::Expr(ast::Expr { kind: ast::ExprKind::Str(text), .. }) => Some(text),
+        _ => None,
+    }
+}
+
+/// A docstring cleaned as Python's `inspect.cleandoc` does (leading blank lines and the common
+/// indentation of the lines after the first removed), then split into its first paragraph, joined
+/// into one line, and the rest.
+pub(super) fn split_docstring(text: &str) -> (String, String) {
+    let lines: Vec<&str> = text.lines().collect();
+    let indent = lines
+        .iter()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut cleaned: Vec<String> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index == 0 {
+            cleaned.push(line.trim().to_string());
+        } else if line.trim().is_empty() {
+            cleaned.push(String::new());
+        } else {
+            cleaned.push(line.get(indent..).unwrap_or(line.trim_start()).trim_end().to_string());
+        }
+    }
+    while cleaned.first().is_some_and(|l| l.is_empty()) {
+        cleaned.remove(0);
+    }
+    while cleaned.last().is_some_and(|l| l.is_empty()) {
+        cleaned.pop();
+    }
+    let blank = cleaned.iter().position(|l| l.is_empty()).unwrap_or(cleaned.len());
+    let summary = cleaned[..blank].iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+    let mut rest = &cleaned[blank..];
+    while rest.first().is_some_and(|l| l.is_empty()) {
+        rest = &rest[1..];
+    }
+    (summary, rest.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_docstring;
+
+    #[test]
+    fn docstrings_split_into_a_summary_and_a_description() {
+        assert_eq!(split_docstring("Fetch one todo."), ("Fetch one todo.".into(), String::new()));
+        assert_eq!(
+            split_docstring("Fetch one todo.\n\n        Returns 404 when\n          it is missing.\n        "),
+            ("Fetch one todo.".into(), "Returns 404 when\n  it is missing.".into())
+        );
+        assert_eq!(
+            split_docstring("\n    A summary that runs\n    over two lines.\n\n\n    Body.\n    "),
+            ("A summary that runs over two lines.".into(), "Body.".into())
+        );
+        assert_eq!(split_docstring("   "), (String::new(), String::new()));
     }
 }

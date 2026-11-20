@@ -938,6 +938,16 @@ Milestone 5 of the [release polish plan](11-release-polish-plan.md).
 
 **Re-running the probes of the plan's appendix.** Every row of Appendix A that the plan set out to fix now compiles and gives Python's answer, except by design: comparison chains (`1 < x < 3`), `*args`, assigning a captured variable, and generic traits. Bytes literals, `frozenset`, preemption, and empty collections typed by their first use are the things the plan hoped for that are not there, each with its reason in D91 to D95.
 
+### D96. Documentation arguments on route annotations, and docstrings kept (OpenAPI plan, milestone 1)
+
+Milestone 1 of the [OpenAPI plan](12-openapi-docs-plan.md).
+
+**Annotation values.** An annotation argument can now be `True`, `False` or a list in brackets (`ast::AnnotationValue::Bool` and `List`), as well as a name, a string or a number. Only the route annotations use them so far; the other annotations still reject what they do not expect with their own messages. The formatter keeps tokens and needed nothing; the tree-sitter grammar already parses annotation arguments as an ordinary argument list.
+
+**Route annotations.** `tags=["todos"]` (strings, not empty), `deprecated=True` and `errors=[404, 409]` (statuses from 400 to 599, sorted and with repeats removed; not on `@http.ws`) are accepted and stored on the route, in `RouteDoc`. They change nothing about how requests are served. Any other keyword is the existing `E0340`; `summary=` and `description=` get a help line saying they come from the docstring. `tests/ui/route_annotation_errors.wb` has each wrong form.
+
+**Docstrings.** A handler's docstring is the first statement of its body when that is a plain string (the parser already kept it as an expression statement; it was just never read). It is cleaned as Python's `inspect.cleandoc` does, and split at the first blank line: the first paragraph, joined into one line, is the summary, and the rest is the description, kept as Markdown. Module and struct docstrings are still skipped by the parser; nothing needs them yet.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

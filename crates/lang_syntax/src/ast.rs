@@ -54,7 +54,8 @@ pub struct Annotation {
     pub span: Span,
 }
 
-/// One argument of an annotation: a name, a string, or `keyword=value`.
+/// One argument of an annotation: a name, a string, a number, a boolean, a list, or
+/// `keyword=value`.
 #[derive(Debug, Clone)]
 pub struct AnnotationArg {
     pub keyword: Option<Ident>,
@@ -67,6 +68,9 @@ pub enum AnnotationValue {
     Name(Ident),
     Str(String),
     Int(i64),
+    Bool(bool),
+    /// `[a, b]`, as in `tags=["todos"]`.
+    List(Vec<AnnotationValue>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

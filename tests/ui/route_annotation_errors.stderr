@@ -1,0 +1,57 @@
+error[E0340]: `tags=` takes a list of strings
+ --> tests/ui/route_annotation_errors.wb:8:21
+  |
+8 |     @http.get("/a", tags="todos")
+  |                     ^^^^^^^^^^^^ not a list of strings
+  |
+  = help: for example `tags=["todos"]`
+
+error[E0340]: `tags=` takes a list of strings
+  --> tests/ui/route_annotation_errors.wb:12:21
+   |
+12 |     @http.get("/b", tags=["todos", 3])
+   |                     ^^^^^^^^^^^^^^^^^ not a list of strings
+   |
+   = help: for example `tags=["todos"]`
+
+error[E0340]: `deprecated=` takes `True` or `False`
+  --> tests/ui/route_annotation_errors.wb:16:21
+   |
+16 |     @http.get("/c", deprecated=1)
+   |                     ^^^^^^^^^^^^ not a boolean
+   |
+   = help: for example `deprecated=True`
+
+error[E0340]: `errors=` takes a list of error statuses, from 400 to 599
+  --> tests/ui/route_annotation_errors.wb:20:21
+   |
+20 |     @http.get("/d", errors=[404, 302])
+   |                     ^^^^^^^^^^^^^^^^^ not a list of error statuses
+   |
+   = help: for example `errors=[404, 409]`
+
+error[E0340]: `errors=` takes a list of error statuses, from 400 to 599
+  --> tests/ui/route_annotation_errors.wb:24:21
+   |
+24 |     @http.get("/e", errors=404)
+   |                     ^^^^^^^^^^ not a list of error statuses
+   |
+   = help: for example `errors=[404, 409]`
+
+error[E0340]: `@http.ws` takes a path and, optionally, `tags=` and `deprecated=`
+  --> tests/ui/route_annotation_errors.wb:28:20
+   |
+28 |     @http.ws("/f", errors=[404])
+   |                    ^^^^^^^^^^^^ not expected here
+   |
+   = help: for example `@http.ws("/chat")`
+
+error[E0340]: a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=` and `errors=`
+  --> tests/ui/route_annotation_errors.wb:32:21
+   |
+32 |     @http.get("/g", summary="no such keyword")
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^ not expected here
+   |
+   = help: the summary and description come from the handler's docstring: its first line, and the rest
+
+error: could not compile `tests/ui/route_annotation_errors.wb` due to 7 errors

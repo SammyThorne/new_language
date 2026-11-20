@@ -182,6 +182,8 @@ Each milestone ends with its tests, the gates below, a "Done" note in this file,
 - `Route` gets `summary` and `description`, taken from the handler's docstring (first statement of `function.body`, if it is a string expression; dedented as Python's `inspect.cleandoc` does).
 - Tests: `tests/ui/route_annotation_errors.wb` (golden), a unit test of the docstring split. Existing programs must compile and run unchanged.
 
+**Done** (D96). Annotation values can be `True`, `False` and lists; `tags=`, `deprecated=` and `errors=` are checked and kept on the route with the docstring's summary and description; `summary=` gets a help line pointing at the docstring. All gates passed, the benchmark checks included.
+
 ### Milestone 2: schemas and operations (about 2 days)
 
 - New `crates/lang_sema/src/check/openapi.rs`: from a `Route` and the checker's type tables, produce the operation JSON and the component schemas (section 4.2 and 4.3), as text. Reuse the JSON-capability walk in `check/json.rs` so the schema and the encoder cannot disagree; add a test that, for every `@derive(Json)` type in `tests/`, encodes a sample value and checks it against the generated schema in a small validator in the test (jsonschema is not installed and cannot be downloaded: write the subset validator, about 150 lines, covering `type`, `properties`, `required`, `items`, `prefixItems`, `additionalProperties`, `enum`, `oneOf`, `$ref`).

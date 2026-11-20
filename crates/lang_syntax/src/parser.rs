@@ -407,7 +407,13 @@ impl Parser<'_> {
             }
             _ => None,
         };
-        let value = match self.peek().clone() {
+        let value = self.annotation_value()?;
+        Ok(AnnotationArg { keyword, value, span: start.to(self.prev_span()) })
+    }
+
+    /// A name, a string, a number, `True`, `False`, or a list of those in `[...]`.
+    fn annotation_value(&mut self) -> PResult<AnnotationValue> {
+        Ok(match self.peek().clone() {
             TokenKind::Str(text) => {
                 self.bump();
                 AnnotationValue::Str(text)
@@ -417,9 +423,28 @@ impl Parser<'_> {
                 self.bump();
                 AnnotationValue::Int(i64::try_from(value).unwrap_or(i64::MAX))
             }
-            _ => return Err(self.unexpected("expected a name, a string or a number")),
-        };
-        Ok(AnnotationArg { keyword, value, span: start.to(self.prev_span()) })
+            TokenKind::True => {
+                self.bump();
+                AnnotationValue::Bool(true)
+            }
+            TokenKind::False => {
+                self.bump();
+                AnnotationValue::Bool(false)
+            }
+            TokenKind::LBracket => {
+                self.bump();
+                let mut items = Vec::new();
+                while !self.at(&TokenKind::RBracket) {
+                    items.push(self.annotation_value()?);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RBracket, "to close the list")?;
+                AnnotationValue::List(items)
+            }
+            _ => return Err(self.unexpected("expected a name, a string, a number, `True`, `False` or a list")),
+        })
     }
 
     fn item(&mut self) -> PResult<Item> {
