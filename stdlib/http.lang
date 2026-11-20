@@ -474,6 +474,8 @@ struct DocOperation:
     id: str
     operation: str
     ws: bool
+    # The names in its `security=`, separated by spaces.
+    security: str
 
 struct DocsSettings:
     path: str
@@ -481,7 +483,52 @@ struct DocsSettings:
     version: str
     description: str
     servers: list[str]
+    tags: list[Tag]
+    security: dict[str, SecurityScheme]
     hide_ws: bool
+
+@frozen
+pub struct Tag:
+    """A tag of the API documentation: its description, and its place in the page. Give
+    them to `docs(tags=[...])`; the page lists tags in that order, then the others."""
+    name: str
+    description: str = ""
+
+@frozen
+pub struct SecurityScheme:
+    """How clients authenticate, for the API documentation. Make one with `http.bearer`,
+    `http.basic_auth` or `http.api_key`, give it a name in `docs(security={...})`, and name it in
+    `security=[...]` on the routes that need it. It documents the scheme; checking credentials is
+    the job of your middleware."""
+    priv kind: str = "bearer"
+    priv name: str = ""
+    priv format: str = ""
+    priv description: str = ""
+
+pub def bearer(format: str = "", description: str = "") -> SecurityScheme:
+    """A token in `Authorization: Bearer <token>`. `format` is a hint such as `"JWT"`."""
+    return SecurityScheme("bearer", "", format, description)
+
+pub def basic_auth(description: str = "") -> SecurityScheme:
+    """A user name and password in `Authorization: Basic ...`."""
+    return SecurityScheme("basic", "", "", description)
+
+pub def api_key(name: str, cookie: bool = False, description: str = "") -> SecurityScheme:
+    """A key in the request header called `name`, or in the cookie called `name` when `cookie`
+    is set."""
+    return SecurityScheme("cookie" if cookie else "header", name, "", description)
+
+def security_scheme_json(scheme: SecurityScheme) -> str:
+    fields = ""
+    if scheme.kind == "bearer" or scheme.kind == "basic":
+        fields = "\"type\":\"http\",\"scheme\":" + jsonlib.encode(scheme.kind)
+        if scheme.format != "":
+            fields = fields + ",\"bearerFormat\":" + jsonlib.encode(scheme.format)
+    else:
+        fields = "\"type\":\"apiKey\",\"in\":" + jsonlib.encode(scheme.kind) + ",\"name\":" + jsonlib.encode(scheme.name)
+    if scheme.description != "":
+        fields = fields + ",\"description\":" + jsonlib.encode(scheme.description)
+    return "{" + fields + "}"
 
 pub struct Server:
     """
@@ -681,6 +728,8 @@ impl Server:
         version: str = "0.1.0",
         description: str = "",
         servers: list[str] = [],
+        tags: list[Tag] = [],
+        security: dict[str, SecurityScheme] = {},
         ui: bool = True,
         try_it_out: bool = True,
         hide_ws: bool = True,
@@ -690,7 +739,9 @@ impl Server:
         at `path + "/openapi.json"` and `path + "/openapi.yaml"`. The description is built from
         the routes' types, annotations and docstrings when first asked for, so `docs` can come
         before or after `mount`. `servers` are the base URLs listed in it (and the one "Try it
-        out" sends to; by default the page's own). `ui=False` serves only the description;
+        out" sends to; by default the page's own). `tags` describe and order the tags; `security`
+        names the ways clients authenticate, for the routes' `security=` (see `SecurityScheme`).
+        `ui=False` serves only the description;
         `try_it_out=False` makes the page read-only. WebSocket endpoints are listed only with
         `hide_ws=False`. The routes go through the server's middleware like any other, so
         protect them as you would the API.
@@ -698,7 +749,7 @@ impl Server:
         base = path
         while base.ends_with("/"):
             base = base[0:len(base) - 1]
-        self.docs_settings = DocsSettings(base, title, version, description, servers, hide_ws)
+        self.docs_settings = DocsSettings(base, title, version, description, servers, tags, security, hide_ws)
         server = self
         self.docs_route(base + "/openapi.json", lambda req: Ok(server.openapi_reply(False)))
         self.docs_route(base + "/openapi.yaml", lambda req: Ok(server.openapi_reply(True)))
@@ -728,15 +779,17 @@ impl Server:
         version: str = "0.1.0",
         description: str = "",
         servers: list[str] = [],
+        tags: list[Tag] = [],
+        security: dict[str, SecurityScheme] = {},
         hide_ws: bool = True,
     ) -> str:
         """The OpenAPI document `docs` serves, as JSON text: for tests, a file, or a route of
         your own."""
-        return self.document(DocsSettings("", title, version, description, servers, hide_ws))
+        return self.document(DocsSettings("", title, version, description, servers, tags, security, hide_ws))
 
-    def __document(self, method: str, path: str, id: str, operation: str, ws: bool):
+    def __document(self, method: str, path: str, id: str, operation: str, ws: bool, security: str):
         """Used by the code `server.mount` generates: one documented route."""
-        self.doc_operations.append(DocOperation(method, path, id, operation, ws))
+        self.doc_operations.append(DocOperation(method, path, id, operation, ws, security))
         self.docs_json = ""
 
     def __schema(self, name: str, schema: str):
@@ -784,6 +837,10 @@ impl Server:
                 case Some(op):
                     if op.ws and settings.hide_ws:
                         continue
+                    if op.security != "":
+                        for name in op.security.split(" "):
+                            if name not in settings.security:
+                                panic(f"the route {op.method} {op.path} names the security scheme `{name}`, which `docs` was not given")
                     id = unique_id(op.id, used_ids)
                     operation = "{\"operationId\":" + jsonlib.encode(id) + "," + op.operation[1:]
                 case None:
@@ -799,12 +856,27 @@ impl Server:
         if len(settings.servers) > 0:
             urls = ["{\"url\":" + jsonlib.encode(url) + "}" for url in settings.servers]
             parts.append(",\"servers\":[" + ",".join(urls) + "]")
+        if len(settings.tags) > 0:
+            tags: list[str] = []
+            for tag in settings.tags:
+                text = "{\"name\":" + jsonlib.encode(tag.name)
+                if tag.description != "":
+                    text = text + ",\"description\":" + jsonlib.encode(tag.description)
+                tags.append(text + "}")
+            parts.append(",\"tags\":[" + ",".join(tags) + "]")
         paths = [jsonlib.encode(path) + ":{" + ",".join(by_path[path]) + "}" for path in order]
         parts.append(",\"paths\":{" + ",".join(paths) + "}")
+        components: list[str] = []
         if len(self.doc_schemas) > 0:
             names = sorted(self.doc_schemas.keys())
             schemas = [jsonlib.encode(name) + ":" + self.doc_schemas[name] for name in names]
-            parts.append(",\"components\":{\"schemas\":{" + ",".join(schemas) + "}}")
+            components.append("\"schemas\":{" + ",".join(schemas) + "}")
+        if len(settings.security) > 0:
+            names = sorted(settings.security.keys())
+            schemes = [jsonlib.encode(name) + ":" + security_scheme_json(settings.security[name]) for name in names]
+            components.append("\"securitySchemes\":{" + ",".join(schemes) + "}")
+        if len(components) > 0:
+            parts.append(",\"components\":{" + ",".join(components) + "}")
         parts.append("}")
         return "".join(parts)
 
@@ -838,9 +910,9 @@ impl Group:
     def ws(self, path: str, handler: WsHandler):
         self.route("GET", path, lambda req: upgrade(req, handler))
 
-    def __document(self, method: str, path: str, id: str, operation: str, ws: bool):
+    def __document(self, method: str, path: str, id: str, operation: str, ws: bool, security: str):
         """Used by the code `group.mount` generates: one documented route."""
-        self.server.__document(method, self.prefix + path, id, operation, ws)
+        self.server.__document(method, self.prefix + path, id, operation, ws, security)
 
     def __schema(self, name: str, schema: str):
         """Used by the code `group.mount` generates: a schema the documented routes use."""

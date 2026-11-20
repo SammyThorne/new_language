@@ -137,6 +137,8 @@ pub(super) struct RouteDoc {
     pub tags: Vec<String>,
     pub deprecated: bool,
     pub errors: Vec<i64>,
+    /// The names of the security schemes, any one of which the operation accepts.
+    pub security: Vec<String>,
     pub summary: String,
     pub description: String,
 }
@@ -292,6 +294,40 @@ impl<'m> Checker<'_, 'm> {
                     };
                     doc.tags = tags;
                 }
+                (Some(k), value) if k.name == "security" && !ws => {
+                    let names = match value {
+                        ast::AnnotationValue::List(items) => items
+                            .iter()
+                            .map(|item| match item {
+                                ast::AnnotationValue::Str(text)
+                                    if !text.is_empty() && !text.contains(char::is_whitespace) =>
+                                {
+                                    Some(text.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>(),
+                        _ => None,
+                    };
+                    let Some(mut names) = names else {
+                        self.route_error(
+                            "`security=` takes a list of security scheme names",
+                            arg.span,
+                            "not a list of names",
+                            Some(
+                                "for example `security=[\"token\"]`, with `token` given to `server.docs(security=...)`",
+                            ),
+                        );
+                        return None;
+                    };
+                    let mut unique: Vec<String> = Vec::new();
+                    names.retain(|name| {
+                        let new = !unique.contains(name);
+                        unique.push(name.clone());
+                        new
+                    });
+                    doc.security = names;
+                }
                 (Some(k), value) if k.name == "deprecated" => {
                     let ast::AnnotationValue::Bool(flag) = value else {
                         self.route_error(
@@ -333,7 +369,7 @@ impl<'m> Checker<'_, 'm> {
                         if ws {
                             "`@http.ws` takes a path and, optionally, `tags=` and `deprecated=`"
                         } else {
-                            "a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=` and `errors=`"
+                            "a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=` and `security=`"
                         },
                         arg.span,
                         "not expected here",
@@ -712,12 +748,13 @@ impl<'m> Checker<'_, 'm> {
             if let Some(documented) = &documented {
                 let (id, operation, ws) = &documented.operations[index];
                 text.push_str(&format!(
-                    "    __server.__document({:?}, __prefix + {:?}, {}, {}, {})\n",
+                    "    __server.__document({:?}, __prefix + {:?}, {}, {}, {}, {})\n",
                     route.method,
                     route.path.replace("...}", "}"),
                     openapi::source_literal(id),
                     openapi::source_literal(operation),
-                    if *ws { "True" } else { "False" }
+                    if *ws { "True" } else { "False" },
+                    openapi::source_literal(&route.doc.security.join(" "))
                 ));
             }
             text.push_str(&format!("    def __route_{index}(__req: {request_name}) -> Result[{response_name}]:\n"));

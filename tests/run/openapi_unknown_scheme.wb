@@ -1,0 +1,16 @@
+# A route that names a security scheme `docs` was not given: building the document panics
+# with a message naming both.
+# expect: before
+# expect-exit: 101
+# expect-stderr: panic: the route GET /secret names the security scheme `token`, which `docs` was not given
+import http
+
+@http.get("/secret", security=["token"])
+def secret() -> str:
+    return "s"
+
+def main():
+    server = http.Server()
+    server.mount(secret)
+    print("before")
+    print(server.openapi_json(security={"key": http.api_key("X-Key")}))

@@ -351,6 +351,10 @@ impl Checker<'_, '_> {
             responses.push((status.to_string(), error_response(*status)));
         }
         op.push(("responses", J::Obj(responses)));
+        if !route.doc.security.is_empty() {
+            let any_of = route.doc.security.iter().map(|name| J::Obj(vec![(name.clone(), J::Arr(Vec::new()))]));
+            op.push(("security", J::Arr(any_of.collect())));
+        }
         if route.ws {
             op.push(("x-websocket", J::Bool(true)));
         }

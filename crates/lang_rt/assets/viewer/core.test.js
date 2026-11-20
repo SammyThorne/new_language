@@ -183,3 +183,15 @@ test("helpers", () => {
   assert.equal(core.escapeHtml(`<a href="x">'&`), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;");
   assert.equal(core.base64("ab"), "YWI=");
 });
+
+test("schemes are described in words, and an operation's requirements listed once", () => {
+  const schemes = doc.components.securitySchemes;
+  assert.equal(core.schemeLabel(schemes.token), "bearer token");
+  assert.equal(core.schemeLabel(schemes.key), "API key in header X-Key");
+  assert.equal(core.schemeLabel(schemes.login), "user:password (basic)");
+  assert.equal(core.schemeLabel({ type: "apiKey", in: "cookie", name: "sid" }), "API key in cookie sid");
+  assert.equal(core.schemeLabel({ type: "oauth2" }), "oauth2");
+  assert.equal(core.schemeLabel(undefined), "unknown scheme");
+  assert.deepEqual(core.requirements({ security: [{ key: [] }, { token: [], key: [] }] }), ["key", "token"]);
+  assert.deepEqual(core.requirements({}), []);
+});

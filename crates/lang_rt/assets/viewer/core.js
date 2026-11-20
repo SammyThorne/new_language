@@ -382,6 +382,25 @@
     }
   }
 
+  /** What a security scheme asks for, in words: "bearer token", "API key in header X-Key". */
+  function schemeLabel(scheme) {
+    if (!scheme || typeof scheme !== "object") return "unknown scheme";
+    const kind = String(scheme.scheme || "").toLowerCase();
+    if (scheme.type === "http" && kind === "bearer") return "bearer token";
+    if (scheme.type === "http" && kind === "basic") return "user:password (basic)";
+    if (scheme.type === "apiKey") return "API key in " + scheme.in + " " + scheme.name;
+    return String(scheme.type || "unknown scheme");
+  }
+
+  /** The names of the schemes an operation accepts, any one of them; empty when it is open. */
+  function requirements(op) {
+    const names = [];
+    for (const requirement of Array.isArray(op.security) ? op.security : []) {
+      for (const name of Object.keys(requirement || {})) if (!names.includes(name)) names.push(name);
+    }
+    return names;
+  }
+
   /** The `id` of an operation as a URL fragment, and back. */
   function anchor(op) {
     return "op-" + encodeURIComponent(op.id).replace(/%/g, "_");
@@ -405,6 +424,8 @@
     prettyJson,
     anchor,
     base64,
+    schemeLabel,
+    requirements,
   };
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.ApiDocs = api;

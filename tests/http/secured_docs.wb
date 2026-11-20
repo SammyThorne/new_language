@@ -1,0 +1,70 @@
+# The API documentation's security schemes and tags (docs/12, milestone 5). The middleware
+# enforces what the documentation says: writes need a bearer token, the report an API key.
+# crates/lang_cli/tests/openapi.rs checks the document against what the service answers.
+
+import http
+import io
+
+@derive(Json)
+@frozen
+struct Note:
+    text: str
+
+@derive(Json)
+@frozen
+struct Report:
+    notes: int
+
+@frozen
+struct Notes:
+    count: Atomic[int]
+
+impl Notes:
+    @http.get("/notes", tags=["notes"])
+    def list(self) -> list[Note]:
+        """List the notes. Anyone may read them."""
+        return [Note("hello")]
+
+    @http.post("/notes", status=201, tags=["notes"], security=["token"], errors=[401])
+    def add(self, note: Note) -> Note:
+        """Add a note.
+
+        Needs a token: `Authorization: Bearer <token>`.
+        """
+        self.count.increment()
+        return note
+
+    @http.get("/report", tags=["admin"], security=["key", "token"], errors=[401])
+    def report(self) -> Report:
+        """How many notes were added, for an API key or a token."""
+        return Report(self.count.get())
+
+def authenticate(req: http.Request, next: http.Handler) -> Result[http.Response]:
+    """The checks the documentation describes."""
+    token = req.header("Authorization").unwrap_or("") == "Bearer secret"
+    key = req.header("X-API-Key").unwrap_or("") == "k123"
+    if req.method == "POST" and not token:
+        return Err(http.Error(401, "a bearer token is needed"))
+    if req.path == "/report" and not (token or key):
+        return Err(http.Error(401, "an API key or a token is needed"))
+    return next(req)
+
+def main():
+    server = http.Server()
+    server.use(authenticate)
+    server.mount(Notes(Atomic(0)))
+    server.docs(
+        "/docs",
+        title="Notes",
+        version="1.0.0",
+        tags=[http.Tag("notes", "Reading and **writing** notes."), http.Tag("admin")],
+        security={
+            "token": http.bearer(format="opaque", description="Ask the owner for one."),
+            "key": http.api_key("X-API-Key"),
+            "session": http.api_key("sid", cookie=True),
+            "login": http.basic_auth(),
+        },
+    )
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()

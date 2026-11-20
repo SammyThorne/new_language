@@ -974,6 +974,18 @@ Milestone 4 of the [OpenAPI plan](12-openapi-docs-plan.md). `server.docs(...)` s
 
 **Cost.** 101 KB more in an optimised executable that serves documentation, nothing in one that does not. A request for a file allocates about 1 KB, for its headers.
 
+### D99. Security schemes and tags in the API documentation (OpenAPI plan, milestone 5)
+
+Milestone 5 of the [OpenAPI plan](12-openapi-docs-plan.md), which finishes it.
+
+**Schemes are values, routes name them.** `docs(security={"token": http.bearer()})` names the schemes; `security=["token"]` on a route says which it accepts. The names are strings on both sides because the annotation is checked at compile time and the `docs` call runs at run time, where the scheme values are built. So a route that names a scheme `docs` was not given cannot be a compile error; it panics when the document is first built, naming the route and the scheme, which happens on the first request to the docs routes or the first `openapi_json` call, so a test of the document finds it. Several names are alternatives (OpenAPI's list of requirement objects with one scheme each), which covers "a token or an API key"; combinations that must all be present are rare and left out.
+
+**`SecurityScheme` is a struct with private fields and three constructors** (`bearer`, `basic_auth`, `api_key`) rather than an enum, so each constructor can have keyword arguments with defaults (`format`, `description`, `cookie`), and an invalid scheme cannot be built. Query-string API keys are not offered: keys in URLs end up in logs.
+
+**Documentation, not enforcement.** The schemes describe what the service's middleware checks; the library does not check credentials itself, as `@fastify/swagger` and FastAPI's `openapi` models do not. The guide and docs/05 say so where the feature is introduced, and the test service enforces its schemes in middleware so that the test can check the document against the real answers.
+
+**Tags.** `http.Tag(name, description)` values in `docs(tags=[...])` become the document's `tags`, in the order given, which the page follows for its groups (tags not listed come after, in order of first use).
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

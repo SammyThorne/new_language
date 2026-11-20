@@ -145,7 +145,7 @@ There is no reflection and no scanning at startup.
 |---|---|
 | `@http.get(path)`, `@http.post(path)`, `@http.put(path)`, `@http.patch(path)`, `@http.delete(path)` | On a function or a method: a route for that HTTP method and path. Paths support `{name}` segments and a trailing `{rest...}` wildcard |
 | `status=201` | Optional argument: the status for a successful response. The default is 200, or 204 when the handler returns nothing |
-| `tags=["todos"]`, `deprecated=True`, `errors=[404, 409]` | Optional arguments for the API documentation (docs/12): the operation's tags, whether it is deprecated, and the error statuses it can return besides the `400` the compiler generates. The handler's docstring gives the summary (its first paragraph) and the description (the rest). They change nothing about how requests are served |
+| `tags=["todos"]`, `deprecated=True`, `errors=[404, 409]`, `security=["token"]` | Optional arguments for the API documentation (below): the operation's tags, whether it is deprecated, the error statuses it can return besides the `400` the compiler generates, and the security schemes it accepts (any one of them). The handler's docstring gives the summary (its first paragraph) and the description (the rest). They change nothing about how requests are served |
 | `@http.ws(path)` | A WebSocket endpoint (below) |
 | `server.mount(value)` | Registers every annotated method of the value's type, bound to that value |
 | `server.mount(function)` | Registers one annotated function |
@@ -233,6 +233,52 @@ server.get("/todos/{id}", get_todo)
 
 For each annotated handler the compiler writes a function of exactly this shape and registers it in exactly this way. The call style is the right tool for routes decided at run time, for middleware, and for tests. Milestone 8 builds this layer first and the annotations on top of it.
 
+### OpenAPI and the documentation page
+
+One call serves an [OpenAPI 3.1](https://spec.openapis.org/oas/v3.1.0) description of the server's routes and a page to read and try them, as FastAPI does at `/docs` and Fastify's swagger plugins at `/documentation`:
+
+```python
+server.mount(App(...), prefix="/api")
+server.docs("/docs", title="Todo API", version="1.0.0")
+```
+
+| Path | What it serves |
+|---|---|
+| `/docs` (and `/docs/`) | The API documentation page: the operations grouped by tag, with their parameters, bodies, responses and schemas, a filter, a "Models" list, and "Try it out", which sends a real request and shows the answer and the same request as a `curl` command |
+| `/docs/openapi.json`, `/docs/openapi.yaml` | The OpenAPI document |
+| `/docs/viewer.css`, `/docs/core.js`, `/docs/viewer.js` | The page's own files: part of the runtime, about 46 KB, nothing loaded from elsewhere |
+
+**Where the document comes from.** The compiler writes each mounted route's operation from what it already checks: the path, query, header and cookie parameters with their types and defaults, the JSON body, the success status and response type, and the `400` it generates for bad input. Types that derive `Json` become schemas under `components.schemas`, exactly as the encoder writes them (`T?` is `["string", "null"]`, sized numbers have their `format` (and unsigned ones `minimum: 0`), enums are a string enum or a `oneOf` tagged by `type`). The handler's docstring gives the summary and description (Markdown), and the annotation's `tags=`, `deprecated=`, `errors=` and `security=` the rest. Methods of a mounted type are tagged with the type's name unless `tags=` says otherwise. Routes registered in call style are listed with their method, path and path parameters only. The `docs` routes themselves are left out, and WebSocket endpoints too unless `hide_ws=False`.
+
+**Only when used.** The compiler writes the documentation only for programs that mention `.docs` or `.openapi_json`, and the page's files are only in executables that call `docs`. A server without documentation compiles to the same code as before.
+
+```python
+server.docs(
+    "/docs",
+    title="Todo API",
+    version="1.0.0",
+    description="The **todo** service.",                  # Markdown
+    servers=["https://todo.example.com"],                 # where "Try it out" sends; by default the page's own server
+    tags=[http.Tag("todos", "Reading and writing todos."), http.Tag("admin")],   # descriptions, and the order of the groups
+    security={"token": http.bearer(format="JWT"), "key": http.api_key("X-API-Key")},
+)
+
+@http.delete("/todos/{id}", security=["token"], errors=[401, 404])
+def remove(self, id: int): ...
+```
+
+**Security schemes** describe how clients authenticate: `http.bearer(format="", description="")` (`Authorization: Bearer ...`), `http.basic_auth(description="")`, and `http.api_key(name, cookie=False, description="")` (a header, or a cookie). A route names the schemes it accepts with `security=[...]`; a route that names a scheme `docs` was not given is a bug, and building the document panics with both names. The page has an "Authorize" box where a reader enters credentials, kept in the page's memory only, and "Try it out" adds them to its requests. The documentation does not check anything: authenticate requests in middleware, as with any route, and list `401` in `errors=`.
+
+**Other arguments.** `ui=False` serves only the document; `try_it_out=False` makes the page read-only. `server.openapi_json(...)` takes the same arguments (except the path and the page's) and returns the document as text: for a test, a file, or a route of your own.
+
+**What to know.**
+- The docs routes are ordinary routes: middleware applies to them, so a server that authenticates everything authenticates its documentation too.
+- The document is built on its first request and again after a route is added.
+- The page needs no inline script or style; it is served with `Content-Security-Policy: default-src 'self'; connect-src *`, `ETag` and `Cache-Control: no-cache`.
+- Two different types whose names would make the same schema name are a compile error (`E0341`).
+- A generic struct cannot be a handler's body or return type directly; wrap it in a struct of its own.
+- OAuth2 and OpenID Connect flows, file uploads and XML bodies are not described (a token pasted into "Authorize" works).
+
 ### API surface
 
 | Item | Shape |
@@ -244,6 +290,10 @@ For each annotated handler the compiler writes a function of exactly this shape 
 | `server.group(prefix)` | Returns a sub-router sharing a prefix and its own middleware |
 | `server.use(middleware)` | Middleware has the type `def(http.Request, http.Handler) -> Result[http.Response]` |
 | `server.ws(path, handler)` | WebSocket endpoint in call style (below) |
+| `server.docs(path="/docs", title, version, description, servers, tags, security, ui, try_it_out, hide_ws)` | Serves the API documentation page and the OpenAPI document (above) |
+| `server.openapi_json(title, version, description, servers, tags, security, hide_ws)` | The OpenAPI document as JSON text |
+| `http.Tag(name, description="")` | A tag's description, for `docs(tags=...)` |
+| `http.bearer(...)`, `http.basic_auth(...)`, `http.api_key(name, cookie=False, ...)` | `http.SecurityScheme` values, for `docs(security=...)` |
 | `server.listen(addr)` | Blocks, serving until shutdown. Options: read and write timeouts, maximum header and body sizes, graceful shutdown on SIGTERM |
 | `http.Handler` | `def(http.Request) -> Result[http.Response]` |
 | `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `header(name) -> str?`, `body() -> bytes`, `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr` |

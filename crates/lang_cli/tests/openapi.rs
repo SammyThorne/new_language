@@ -109,7 +109,21 @@ fn request(
     path: &str,
     body: Option<&str>,
 ) -> Response {
+    request_with(stream, reader, method, path, body, &[])
+}
+
+fn request_with(
+    stream: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    headers: &[(&str, &str)],
+) -> Response {
     let mut text = format!("{method} {path} HTTP/1.1\r\nHost: test\r\n");
+    for (name, value) in headers {
+        text.push_str(&format!("{name}: {value}\r\n"));
+    }
     if let Some(body) = body {
         text.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
     }
@@ -233,6 +247,56 @@ fn todo_service_documents_itself() {
         let stale = format!("GET {path} HTTP/1.1\r\nHost: test\r\nIf-None-Match: \"1\"\r\n\r\n");
         stream.write_all(stale.as_bytes()).unwrap();
         assert_eq!(read_response(&mut reader, false).status, 200, "{path}");
+    }
+    server.stop(program);
+}
+
+#[test]
+fn security_schemes_and_tags_match_the_service() {
+    build_runtime();
+    let program = "secured_docs";
+    let mut server = start(program);
+    let (mut stream, mut reader) = connect(server.port);
+    let served = request(&mut stream, &mut reader, "GET", "/docs/openapi.json", None);
+    let doc = json::parse(&served.body).unwrap_or_else(|e| panic!("{e}\n{}", served.body));
+    golden(&doc, "tests/http/secured_docs.openapi.json");
+
+    // The tags in the order given, then the schemes, and which operation needs which.
+    let tags: Vec<&str> = match doc.at(&["tags"]) {
+        Json::Arr(items) => items.iter().map(|t| t.at(&["name"]).as_str().unwrap()).collect(),
+        other => panic!("tags: {other:?}"),
+    };
+    assert_eq!(tags, ["notes", "admin"]);
+    assert_eq!(doc.at(&["components", "securitySchemes"]).keys(), ["key", "login", "session", "token"]);
+    assert_eq!(doc.at(&["components", "securitySchemes", "session", "in"]).as_str(), Some("cookie"));
+    assert!(doc.at(&["paths", "/notes", "get"]).get("security").is_none(), "reading is open");
+    let needs = |path: &str, method: &str| -> Vec<String> {
+        match doc.at(&["paths", path, method, "security"]) {
+            Json::Arr(any_of) => any_of.iter().flat_map(|r| r.keys().into_iter().map(String::from)).collect(),
+            other => panic!("{method} {path}: {other:?}"),
+        }
+    };
+    assert_eq!(needs("/notes", "post"), ["token"]);
+    assert_eq!(needs("/report", "get"), ["key", "token"]);
+
+    // The service does what the document says, with each status declared.
+    let token = [("Authorization", "Bearer secret")];
+    let key = [("X-API-Key", "k123")];
+    let note = Some(r#"{"text": "hi"}"#);
+    type Headers<'a> = &'a [(&'a str, &'a str)];
+    let cases: [(&str, &str, Option<&str>, Headers, u16); 6] = [
+        ("GET", "/notes", None, &[], 200),
+        ("POST", "/notes", note, &[], 401),
+        ("POST", "/notes", note, &token, 201),
+        ("GET", "/report", None, &[], 401),
+        ("GET", "/report", None, &key, 200),
+        ("GET", "/report", None, &token, 200),
+    ];
+    for (method, path, body, headers, status) in cases {
+        let response = request_with(&mut stream, &mut reader, method, path, body, headers);
+        assert_eq!(response.status, status, "{method} {path} with {headers:?}: {}", response.body);
+        let declared = doc.at(&["paths", path, &method.to_ascii_lowercase(), "responses"]);
+        assert!(declared.get(&status.to_string()).is_some(), "{method} {path} gave {status}, which is not declared");
     }
     server.stop(program);
 }

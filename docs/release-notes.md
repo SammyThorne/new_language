@@ -23,6 +23,17 @@ The first release of Weby, a compiled, Python-shaped language for web backends. 
 
 **Performance.** On this repository's benchmarks every program runs faster than Go's version (between 1.1 and 3.0 times), and the HTTP endpoints serve 1.8 to 3.1 times Go's request rate at 256 connections with about 40% of its CPU per request. Idle WebSocket connections cost about 19 KiB each. A small program's executable is 0.5 MB and the benchmark web server's 1.3 MB. The numbers, how they were measured and what limits them are in [web-performance.md](web-performance.md) and [bench/README.md](../bench/README.md). `bench/run.py --check` and `bench/http/counts.py --check` fail on a regression.
 
+## Since 1.0.0 (not yet released)
+
+**API documentation** ([plan](12-openapi-docs-plan.md), D96 to D99). `server.docs("/docs")` serves an OpenAPI 3.1 document of the server's routes at `/docs/openapi.json` and `/docs/openapi.yaml`, and a documentation page at `/docs`, like FastAPI's `/docs` and Fastify's swagger plugins:
+
+- The document is generated from what the compiler already knows: parameter and body types, the status, the response type, the `400`s it generates, and each handler's docstring (summary and description). Route annotations take `tags=`, `deprecated=`, `errors=` and `security=`; `docs` takes tag descriptions (`http.Tag`) and security schemes (`http.bearer`, `http.basic_auth`, `http.api_key`).
+- The page is written for the project (46 KB of plain HTML, CSS and JavaScript in the runtime, nothing downloaded or loaded from elsewhere): operations by tag, schemas, a filter, "Try it out" with the `curl` command, an "Authorize" box, dark mode, and a phone layout.
+- A program that does not call `docs` compiles to the same code and the same size as before; one that does is about 100 KB larger.
+- `server.openapi_json(...)` returns the document as text.
+
+Limits: routes registered in call style are listed with their method and path parameters only; a generic struct cannot be a handler's body or return type directly; the documentation describes security schemes but does not enforce them (middleware does); OAuth2 and OpenID Connect flows, file uploads and XML bodies are not described.
+
 ## What changed in the last round
 
 The [release polish plan](11-release-polish-plan.md) closed the gaps a Python programmer meets in the first hour:

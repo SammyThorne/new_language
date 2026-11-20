@@ -25,7 +25,7 @@
       else if (value === true) element.setAttribute(name, "");
       else element.setAttribute(name, String(value));
     }
-    for (const child of children.flat()) {
+    for (const child of children.flat(Infinity)) {
       if (child === null || child === undefined || child === false) continue;
       element.append(child instanceof Node ? child : document.createTextNode(String(child)));
     }
@@ -136,7 +136,8 @@
       h("span", { class: "method" }, op.websocket ? "WS" : op.method.toUpperCase()),
       h("code", { class: "path" }, op.path),
       h("span", { class: "summary" }, op.summary),
-      op.deprecated ? h("span", { class: "badge" }, "deprecated") : null));
+      op.deprecated ? h("span", { class: "badge" }, "deprecated") : null,
+      core.requirements(op).length > 0 ? h("span", { class: "badge" }, "needs credentials") : null));
     let built = false;
     details.addEventListener("toggle", () => {
       if (details.open) {
@@ -153,6 +154,13 @@
   function operationBody(op) {
     const body = h("div", { class: "op-body" });
     if (op.description) body.append(prose(op.description));
+    const needs = core.requirements(op);
+    if (needs.length > 0) {
+      const schemes = (doc.components && doc.components.securitySchemes) || {};
+      const accepted = needs.map((name, i) => [i > 0 ? (i === needs.length - 1 ? " or " : ", ") : null,
+        h("strong", {}, name), " (" + core.schemeLabel(schemes[name]) + ")"]);
+      body.append(h("p", { class: "auth" }, "Credentials: ", accepted, tryItOut ? ". Enter them under Authorize." : "."));
+    }
     if (op.websocket) body.append(h("p", { class: "note" }, "A WebSocket endpoint: connect with a WebSocket client; it cannot be tried from this page."));
     if (op.parameters.length > 0) {
       const rows = op.parameters.map((p) => h("tr", {},
@@ -276,13 +284,14 @@
     panel.append(h("p", { class: "note" }, "Credentials are kept in this page only, and added to the requests it sends."));
     for (const [name, scheme] of Object.entries(schemes)) {
       const id = "auth-" + name;
-      let what = scheme.type;
-      if (scheme.type === "http") what = scheme.scheme === "basic" ? "user:password (basic)" : "bearer token";
-      if (scheme.type === "apiKey") what = "API key in " + scheme.in + " " + scheme.name;
+      const what = core.schemeLabel(scheme);
       const input = h("input", { id, type: "password", autocomplete: "off", placeholder: what });
       input.addEventListener("input", () => { auth[name] = input.value; });
       panel.append(h("label", { for: id }, h("strong", {}, name), " ", h("span", { class: "muted" }, what)), input);
       if (scheme.description) panel.append(prose(scheme.description));
+      if (scheme.type === "apiKey" && scheme.in === "cookie") {
+        panel.append(h("p", { class: "note" }, "A page cannot set cookies on its requests: the browser sends the cookies it has for the API, and the curl command includes this one."));
+      }
     }
     return panel;
   }

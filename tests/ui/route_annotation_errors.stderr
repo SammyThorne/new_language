@@ -46,7 +46,7 @@ error[E0340]: `@http.ws` takes a path and, optionally, `tags=` and `deprecated=`
    |
    = help: for example `@http.ws("/chat")`
 
-error[E0340]: a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=` and `errors=`
+error[E0340]: a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=` and `security=`
   --> tests/ui/route_annotation_errors.wb:32:21
    |
 32 |     @http.get("/g", summary="no such keyword")
@@ -54,4 +54,20 @@ error[E0340]: a route annotation takes a path and, optionally, `status=`, `tags=
    |
    = help: the summary and description come from the handler's docstring: its first line, and the rest
 
-error: could not compile `tests/ui/route_annotation_errors.wb` due to 7 errors
+error[E0340]: `security=` takes a list of security scheme names
+  --> tests/ui/route_annotation_errors.wb:36:21
+   |
+36 |     @http.get("/h", security="token")
+   |                     ^^^^^^^^^^^^^^^^ not a list of names
+   |
+   = help: for example `security=["token"]`, with `token` given to `server.docs(security=...)`
+
+error[E0340]: `security=` takes a list of security scheme names
+  --> tests/ui/route_annotation_errors.wb:40:21
+   |
+40 |     @http.get("/i", security=["two words"])
+   |                     ^^^^^^^^^^^^^^^^^^^^^^ not a list of names
+   |
+   = help: for example `security=["token"]`, with `token` given to `server.docs(security=...)`
+
+error: could not compile `tests/ui/route_annotation_errors.wb` due to 9 errors

@@ -33,7 +33,15 @@ impl Api:
     def unknown_keyword(self) -> str:
         return "g"
 
-    @http.get("/ok", tags=["todos", "admin"], deprecated=True, errors=[409, 404, 404])
+    @http.get("/h", security="token")
+    def security_not_a_list(self) -> str:
+        return "h"
+
+    @http.get("/i", security=["two words"])
+    def security_name_with_a_space(self) -> str:
+        return "i"
+
+    @http.get("/ok", tags=["todos", "admin"], deprecated=True, errors=[409, 404, 404], security=["token", "token"])
     def fine(self) -> str:
         """Everything here is accepted."""
         return "ok"

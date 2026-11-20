@@ -1,6 +1,6 @@
 # OpenAPI and a built-in API documentation page: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. Nothing in it is built yet. It adds to the `http` module a function, `server.docs("/docs")`, that serves an OpenAPI document describing the server's routes and a ready-made, Swagger-style documentation page for it, at a path the user chooses. It mirrors what `@fastify/swagger` with `@fastify/swagger-ui` does in Fastify, and what FastAPI does at `/docs`. **The page is a viewer written for this project** (plain HTML, CSS and JavaScript, no dependencies, nothing downloaded), not a copy of Swagger UI; section 2 gives the reasons and section 4.5 the design.
+This is a plan, written so that an agent with no other context can carry it out. **It is built**: each milestone in section 6 ends with a "Done" note saying what was built and what differs, and section 6 ends with what was left out. It adds to the `http` module a function, `server.docs("/docs")`, that serves an OpenAPI document describing the server's routes and a ready-made, Swagger-style documentation page for it, at a path the user chooses. It mirrors what `@fastify/swagger` with `@fastify/swagger-ui` does in Fastify, and what FastAPI does at `/docs`. **The page is a viewer written for this project** (plain HTML, CSS and JavaScript, no dependencies, nothing downloaded), not a copy of Swagger UI; section 2 gives the reasons and section 4.5 the design.
 
 Read first: [05-standard-library.md](05-standard-library.md) (HTTP, "Route annotations" and "How handler parameters are bound"), `crates/lang_sema/src/check/http.rs` (how routes are checked and how `mount` generates adapters), `stdlib/http.lang` (the `Server`), and the conventions in [11-release-polish-plan.md](11-release-polish-plan.md) (commit and push per milestone, the gates, the rules in section "Rules").
 
@@ -227,6 +227,18 @@ Measurements:
 - Documentation: a new "OpenAPI and the documentation page" subsection in docs/05 and in `examples.md` (the program in section 1, compiled by the guide test), the API table, the error code, `docs/release-notes.md` ("What changed" and limitations), `docs/06-roadmap.md`, README feature list, `editors/` snippets if they list annotation names, and the D entries.
 - Run the whole gate list, including the benchmark checks, and the browser script of milestone 4 again. Update this file with what was built and what was left out.
 - Leave to the owner: whether the next version number is 1.1.0 (this is a new feature; do not change the version without asking).
+
+**Done** (D99). `security=["token"]` on an annotation (a list of names, any one of which the operation accepts); `http.bearer`, `http.basic_auth` and `http.api_key` make `http.SecurityScheme` values for `docs(security={...})`, listed under `components.securitySchemes`; a route naming a scheme `docs` was not given panics when the document is built (`tests/run/openapi_unknown_scheme.wb`). `http.Tag(name, description)` in `docs(tags=[...])` describes the tags and orders the page's groups. The page shows "needs credentials" on such operations, names the schemes in the operation, and explains that it cannot set cookies. Tests: `tests/http/secured_docs.wb` enforces a token and an API key in middleware, and `openapi.rs` checks its golden document and that each declared status (401 included) is what the service answers with and without credentials; `tests/ui/route_annotation_errors.wb` has the bad `security=` forms; `core.test.js` tests the scheme labels. The viewer is now 45.7 KB. The documentation is in docs/05 ("OpenAPI and the documentation page" and the API table), `docs/examples.md` (section 18, run by the guide test), the release notes, the roadmap and the README. No editor file lists annotation arguments, so none changed. The version stays 1.0.0 for the owner to decide.
+
+### What was built, and what was left out
+
+Everything in sections 4.1 to 4.5 is built, with these differences:
+- `security=` takes alternatives (any one scheme), not combinations; there is no document-wide default requirement, so each route names its schemes.
+- `docs` panics, rather than reporting at compile time, for an unknown scheme name: the names given to `docs` are run-time values.
+- A generic struct cannot be a handler's body or return type directly (a limit of the route checker that predates this work; D97).
+- Unoptimised builds (`build` without `--release`) keep all of the `http` module's code, used or not, as they did before; the "only in programs that call `docs`" guarantee is for optimised builds.
+
+Left out, as section 4.6 planned: `group.docs`; examples beyond defaults; callbacks, webhooks and links; OAuth2 and OpenID Connect flows; file uploads, `multipart/form-data` and XML bodies in "Try it out"; other UIs; a `weby openapi` command.
 
 ## 7. Risks and open questions
 

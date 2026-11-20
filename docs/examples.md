@@ -1387,6 +1387,57 @@ def main():
 
 `server.on_error(...)` replaces this mapping.
 
+### API documentation
+
+`server.docs("/docs")` serves an interactive page that documents every mounted route, and the OpenAPI document behind it at `/docs/openapi.json`. Everything in it comes from the code you already wrote: parameter and body types, the status, the response type, and the docstring. Annotations can add `tags=`, `errors=` (statuses the handler returns besides the 400s the compiler generates), `deprecated=True` and `security=`:
+
+```python
+import http
+import json
+
+@derive(Json)
+@frozen
+struct Note:
+    text: str
+
+@frozen
+struct Notes:
+    pass
+
+impl Notes:
+    @http.get("/notes/{id}", errors=[404])
+    def get(self, id: int) -> Result[Note]:
+        """Fetch one note.
+
+        Answers 404 when there is no such note.
+        """
+        return Err(http.Error(404, "no such note"))
+
+    @http.post("/notes", status=201, security=["token"], errors=[401])
+    def add(self, body: Note) -> Note:
+        return body
+
+def main():
+    server = http.Server()
+    server.mount(Notes(), prefix="/api")
+    server.docs("/docs", title="Notes", version="1.0.0", security={"token": http.bearer()})
+
+    # The page is at /docs once the server listens. The same document, as text:
+    doc = json.parse(server.openapi_json(title="Notes", security={"token": http.bearer()})).unwrap()
+    get = doc["paths"]["/api/notes/{id}"]["get"]
+    print(get["summary"].as_str().unwrap())
+    print(get["parameters"][0]["schema"]["type"].as_str().unwrap())
+    print(doc["paths"]["/api/notes"]["post"]["security"][0])
+```
+
+```text
+Fetch one note.
+integer
+{"token":[]}
+```
+
+The page groups the routes by tag (here `Notes`, the type's name), shows their parameters, bodies and responses, and has "Try it out" to send real requests. Its "Authorize" box takes the token for the routes that need one. The documentation only describes `security`: checking the token is still the job of your middleware.
+
 ## 19. WebSockets
 
 `@http.ws(path)` declares a WebSocket endpoint. The handler runs in its own task for the life of the connection, and `for msg in ws` ends when the client closes. The runtime handles pings, fragmentation and the closing handshake, and the implementation passes the Autobahn conformance suite.

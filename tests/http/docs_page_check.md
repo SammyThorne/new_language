@@ -26,6 +26,14 @@ It prints `listening on 127.0.0.1:PORT`. Open `http://127.0.0.1:PORT/docs` in a 
 10. **Phone width.** Narrow the window to about 375 pixels (or use device emulation): no sideways scrolling; the parameter tables drop their "In" column and the "Try it out" fields stack above their labels.
 11. **Keyboard.** Tab through the page: every operation, button and field gets a visible focus ring, Enter or Space opens an operation, and each field's label is read with it.
 
+## Credentials
+
+Build and start `tests/http/secured_docs.wb` the same way and open its `/docs`.
+
+12. **Needs credentials.** `POST /notes` and `GET /report` carry a "needs credentials" badge; opened, `POST /notes` says "Credentials: **token** (bearer token)". The "notes" group shows its description with **writing** in bold.
+13. **Authorize.** Press "Authorize": a field for each of `key`, `login`, `session` and `token`, with the token's description, and a note under `session` that a page cannot set cookies.
+14. **Try it out with a token.** Send `POST /notes` with no token: `401`. Type `secret` into the `token` field and send again: `201`, and the `curl` command has `-H 'Authorization: Bearer secret'`. `GET /report` with `k123` in `key` instead: `200`.
+
 ## Last run
 
-2026-11-20, Chromium in the desktop app's browser pane, against the todo service: every step as described, no console errors.
+2026-11-20, Chromium in the desktop app's browser pane, against the todo service (steps 1 to 11) and the secured service (steps 12 to 14): every step as described, with no script errors (the console shows only the browser's own note of the deliberate `401`).
