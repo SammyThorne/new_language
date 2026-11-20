@@ -1,6 +1,6 @@
 # Release notes
 
-The first release of Weby, a compiled, Python-shaped language for web backends. `weby --version` reports 1.0.0. This page says what the language has, what it does not, and how to install it. The state of each part, with the reasoning behind the choices, is in the [roadmap](06-roadmap.md) and the [decision log](08-decisions-and-risks.md); [Weby by example](examples.md) teaches the language, and every program in it is compiled and run by the test suite.
+Weby is a compiled, Python-shaped language for web backends. `weby --version` reports 1.1.0: the first release, 1.0.0, with the API documentation of [1.1.0](#new-in-110) added. This page says what the language has, what it does not, and how to install it. The state of each part, with the reasoning behind the choices, is in the [roadmap](06-roadmap.md) and the [decision log](08-decisions-and-risks.md); [Weby by example](examples.md) teaches the language, and every program in it is compiled and run by the test suite.
 
 ## What the language has
 
@@ -23,7 +23,7 @@ The first release of Weby, a compiled, Python-shaped language for web backends. 
 
 **Performance.** On this repository's benchmarks every program runs faster than Go's version (between 1.1 and 3.0 times), and the HTTP endpoints serve 1.8 to 3.1 times Go's request rate at 256 connections with about 40% of its CPU per request. Idle WebSocket connections cost about 19 KiB each. A small program's executable is 0.5 MB and the benchmark web server's 1.3 MB. The numbers, how they were measured and what limits them are in [web-performance.md](web-performance.md) and [bench/README.md](../bench/README.md). `bench/run.py --check` and `bench/http/counts.py --check` fail on a regression.
 
-## Since 1.0.0 (not yet released)
+## New in 1.1.0
 
 **API documentation** ([plan](12-openapi-docs-plan.md), D96 to D99). `server.docs("/docs")` serves an OpenAPI 3.1 document of the server's routes at `/docs/openapi.json` and `/docs/openapi.yaml`, and a documentation page at `/docs`, like FastAPI's `/docs` and Fastify's swagger plugins:
 

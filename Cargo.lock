@@ -181,7 +181,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "lang_cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "clap",
  "lang_codegen",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "lang_codegen"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "inkwell",
  "lang_diag",
@@ -205,19 +205,19 @@ dependencies = [
 
 [[package]]
 name = "lang_diag"
-version = "1.0.0"
+version = "1.1.0"
 
 [[package]]
 name = "lang_format"
-version = "1.0.0"
+version = "1.1.0"
 
 [[package]]
 name = "lang_names"
-version = "1.0.0"
+version = "1.1.0"
 
 [[package]]
 name = "lang_rt"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "lang_format",
  "lang_names",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "lang_sema"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "lang_diag",
  "lang_format",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "lang_syntax"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "lang_diag",
 ]
