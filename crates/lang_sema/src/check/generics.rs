@@ -71,6 +71,25 @@ pub(super) struct ImplTemplate<'m> {
 /// Which argument fills each parameter of a call: an expression, or `None` for the default.
 pub(super) type Arranged<'e> = Vec<Option<&'e ast::Expr>>;
 
+/// What a prelude function that stands for a method of a built-in type has besides the written
+/// arguments (docs/11, milestone 2): the name to show in messages, the receiver, already
+/// checked, as its first argument, and the text of the call's location as its hidden last one.
+#[derive(Default)]
+pub(super) struct Extra {
+    pub name: Option<String>,
+    pub receiver: Option<hir::Expr>,
+    pub location: Option<hir::Expr>,
+}
+
+impl Extra {
+    /// The parameters the caller writes: all but the receiver and the location.
+    pub fn written<'p>(&self, params: &'p [super::ParamSig]) -> &'p [super::ParamSig] {
+        let first = usize::from(self.receiver.is_some());
+        let last = params.len() - usize::from(self.location.is_some());
+        &params[first..last]
+    }
+}
+
 impl<'m> Checker<'_, 'm> {
     // ---- declaring templates ------------------------------------------------------------
 
@@ -713,8 +732,11 @@ impl<'m> Checker<'_, 'm> {
                         format!("`{shown}` does not implement `{tr}`, which `{owner}` requires of `{}`", param.name),
                         span,
                         format!("`{}` is `{shown}` here", param.name),
-                    )
-                    .with_label(param.span, format!("`{}: {tr}` is required here", param.name));
+                    );
+                    if param.span.file != self.prelude_file {
+                        diagnostic =
+                            diagnostic.with_label(param.span, format!("`{}: {tr}` is required here", param.name));
+                    }
                     let json = [self.builtin().to_json, self.builtin().from_json].contains(&required);
                     if json && matches!(self.types.kind(*arg), TyKind::Struct(_) | TyKind::Enum(_)) {
                         diagnostic = diagnostic.with_help(format!("add `@derive(Json)` to `{shown}`"));
@@ -764,18 +786,21 @@ impl<'m> Checker<'_, 'm> {
         let mut ok = true;
         let uses_keywords = args.iter().any(|a| a.name.is_some());
         let has_defaults = params.iter().any(|p| p.default.is_some());
+        // The prelude's source is not something a user reads, so it gets no "defined here".
+        let in_prelude = def_span.file == self.prelude_file;
         let count_error = |this: &mut Self| {
             let given = args.len();
             let verb = if given == 1 { "was" } else { "were" };
-            this.error(
-                Diagnostic::error(
-                    codes::WRONG_ARG_COUNT,
-                    format!("`{name}` takes {} but {given} {verb} given", plural(params.len(), "argument")),
-                    span,
-                    format!("expected {}", plural(params.len(), "argument")),
-                )
-                .with_label(def_span, format!("`{name}` is defined here")),
+            let mut diagnostic = Diagnostic::error(
+                codes::WRONG_ARG_COUNT,
+                format!("`{name}` takes {} but {given} {verb} given", plural(params.len(), "argument")),
+                span,
+                format!("expected {}", plural(params.len(), "argument")),
             );
+            if !in_prelude {
+                diagnostic = diagnostic.with_label(def_span, format!("`{name}` is defined here"));
+            }
+            this.error(diagnostic);
         };
         if !uses_keywords && !has_defaults && args.len() != params.len() {
             count_error(self);
@@ -809,8 +834,10 @@ impl<'m> Checker<'_, 'm> {
                             format!("`{name}` has no parameter named `{}`", keyword.name),
                             keyword.span,
                             "no such parameter",
-                        )
-                        .with_label(def_span, format!("`{name}` is defined here"));
+                        );
+                        if !in_prelude {
+                            diagnostic = diagnostic.with_label(def_span, format!("`{name}` is defined here"));
+                        }
                         if let Some(s) = super::closest(&keyword.name, params.iter().map(|p| p.name.as_str())) {
                             diagnostic = diagnostic.with_help(format!("did you mean `{s}`?"));
                         }
@@ -840,15 +867,16 @@ impl<'m> Checker<'_, 'm> {
             .collect();
         if !missing.is_empty() {
             let word = if missing.len() == 1 { "argument" } else { "arguments" };
-            self.error(
-                Diagnostic::error(
-                    codes::WRONG_ARG_COUNT,
-                    format!("`{name}` is missing the {word} {}", missing.join(", ")),
-                    span,
-                    format!("missing {}", missing.join(", ")),
-                )
-                .with_label(def_span, format!("`{name}` is defined here")),
+            let mut diagnostic = Diagnostic::error(
+                codes::WRONG_ARG_COUNT,
+                format!("`{name}` is missing the {word} {}", missing.join(", ")),
+                span,
+                format!("missing {}", missing.join(", ")),
             );
+            if !in_prelude {
+                diagnostic = diagnostic.with_label(def_span, format!("`{name}` is defined here"));
+            }
+            self.error(diagnostic);
             return None;
         }
         ok.then_some(slots)
@@ -944,30 +972,49 @@ impl<'m> Checker<'_, 'm> {
         span: Span,
         expected: Option<Ty>,
     ) -> hir::Expr {
+        self.call_generic_with(cx, index, Extra::default(), args, span, expected)
+    }
+
+    /// `call_generic`, for a prelude function that stands for a method of a built-in type: the
+    /// receiver is already checked and is the first parameter, and a hidden last parameter may
+    /// take the call's location.
+    pub(super) fn call_generic_with(
+        &mut self,
+        cx: &mut FnCx,
+        index: usize,
+        extra: Extra,
+        args: &[ast::Arg],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> hir::Expr {
         let pattern = self.generic_fns[index].pattern.expect("generic functions have a pattern");
         let params = self.generic_fns[index].params.clone();
         let signature = self.signatures[pattern.0].clone();
-        let Some(slots) = self.arrange(&signature.name, signature.name_span, &signature.params, args, span) else {
+        let name = extra.name.clone().unwrap_or_else(|| signature.name.clone());
+        let written = extra.written(&signature.params);
+        let Some(slots) = self.arrange(&name, signature.name_span, written, args, span) else {
             self.check_all_quietly(cx, args);
             return error_expr(span);
         };
         let pairs: Vec<(Ty, &ast::Expr)> =
-            slots.iter().zip(&signature.params).filter_map(|(s, p)| s.map(|e| (p.ty, e))).collect();
+            slots.iter().zip(written).filter_map(|(s, p)| s.map(|e| (p.ty, e))).collect();
         let mut found = vec![None; params.len()];
+        if let Some(receiver) = &extra.receiver {
+            self.unify(signature.params[0].ty, receiver.ty, &params, &mut found);
+        }
         self.infer_from_args(cx, &pairs, &params, &mut found);
         if found.iter().any(Option::is_none)
             && let Some(expected) = expected
         {
             self.unify(signature.ret, expected, &params, &mut found);
         }
-        let name = signature.name.clone();
         let Some(bound) = found.iter().copied().collect::<Option<Vec<Ty>>>() else {
             let example = format!("{name}[{}](...)", params.iter().map(|_| "int").collect::<Vec<_>>().join(", "));
             self.cannot_infer(&name, &params, &found, span, &example);
             self.check_all_quietly(cx, args);
             return error_expr(span);
         };
-        self.finish_generic_call(cx, index, bound, args, span)
+        self.finish_generic_call(cx, index, bound, extra, args, span)
     }
 
     /// `f[int, str](...)`: a generic function with explicit type arguments.
@@ -991,7 +1038,7 @@ impl<'m> Checker<'_, 'm> {
             self.check_all_quietly(cx, args);
             return error_expr(span);
         }
-        self.finish_generic_call(cx, index, type_args, args, span)
+        self.finish_generic_call(cx, index, type_args, Extra::default(), args, span)
     }
 
     fn finish_generic_call(
@@ -999,18 +1046,22 @@ impl<'m> Checker<'_, 'm> {
         cx: &mut FnCx,
         index: usize,
         bound: Vec<Ty>,
+        extra: Extra,
         args: &[ast::Arg],
         span: Span,
     ) -> hir::Expr {
         let params = self.generic_fns[index].params.clone();
-        let name = self.generic_fns[index].ast.name.name.clone();
+        let name = extra.name.clone().unwrap_or_else(|| self.generic_fns[index].ast.name.name.clone());
         if bound.contains(&Ty::ERROR) || !self.check_bounds(&name, &params, &bound, span) {
             self.check_all_quietly(cx, args);
             return error_expr(span);
         }
         let func = self.instantiate_fn(index, bound, span);
         let signature = self.signatures[func.0].clone();
-        let values = self.call_args(cx, &name, signature.name_span, &signature.params, args, span);
+        let written = extra.written(&signature.params);
+        let mut values: Vec<hir::Expr> = extra.receiver.iter().cloned().collect();
+        values.extend(self.call_args(cx, &name, signature.name_span, written, args, span));
+        values.extend(extra.location);
         hir::Expr { kind: hir::ExprKind::Call { func, args: values }, ty: signature.ret, span }
     }
 

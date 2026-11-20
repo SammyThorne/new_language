@@ -312,6 +312,10 @@ Add these, each with a "did you mean" from the Python spelling where the name di
 - docs/01 line 116;
 - the method lists in examples.md.
 
+### Done
+
+Carried out on 2026-11-20 as D92 in [08](08-decisions-and-risks.md), by the first mechanism in 2.1: prelude functions found by name, not `impl` blocks. Differences from the plan: `str.index` panics rather than returning an optional (the list's `index` panics, and D92 gives the reasons); the hidden `__at` parameter gives prelude panics the caller's location, which the plan did not foresee; the `__` names are not hidden from user code, since generated code uses them; `zfill`, `partition` and `rpartition` follow Python exactly, and `split_lines` handles only `\n`, `\r\n` and `\r`.
+
 ### Exit criteria
 
 - The methods above exist, written in the prelude except where a runtime function is needed for speed or Unicode.

@@ -20,7 +20,7 @@ fn planned_function_help(name: &str) -> Option<&'static str> {
         "open" => "open a file with `io.open(path)` after `import io`; it gives a `Result`",
         "map" => "use a list comprehension: `[f(x) for x in items]`",
         "filter" => "use a list comprehension with a condition: `[x for x in items if keep(x)]`",
-        "reversed" | "set" => "`{name}` is not available yet",
+        "set" => "`set` is not available yet",
         _ => return None,
     })
 }
@@ -766,8 +766,14 @@ impl Checker<'_, '_> {
                 let signature = &self.signatures[id.0];
                 let (fname, def_span, params, ret) =
                     (signature.name.clone(), signature.name_span, signature.params.clone(), signature.ret);
-                let args = self.call_args(cx, &fname, def_span, &params, args, span);
-                mk(K::Call { func: id, args }, ret, span)
+                // A hidden last parameter `__at` takes the location of the call.
+                let wants_location = params.last().is_some_and(|p| p.name == "__at");
+                let written = &params[..params.len() - usize::from(wants_location)];
+                let mut values = self.call_args(cx, &fname, def_span, written, args, span);
+                if wants_location {
+                    values.push(self.location_arg(span));
+                }
+                mk(K::Call { func: id, args: values }, ret, span)
             }
             Global::GenericFunction(index) => self.call_generic(cx, index, args, span, expected),
             Global::Struct(id) => self.construct(cx, id, args, span),
@@ -988,6 +994,14 @@ impl Checker<'_, '_> {
                 }
             })
             .collect()
+    }
+
+    /// The location of a call as `file:line:col` text, the form of a panic's location, for the
+    /// prelude functions whose last parameter is `__at`.
+    pub(super) fn location_arg(&self, span: Span) -> hir::Expr {
+        let file = self.sources.get(span.file);
+        let (line, col) = file.line_col(span.lo as usize);
+        mk(K::Str(format!("{}:{line}:{col}", file.name)), Ty::STR, span)
     }
 
     fn call_func(
@@ -2236,6 +2250,23 @@ impl Checker<'_, '_> {
                 .with_help(format!("convert first: `{to}(a) {symbol} {to}(b)`")),
             );
             return error_expr(span);
+        }
+        // `items * n` and `n * items` repeat a list: the prelude's `__list_repeat`.
+        if op == A::Mul
+            && let Some(&(Global::GenericFunction(index), _)) = self.globals.get("__list_repeat")
+        {
+            let list_first = match (self.types.kind(l.ty), self.types.kind(r.ty)) {
+                (TyKind::List(_), TyKind::Int) => Some(true),
+                (TyKind::Int, TyKind::List(_)) => Some(false),
+                _ => None,
+            };
+            if let Some(list_first) = list_first {
+                let (items, times) = if list_first { (l, r) } else { (r, l) };
+                let TyKind::List(elem) = *self.types.kind(items.ty) else { unreachable!() };
+                let ty = items.ty;
+                let func = self.instantiate_fn(index, vec![elem], span);
+                return mk(K::Call { func, args: vec![items, times] }, ty, span);
+            }
         }
         let (hir_op, ty) = match (op, self.types.kind(l.ty), self.types.kind(r.ty)) {
             (A::Add, TyKind::Int, TyKind::Int) => (B::IntAdd, Ty::INT),

@@ -132,3 +132,220 @@ trait ToJson:
 trait FromJson:
     """Types that `json.decode` can read. `@derive(Json)` implements it with generated code."""
     pass
+
+# ---- methods of the built-in types ---------------------------------------------------------
+#
+# `value.method(...)` on a `str`, `list`, `dict` and so on calls a function named
+# `__<type>_<method>` here when the compiler itself has no such method (or none taking these
+# arguments). The value is the first argument. A last parameter named `__at` is filled in with
+# the location of the call, for `__panic_at`, so that a panic points at the caller's line.
+
+@extern("lrt_panic")
+def __panic_at(message: str, where: str)
+
+# -- str
+
+@extern("lrt_str_count")
+def __str_count(text: str, sub: str) -> int
+
+@extern("lrt_str_rfind")
+def __str_rfind(text: str, sub: str) -> int
+
+@extern("lrt_str_class")
+def __str_class(text: str, class_id: int) -> int
+
+@extern("lrt_str_title")
+def __str_title(text: str) -> str
+
+@extern("lrt_str_capitalize")
+def __str_capitalize(text: str) -> str
+
+@extern("lrt_str_strip_chars")
+def __str_strip_chars(text: str, chars: str, mode: int) -> str
+
+@extern("lrt_str_ord")
+def __str_ord(text: str) -> int
+
+@extern("lrt_str_chr_ok")
+def __chr_ok(code: int) -> int
+
+@extern("lrt_str_chr")
+def __chr_text(code: int) -> str
+
+def __str_index(text: str, sub: str, __at: str) -> int:
+    at = text.find(sub)
+    if at < 0:
+        __panic_at("index(): the substring is not in the string", __at)
+    return at
+
+def __str_is_digit(text: str) -> bool:
+    return __str_class(text, 0) == 1
+
+def __str_is_alpha(text: str) -> bool:
+    return __str_class(text, 1) == 1
+
+def __str_is_alnum(text: str) -> bool:
+    return __str_class(text, 2) == 1
+
+def __str_is_space(text: str) -> bool:
+    return __str_class(text, 3) == 1
+
+def __str_is_upper(text: str) -> bool:
+    return __str_class(text, 4) == 1
+
+def __str_is_lower(text: str) -> bool:
+    return __str_class(text, 5) == 1
+
+def __str_strip(text: str, chars: str) -> str:
+    return __str_strip_chars(text, chars, 0)
+
+def __str_lstrip(text: str, chars: str) -> str:
+    return __str_strip_chars(text, chars, 1)
+
+def __str_rstrip(text: str, chars: str) -> str:
+    return __str_strip_chars(text, chars, 2)
+
+def __str_remove_prefix(text: str, prefix: str) -> str:
+    if text.starts_with(prefix):
+        return text[len(prefix):]
+    return text
+
+def __str_remove_suffix(text: str, suffix: str) -> str:
+    if len(suffix) > 0 and text.ends_with(suffix):
+        return text[:len(text) - len(suffix)]
+    return text
+
+def __str_partition(text: str, sep: str, __at: str) -> tuple[str, str, str]:
+    if len(sep) == 0:
+        __panic_at("partition(): empty separator", __at)
+    at = text.find(sep)
+    if at < 0:
+        return (text, "", "")
+    return (text[:at], sep, text[at + len(sep):])
+
+def __str_rpartition(text: str, sep: str, __at: str) -> tuple[str, str, str]:
+    if len(sep) == 0:
+        __panic_at("rpartition(): empty separator", __at)
+    at = __str_rfind(text, sep)
+    if at < 0:
+        return ("", "", text)
+    return (text[:at], sep, text[at + len(sep):])
+
+def __str_split(text: str, sep: str, limit: int = -1, __at: str) -> list[str]:
+    """`text.split(sep, limit)`: at most `limit` splits, from the left; no limit if negative."""
+    if len(sep) == 0:
+        __panic_at("split(): empty separator", __at)
+    parts: list[str] = []
+    rest = text
+    splits = 0
+    while limit < 0 or splits < limit:
+        at = rest.find(sep)
+        if at < 0:
+            break
+        parts.append(rest[:at])
+        rest = rest[at + len(sep):]
+        splits += 1
+    parts.append(rest)
+    return parts
+
+def __str_rsplit(text: str, sep: str, limit: int = -1, __at: str) -> list[str]:
+    """`text.rsplit(sep, limit)`: like `split`, but the splits are made from the right."""
+    if len(sep) == 0:
+        __panic_at("rsplit(): empty separator", __at)
+    parts: list[str] = []
+    rest = text
+    splits = 0
+    while limit < 0 or splits < limit:
+        at = __str_rfind(rest, sep)
+        if at < 0:
+            break
+        parts.append(rest[at + len(sep):])
+        rest = rest[:at]
+        splits += 1
+    parts.append(rest)
+    parts.reverse()
+    return parts
+
+def __str_split_lines(text: str) -> list[str]:
+    """Lines split at `\n`, `\r\n` and `\r`, without the line breaks; none for an empty text."""
+    if len(text) == 0:
+        return []
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if lines[len(lines) - 1] == "":
+        lines.pop()
+    return lines
+
+def __str_zfill(text: str, width: int) -> str:
+    """The text padded with zeros on the left to `width` characters, after a sign if it has one."""
+    chars = 0
+    for _ in text:
+        chars += 1
+    if chars >= width:
+        return text
+    fill = "0" * (width - chars)
+    if text.starts_with("-") or text.starts_with("+"):
+        return text[:1] + fill + text[1:]
+    return fill + text
+
+def ord(character: str, __at: str) -> int:
+    code = __str_ord(character)
+    if code < 0:
+        __panic_at("ord() needs a string of exactly one character", __at)
+    return code
+
+def chr(code: int, __at: str) -> str:
+    if __chr_ok(code) == 0:
+        __panic_at(f"chr(): {code} is not a valid character code", __at)
+    return __chr_text(code)
+
+def __chars(text: str) -> list[str]:
+    """`list(text)`: the characters of a string."""
+    out: list[str] = []
+    for character in text:
+        out.append(character)
+    return out
+
+# -- list
+
+def __list_count[T: Eq](items: list[T], value: T) -> int:
+    total = 0
+    for item in items:
+        if item == value:
+            total += 1
+    return total
+
+def __list_repeat[T](items: list[T], times: int) -> list[T]:
+    """`items * times` and `times * items`."""
+    out: list[T] = []
+    for _ in range(times):
+        out.extend(items)
+    return out
+
+def reversed[T](items: list[T]) -> list[T]:
+    """The items in the opposite order, as a new list."""
+    out: list[T] = []
+    for index in range(len(items) - 1, -1, -1):
+        out.append(items[index])
+    return out
+
+# -- dict
+
+def __dict_get_or_insert[K: Hash, V](entries: dict[K, V], key: K, default: V) -> V:
+    """`entries.setdefault(key, default)`: the value for `key`, stored first if it was missing."""
+    if key not in entries:
+        entries[key] = default
+    return entries[key]
+
+def __dict_update[K: Hash, V](entries: dict[K, V], other: dict[K, V]):
+    for key, value in other.items():
+        entries[key] = value
+
+def __dict_copy[K: Hash, V](entries: dict[K, V]) -> dict[K, V]:
+    return {key: value for key, value in entries.items()}
+
+def __dict_pop_or[K: Hash, V](entries: dict[K, V], key: K, default: V) -> V:
+    if key in entries:
+        value = entries[key]
+        entries.pop(key)
+        return value
+    return default

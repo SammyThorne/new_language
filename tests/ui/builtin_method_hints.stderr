@@ -1,0 +1,145 @@
+error[E0316]: `str` has no method `splitlines`
+  --> tests/ui/builtin_method_hints.wb:10:16
+   |
+10 |     print(text.splitlines(), text.isdigit(), text.isalpha(), text.removeprefix("a"))
+   |                ^^^^^^^^^^ no such method
+   |
+   = help: the method is called `split_lines`
+
+error[E0316]: `str` has no method `isdigit`
+  --> tests/ui/builtin_method_hints.wb:10:35
+   |
+10 |     print(text.splitlines(), text.isdigit(), text.isalpha(), text.removeprefix("a"))
+   |                                   ^^^^^^^ no such method
+   |
+   = help: the method is called `is_digit`
+
+error[E0316]: `str` has no method `isalpha`
+  --> tests/ui/builtin_method_hints.wb:10:51
+   |
+10 |     print(text.splitlines(), text.isdigit(), text.isalpha(), text.removeprefix("a"))
+   |                                                   ^^^^^^^ no such method
+   |
+   = help: the method is called `is_alpha`
+
+error[E0316]: `str` has no method `removeprefix`
+  --> tests/ui/builtin_method_hints.wb:10:67
+   |
+10 |     print(text.splitlines(), text.isdigit(), text.isalpha(), text.removeprefix("a"))
+   |                                                                   ^^^^^^^^^^^^ no such method
+   |
+   = help: the method is called `remove_prefix`
+
+error[E0316]: `str` has no method `startswith`
+  --> tests/ui/builtin_method_hints.wb:11:16
+   |
+11 |     print(text.startswith("a"), table.setdefault("k", 1), text.counts("a"))
+   |                ^^^^^^^^^^ no such method
+   |
+   = help: the method is called `starts_with`
+
+error[E0316]: `dict[str, int]` has no method `setdefault`
+  --> tests/ui/builtin_method_hints.wb:11:39
+   |
+11 |     print(text.startswith("a"), table.setdefault("k", 1), text.counts("a"))
+   |                                       ^^^^^^^^^^ no such method
+   |
+   = help: the method is called `get_or_insert`
+
+error[E0316]: `str` has no method `counts`
+  --> tests/ui/builtin_method_hints.wb:11:64
+   |
+11 |     print(text.startswith("a"), table.setdefault("k", 1), text.counts("a"))
+   |                                                                ^^^^^^ no such method
+   |
+   = help: did you mean `count`?
+
+error[E0301]: `str.count` takes 1 argument but 0 were given
+  --> tests/ui/builtin_method_hints.wb:12:11
+   |
+12 |     print(text.count(), text.count("a", "b"), text.count(1))
+   |           ^^^^^^^^^^^^ expected 1 argument
+
+error[E0301]: `str.count` takes 1 argument but 2 were given
+  --> tests/ui/builtin_method_hints.wb:12:25
+   |
+12 |     print(text.count(), text.count("a", "b"), text.count(1))
+   |                         ^^^^^^^^^^^^^^^^^^^^ expected 1 argument
+
+error[E0300]: expected `str`, found `int`
+  --> tests/ui/builtin_method_hints.wb:12:58
+   |
+12 |     print(text.count(), text.count("a", "b"), text.count(1))
+   |                                                          ^ expected `str`, found `int`
+   |
+   = help: convert it with `str(...)`, or use an f-string
+
+error[E0300]: expected `int`, found `str`
+  --> tests/ui/builtin_method_hints.wb:13:23
+   |
+13 |     print(items.count("a"), [Point(1)].count(Point(2)))
+   |                       ^^^ expected `int`, found `str`
+
+error[E0331]: `Point` does not implement `Eq`, which `list.count` requires of `T`
+  --> tests/ui/builtin_method_hints.wb:13:29
+   |
+13 |     print(items.count("a"), [Point(1)].count(Point(2)))
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^ `T` is `Point` here
+   |
+   = help: implement `Eq` for `Point`, or derive it
+
+error[E0300]: expected `int`, found `str`
+  --> tests/ui/builtin_method_hints.wb:14:27
+   |
+14 |     print(text.split(",", "x"), text.zfill())
+   |                           ^^^ expected `int`, found `str`
+
+error[E0301]: `str.zfill` takes 1 argument but 0 were given
+  --> tests/ui/builtin_method_hints.wb:14:33
+   |
+14 |     print(text.split(",", "x"), text.zfill())
+   |                                 ^^^^^^^^^^^^ expected 1 argument
+
+error[E0301]: `str.index` takes 1 argument but 2 were given
+  --> tests/ui/builtin_method_hints.wb:15:11
+   |
+15 |     print(text.index("a", 1), text.title(1), items.index(2, 3))
+   |           ^^^^^^^^^^^^^^^^^^ expected 1 argument
+
+error[E0301]: `str.title` takes 0 arguments but 1 was given
+  --> tests/ui/builtin_method_hints.wb:15:31
+   |
+15 |     print(text.index("a", 1), text.title(1), items.index(2, 3))
+   |                               ^^^^^^^^^^^^^ expected 0 arguments
+
+error[E0301]: `index` takes 1 argument but 2 were given
+  --> tests/ui/builtin_method_hints.wb:15:46
+   |
+15 |     print(text.index("a", 1), text.title(1), items.index(2, 3))
+   |                                              ^^^^^^^^^^^^^^^^^ expected 1 argument
+
+error[E0301]: `dict.get_or_insert` takes 2 arguments but 1 was given
+  --> tests/ui/builtin_method_hints.wb:16:11
+   |
+16 |     print(table.get_or_insert("a"), text.is_digit(1))
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^ expected 2 arguments
+
+error[E0301]: `str.is_digit` takes 0 arguments but 1 was given
+  --> tests/ui/builtin_method_hints.wb:16:37
+   |
+16 |     print(table.get_or_insert("a"), text.is_digit(1))
+   |                                     ^^^^^^^^^^^^^^^^ expected 0 arguments
+
+error[E0316]: `list.count` has no parameter named `key`
+  --> tests/ui/builtin_method_hints.wb:17:26
+   |
+17 |     print(items.count(1, key=2), text.split(sep=",", limit=1, extra=2))
+   |                          ^^^ no such parameter
+
+error[E0316]: `str.split` has no parameter named `extra`
+  --> tests/ui/builtin_method_hints.wb:17:63
+   |
+17 |     print(items.count(1, key=2), text.split(sep=",", limit=1, extra=2))
+   |                                                               ^^^^^ no such parameter
+
+error: could not compile `tests/ui/builtin_method_hints.wb` due to 21 errors

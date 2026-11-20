@@ -1,0 +1,35 @@
+# Methods of `str` that the prelude defines (docs/11, milestone 2). Each line is what the same
+# calls give in Python (with `split_lines` for `splitlines`, `is_digit` for `isdigit` and so on),
+# except the last, where offsets and lengths are in bytes.
+# expect: 2 1 6 3
+# expect: 4 -1 2
+# expect: ['a', 'b', 'c,d'] ['a', 'b,c,d'] ['a,b', 'c', 'd'] ['a,b,c', 'd'] ['a,b,c,d']
+# expect: hi hixx xxhi a b c
+# expect: ['one', 'two', 'three'] [] ['x'] ['a', '', 'b']
+# expect: ('key', '=', 'value=x') ('key=value', '=', 'x') ('none', '', '') ('', '', 'none')
+# expect: fix file a b.txt
+# expect: True False True False True
+# expect: True False True False True
+# expect: True False True False False
+# expect: True False False True False
+# expect: Hello World It'S Éa Hello 3Rd Place
+# expect: -0042 +0042 00007 héllo toolong 00héllo
+# expect: 8364 97 € a
+# expect: 2 6
+def main():
+    print("a-b-c".count("-"), "aaa".count("aa"), "héllo".count(""), "abcabcabc".count("abc"))
+    print("abcabc".rfind("bc"), "abcabc".rfind("zz"), "x".index("x") + 2)
+    csv = "a,b,c,d"
+    print(csv.split(",", 2), csv.split(",", 1), csv.rsplit(",", 2), csv.rsplit(",", 1), csv.rsplit(",", 0))
+    print("  hi ".strip(), "xxhixx".lstrip("x"), "xxhixx".rstrip("x").strip(), "-a b c-".strip("-"))
+    print("one\ntwo\r\nthree\n".split_lines(), "".split_lines(), "x".split_lines(), "a\n\nb".split_lines())
+    print("key=value=x".partition("="), "key=value=x".rpartition("="), "none".partition("="), "none".rpartition("="))
+    print("prefix-fix".remove_prefix("prefix-"), "file.txt".remove_suffix(".txt"), "a".remove_prefix("b"), "b.txt".remove_suffix(""))
+    print("123".is_digit(), "".is_digit(), "ab".is_alpha(), "a1".is_alpha(), "a1".is_alnum())
+    print(" \t\n".is_space(), "a b".is_space(), "ABC".is_upper(), "ABc".is_upper(), "abc".is_lower())
+    print("A1".is_upper(), "1".is_upper(), "é".is_lower(), "É".is_lower(), "".is_lower())
+    print("ab".is_alnum(), "".is_alnum(), "12".is_alpha(), "é".is_alpha(), "".is_space())
+    print("hello world".title(), "it's".title(), "éa".capitalize(), "HELLO".capitalize(), "3rd place".title())
+    print("-42".zfill(5), "+42".zfill(5), "7".zfill(5), "héllo".zfill(3), "toolong".zfill(3), "héllo".zfill(7))
+    print(ord("€"), ord("a"), chr(8364), chr(97))
+    print("héllo".find("l") - 1, len("héllo") + 0)

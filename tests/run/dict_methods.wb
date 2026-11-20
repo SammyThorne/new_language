@@ -1,0 +1,30 @@
+# `get_or_insert`, `update`, `copy` and `pop_or` of `dict`, written in the prelude (docs/11,
+# milestone 2): Python's `setdefault`, `update`, `copy` and `pop(key, default)`, with the same
+# results, including the copy being shallow.
+# expect: 1 20 {'a': 1, 'b': 20}
+# expect: {'x': [1, 2]}
+# expect: {'a': 1, 'b': 2} {'a': 100, 'b': 2, 'c': 3, 'd': 4}
+# expect: 100 -1 {'b': 2, 'c': 3, 'd': 4}
+# expect: {'k': [1, 2, 3]} {'k': [1, 2, 3]}
+# expect: {} 7
+def main():
+    counts: dict[str, int] = {}
+    counts["a"] = 1
+    print(counts.get_or_insert("a", 10), counts.get_or_insert("b", 20), counts)
+    lists: dict[str, list[int]] = {}
+    lists.get_or_insert("x", []).append(1)
+    lists.get_or_insert("x", []).append(2)
+    print(lists)
+    base = {"a": 1, "b": 2}
+    other = base.copy()
+    other["c"] = 3
+    other.update({"a": 100, "d": 4})
+    print(base, other)
+    print(other.pop_or("a", -1), other.pop_or("zzz", -1), other)
+    nested = {"k": [1, 2]}
+    shallow = nested.copy()
+    shallow["k"].append(3)
+    print(nested, shallow)
+    empty: dict[int, int] = {}
+    empty.update(empty)
+    print(empty.copy(), empty.pop_or(1, 7))

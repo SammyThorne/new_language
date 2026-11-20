@@ -5,14 +5,14 @@
 
 use lang_diag::Span;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Module {
     pub items: Vec<Item>,
     /// A zero-width span at the start of the file, for diagnostics about the file as a whole.
     pub start: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Item {
     Function(Function),
     Struct(StructDecl),
@@ -25,7 +25,7 @@ pub enum Item {
 }
 
 /// `type Handler = def(Request) -> Response`: another name for a type.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypeAliasDecl {
     pub visibility: Visibility,
     pub name: Ident,
@@ -33,7 +33,7 @@ pub struct TypeAliasDecl {
 }
 
 /// `import a.b`, `import a.b as c`, or `from a.b import x, y as z`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ImportDecl {
     /// The module's dotted name, one identifier per part.
     pub path: Vec<Ident>,
@@ -46,7 +46,7 @@ pub struct ImportDecl {
 
 /// `@name`, `@name(arg, ...)` or `@module.name(...)` before a declaration. A fixed,
 /// compiler-known set.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Annotation {
     /// The name, with dots for qualified names such as `http.get`.
     pub name: Ident,
@@ -55,14 +55,14 @@ pub struct Annotation {
 }
 
 /// One argument of an annotation: a name, a string, or `keyword=value`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AnnotationArg {
     pub keyword: Option<Ident>,
     pub value: AnnotationValue,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AnnotationValue {
     Name(Ident),
     Str(String),
@@ -85,7 +85,7 @@ pub struct GenericParam {
     pub bounds: Vec<Ident>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Function {
     pub annotations: Vec<Annotation>,
     pub visibility: Visibility,
@@ -102,7 +102,7 @@ pub struct Function {
     pub has_body: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StructDecl {
     pub annotations: Vec<Annotation>,
     pub visibility: Visibility,
@@ -111,7 +111,7 @@ pub struct StructDecl {
     pub fields: Vec<FieldDecl>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FieldDecl {
     /// `@json(name="...")` lines before the field.
     pub annotations: Vec<Annotation>,
@@ -122,7 +122,7 @@ pub struct FieldDecl {
     pub default: Option<Expr>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub annotations: Vec<Annotation>,
     pub visibility: Visibility,
@@ -131,14 +131,14 @@ pub struct EnumDecl {
     pub variants: Vec<VariantDecl>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VariantDecl {
     pub name: Ident,
     /// Payload fields; empty for a variant without a payload.
     pub fields: Vec<FieldDecl>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TraitDecl {
     pub visibility: Visibility,
     pub name: Ident,
@@ -148,7 +148,7 @@ pub struct TraitDecl {
     pub methods: Vec<Function>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ImplDecl {
     /// `impl[T] ...`: type parameters for implementing a generic type.
     pub generics: Vec<GenericParam>,
@@ -161,7 +161,7 @@ pub struct ImplDecl {
     pub methods: Vec<Function>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConstDecl {
     pub visibility: Visibility,
     pub name: Ident,
@@ -175,7 +175,7 @@ pub struct Ident {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Param {
     pub name: Ident,
     /// `None` when the hint is missing. That is a type error, not a syntax error, so the
@@ -185,13 +185,13 @@ pub struct Param {
     pub default: Option<Expr>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypeExpr {
     pub kind: TypeExprKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TypeExprKind {
     /// `int`, `list[int]`, `dict[str, int]`, `User`.
     Named { name: String, args: Vec<TypeExpr> },
@@ -203,13 +203,13 @@ pub enum TypeExprKind {
     Func { params: Vec<TypeExpr>, ret: Option<Box<TypeExpr>> },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Stmt {
     pub kind: StmtKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StmtKind {
     Expr(Expr),
     /// `target = value`, or `name: type = value`. The first assignment to a name declares it.
@@ -260,20 +260,20 @@ pub enum StmtKind {
     Pass,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Case {
     pub pattern: Pattern,
     pub guard: Option<Expr>,
     pub body: Vec<Stmt>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Pattern {
     pub kind: PatternKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PatternKind {
     /// `_`
     Wild,
@@ -292,13 +292,13 @@ pub enum PatternKind {
     Or(Vec<Pattern>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Target {
     pub kind: TargetKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TargetKind {
     Name(Ident),
     Attr {
@@ -313,13 +313,13 @@ pub enum TargetKind {
     Tuple(Vec<Target>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ExprKind {
     /// The literal's magnitude; a leading `-` is a separate unary operator.
     Int(u64),
@@ -394,21 +394,21 @@ pub enum ExprKind {
 }
 
 /// One `for ... in ... if ...` clause of a comprehension.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompClause {
     pub target: Target,
     pub iter: Expr,
     pub conditions: Vec<Expr>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Arg {
     /// Set for keyword arguments: `name=value`.
     pub name: Option<Ident>,
     pub value: Expr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FStringPart {
     Literal(String),
     /// `{expr}`, `{expr:spec}`, `{expr!r}` or `{expr!r:spec}`. `conversion` is `r` or `s`.

@@ -1,0 +1,17 @@
+# Python's names for methods get the name used here, other near misses get a suggestion, and the
+# prelude's methods are named `str.count` and so on in messages, never `__str_count`.
+struct Point:
+    x: int
+
+def main():
+    text = "a,b"
+    items = [1, 2, 3]
+    table = {"a": 1}
+    print(text.splitlines(), text.isdigit(), text.isalpha(), text.removeprefix("a"))
+    print(text.startswith("a"), table.setdefault("k", 1), text.counts("a"))
+    print(text.count(), text.count("a", "b"), text.count(1))
+    print(items.count("a"), [Point(1)].count(Point(2)))
+    print(text.split(",", "x"), text.zfill())
+    print(text.index("a", 1), text.title(1), items.index(2, 3))
+    print(table.get_or_insert("a"), text.is_digit(1))
+    print(items.count(1, key=2), text.split(sep=",", limit=1, extra=2))

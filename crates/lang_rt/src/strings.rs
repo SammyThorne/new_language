@@ -271,6 +271,129 @@ str_to_str!(lrt_str_strip, |t| share(t.trim()));
 str_to_str!(lrt_str_lstrip, |t| share(t.trim_start()));
 str_to_str!(lrt_str_rstrip, |t| share(t.trim_end()));
 
+// ---- what the prelude's methods of `str` are built on (docs/11, milestone 2) ----
+
+/// How many times `needle` occurs in the text, without overlaps. For an empty needle, the number
+/// of characters plus one, as Python counts.
+///
+/// # Safety
+/// Both strings must be valid (pointer, length) pairs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_str_count(hp: *const u8, hl: i64, np: *const u8, nl: i64) -> i64 {
+    let (text, needle) = unsafe { (s(hp, hl), s(np, nl)) };
+    if needle.is_empty() { text.chars().count() as i64 + 1 } else { text.matches(needle).count() as i64 }
+}
+
+/// Byte offset of the last occurrence of `needle`, or -1.
+///
+/// # Safety
+/// Both strings must be valid (pointer, length) pairs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_str_rfind(hp: *const u8, hl: i64, np: *const u8, nl: i64) -> i64 {
+    unsafe { s(hp, hl).rfind(s(np, nl)) }.map_or(-1, |i| i as i64)
+}
+
+/// Whether every character of a non-empty string is in a class: 0 an ASCII digit, 1 a letter,
+/// 2 a letter or number, 3 white space. Classes 4 and 5 are Python's `isupper` and `islower`: at
+/// least one cased character, and none of the other case. Gives 1 or 0.
+///
+/// # Safety
+/// The string must be a valid (pointer, length) pair.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_str_class(ptr: *const u8, len: i64, class: i64) -> i64 {
+    let text = unsafe { s(ptr, len) };
+    if text.is_empty() {
+        return 0;
+    }
+    let yes = match class {
+        0 => text.bytes().all(|b| b.is_ascii_digit()),
+        1 => text.chars().all(char::is_alphabetic),
+        2 => text.chars().all(char::is_alphanumeric),
+        3 => text.chars().all(char::is_whitespace),
+        4 => text.chars().any(char::is_uppercase) && !text.chars().any(char::is_lowercase),
+        _ => text.chars().any(char::is_lowercase) && !text.chars().any(char::is_uppercase),
+    };
+    yes as i64
+}
+
+/// The first letter of each word in upper case and the rest in lower case, where a word is a
+/// run of cased letters, as Python's `title` has it.
+fn title_case(text: &str) -> Str {
+    let mut out = String::with_capacity(text.len());
+    let mut in_word = false;
+    for c in text.chars() {
+        if in_word {
+            out.extend(c.to_lowercase());
+        } else {
+            out.extend(c.to_uppercase());
+        }
+        in_word = c.is_lowercase() || c.is_uppercase();
+    }
+    Str::from_bytes(out.as_bytes())
+}
+
+/// The first character in upper case and the rest in lower case.
+fn capitalized(text: &str) -> Str {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else { return Str::empty() };
+    let mut out = String::with_capacity(text.len());
+    out.extend(first.to_uppercase());
+    out.extend(chars.flat_map(char::to_lowercase));
+    Str::from_bytes(out.as_bytes())
+}
+
+str_to_str!(lrt_str_title, title_case);
+str_to_str!(lrt_str_capitalize, capitalized);
+
+/// `strip(chars)`, `lstrip(chars)` and `rstrip(chars)`: remove the characters in `chars` from both
+/// ends (`mode` 0), the start (1) or the end (2). The result shares the text.
+///
+/// # Safety
+/// Both strings must be valid (pointer, length) pairs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_str_strip_chars(
+    ptr: *const u8,
+    len: i64,
+    chars: *const u8,
+    chars_len: i64,
+    mode: i64,
+) -> Str {
+    let (text, chars) = unsafe { (s(ptr, len), s(chars, chars_len)) };
+    let in_set = |c: char| chars.contains(c);
+    share(match mode {
+        0 => text.trim_matches(in_set),
+        1 => text.trim_start_matches(in_set),
+        _ => text.trim_end_matches(in_set),
+    })
+}
+
+/// The code point of a one-character string, or -1.
+///
+/// # Safety
+/// The string must be a valid (pointer, length) pair.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_str_ord(ptr: *const u8, len: i64) -> i64 {
+    let mut chars = unsafe { s(ptr, len) }.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => c as i64,
+        _ => -1,
+    }
+}
+
+/// Whether `code` is a Unicode scalar value, which `lrt_str_chr` can make a string of.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_str_chr_ok(code: i64) -> i64 {
+    u32::try_from(code).ok().and_then(char::from_u32).is_some() as i64
+}
+
+/// The one-character string for a code point that `lrt_str_chr_ok` accepted.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_str_chr(code: i64) -> Str {
+    let c = u32::try_from(code).ok().and_then(char::from_u32).unwrap_or('\u{fffd}');
+    let mut buffer = [0u8; 4];
+    Str::from_bytes(c.encode_utf8(&mut buffer).as_bytes())
+}
+
 fn list_of_strs<'a>(desc: *const TypeDesc, parts: impl Iterator<Item = &'a str>) -> *mut List {
     // Count first, on the stack for short texts, so the list is allocated once at its size.
     let mut few: [&str; 32] = [""; 32];

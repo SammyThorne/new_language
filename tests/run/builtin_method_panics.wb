@@ -1,0 +1,13 @@
+# The prelude's methods that panic report the line of the call in the program, not a line in
+# the prelude.
+# expect: before
+# expect: 2
+# expect-exit: 101
+# expect-stderr: panic: index(): the substring is not in the string
+# expect-stderr: builtin_method_panics.wb:13:
+def main():
+    print("before")
+    text = "abc"
+    found = text.index("c")
+    print(found)
+    print(text.index("z"))

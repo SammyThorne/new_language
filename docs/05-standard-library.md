@@ -6,7 +6,7 @@ The standard library is what makes Weby a backend language and not a general-pur
 
 | Module | Purpose | Milestone | Implemented in (prototype) |
 |---|---|---|---|
-| prelude | `print` (with `sep`, `end` and `flush`), `len`, `range`, `str`, `int`, `float`, `min`, `max`, `sorted`, `panic`, built-in types and traits | M1–M4 | Compiler built-ins plus runtime |
+| prelude | `print` (with `sep`, `end` and `flush`), `len`, `range`, `str`, `int`, `float`, `list`, `ord`, `chr`, `reversed`, `min`, `max`, `sorted`, `panic`, built-in types and traits | M1–M4 | Compiler built-ins plus runtime |
 | `io`, `os` | Files, standard streams, environment variables, arguments | M5 | Weby wrappers over runtime |
 | `time` | Clocks, durations, `sleep` | M6 | Weby wrappers over runtime |
 | `sync` | `Channel`, `Mutex`, `Atomic`, `spawn` support | M6 | Runtime |
@@ -51,9 +51,9 @@ Method lists are indicative; the prototype implements what the demo programs nee
 
 | Type | Operations |
 |---|---|
-| `str` | `len`, `+`, `==`, `in`, slicing, iteration; `upper`, `lower`, `strip`, `split`, `join`, `replace`, `find`, `starts_with`, `ends_with`, `to_bytes`; `int.parse(s)`, `float.parse(s)` return `Result` |
-| `list[T]` | Literal `[a, b]`, indexing, slicing, `len`, `in`, iteration; `append`, `extend`, `insert`, `pop`, `remove`, `clear`, `sort`, `reverse`, `index`, `copy`; `del xs[i]` |
-| `dict[K, V]` | Literal `{k: v}`, `d[k]` (panics if missing), `d[k] = v`, `in`, `len`; `get(k) -> V?`, `get_or(k, default)`, `pop`, `keys`, `values`, `items`; `del d[k]` (panics if missing) |
+| `str` | `len`, `+`, `==`, `in`, slicing, iteration, `*` with an `int`; `upper`, `lower`, `strip`, `lstrip`, `rstrip` (with an optional set of characters), `split`, `rsplit` (with an optional limit), `join`, `replace`, `find`, `rfind`, `index`, `count`, `starts_with`, `ends_with`, `partition`, `rpartition`, `split_lines`, `remove_prefix`, `remove_suffix`, `is_digit`, `is_alpha`, `is_alnum`, `is_space`, `is_upper`, `is_lower`, `title`, `capitalize`, `zfill`, `encode`; `int.parse(s)`, `float.parse(s)` return `Result`. The methods beyond the first group are written in the prelude (D92) |
+| `list[T]` | Literal `[a, b]`, indexing, slicing, `len`, `in`, iteration, `+`, `*` with an `int`; `append`, `extend`, `insert`, `pop`, `remove`, `clear`, `sort`, `reverse`, `index`, `copy`, `count`; `del xs[i]`; `reversed(xs)` and `list(x)` make new lists |
+| `dict[K, V]` | Literal `{k: v}`, `d[k]` (panics if missing), `d[k] = v`, `in`, `len`; `get(k) -> V?`, `get_or(k, default)`, `get_or_insert(k, default)`, `pop`, `pop_or(k, default)`, `update`, `copy`, `keys`, `values`, `items`; `del d[k]` (panics if missing) |
 | `set[T]` | Literal `{a, b}`, `add`, `remove`, `in`, `len`, union and intersection |
 | `T?` | `unwrap`, `unwrap_or`, `is_some`, `is_none`, `map` |
 | `Result[T, E]` | `unwrap`, `unwrap_or`, `is_ok`, `is_err`, `map_err` |

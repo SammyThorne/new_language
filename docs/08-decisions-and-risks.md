@@ -861,6 +861,30 @@ Milestone 1 of the [release polish plan](11-release-polish-plan.md). Each item w
 
 **Tried and not kept.** Desugaring `x = match ...` into a statement `match` in the parser: it cannot carry a type hint on `x`, since each case would redeclare it, and a hint is how an empty list or `None` case gets its type.
 
+### D92. Methods of the built-in types written in the prelude (release polish plan, milestone 2)
+
+Milestone 2 of the [release polish plan](11-release-polish-plan.md). A method of `str`, `list` or `dict` used to need a case in the checker's signature table, a `Builtin` operation, a case in the code generator and usually a runtime function, which is why there were so few.
+
+**The mechanism.** The prelude (`crates/lang_sema/src/prelude.lang`) defines ordinary functions named `__<type>_<method>`, where the type is `str`, `list`, `dict`, `tuple`, `frozendict`, `int`, `float`, `bool`, `option` or `result`. When `value.method(...)` finds no method of that name in the compiler's tables, or none that takes those arguments (`strip()` is the compiler's, `strip("x")` the prelude's), `builtin_method` looks for `__<type>_<method>` and calls it with the value as the first argument (`call_prelude_method`). The function may be generic, with bounds (`def __list_count[T: Eq](items: list[T], value: T)`): `call_generic_with` takes the already-checked receiver, infers the type parameters from it and from the other arguments, and instantiates the function like any generic. A function can be an `@extern` of a runtime function, which is a direct call. Methods the compiler defines keep priority, so no existing fast path changed, and release executables are the same size as before, since LLVM drops what is not called (a debug executable is 1% larger).
+- **Messages name the method, not the function.** An arity or type error says `str.count takes 1 argument but 0 were given`, and "did you mean" draws on the compiler's methods and the prelude's together. The prelude's source is never shown as a "defined here" label. A bound that fails says `list.count requires Eq of T`.
+- **A panic points at the caller.** A prelude function whose last parameter is named `__at` is given the text of the call's location (`file:line:col`, which `lrt_panic` takes), and panics through `__panic_at(message, __at)`. Without it a panic in the prelude would say `<prelude>:96:13`. `ord` and `chr`, which are plain functions, get it the same way.
+- **The `__` names are not hidden.** They are visible to user code, as `__bytes` always was, because the code that `server.mount` and `weby test` generate is checked in the user's scope and calls some of them. They are reserved by convention.
+
+**What was added.**
+- `str`: `count`, `rfind`, `index`, `partition`, `rpartition`, `rsplit`, `split(sep, limit)`, `split_lines`, `remove_prefix`, `remove_suffix`, `is_digit`, `is_alpha`, `is_alnum`, `is_space`, `is_upper`, `is_lower`, `title`, `capitalize`, `zfill`, and `strip`, `lstrip` and `rstrip` with the characters to remove. The byte-level work is in `lrt_str_count`, `lrt_str_rfind`, `lrt_str_class`, `lrt_str_title`, `lrt_str_capitalize` and `lrt_str_strip_chars`; the rest is in the language.
+- `list`: `count`, and `items * n` and `n * items` (`__list_repeat`, called from the `*` operator).
+- `dict`: `get_or_insert`, `update`, `copy`, `pop_or`.
+- Functions: `ord`, `chr`, `reversed`, and the compiler's `list(x)` for a list, a string, a dict's keys and `range(...)`. `list(range(...))` is a comprehension over the range, so it compiles to the same counting loop. Python's names for these methods (`splitlines`, `isdigit`, `setdefault`, ...) get "the method is called `split_lines`".
+- AST nodes are now `Clone`, for `list(range(...))` and later for generated code.
+
+**Decisions.**
+- **`str.index` panics** when the substring is absent, as Python's raises and as `list.index` here panics, rather than returning an optional as the plan first said: `find` already answers "maybe", and having `index` mean different things on a list and a string would surprise. `index(): the substring is not in the string`.
+- **Unicode classes.** `is_digit` is true only for ASCII digits, because Rust's standard library has no test for Unicode decimal digits and ASCII is what `int.parse` accepts; the others follow Rust's definitions of alphabetic, alphanumeric, whitespace, upper and lower case. `is_upper` and `is_lower` need a cased letter and none of the other case, as in Python. `title` treats a cased letter as part of a word (`it's` gives `It'S`, as in Python). `split_lines` splits at `\n`, `\r\n` and `\r` only, not at the other separators `splitlines` knows. `zfill` counts characters, `find` and `len` count bytes (D22).
+- **`reversed` and `list(...)` give lists**, not iterators, since there are no lazy iterators yet.
+- **`list * int` evaluates the list first**, then the count, whichever is written first.
+
+**Not done.** Prelude methods for `Option`, `Result`, `int` and `float`: the machinery handles them (the prefixes exist) and nothing needed one.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

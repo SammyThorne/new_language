@@ -60,6 +60,7 @@ const BUILTIN_FUNCTIONS: &[&str] = &[
     "zip",
     "any",
     "all",
+    "list",
     "input",
     "i8",
     "i16",

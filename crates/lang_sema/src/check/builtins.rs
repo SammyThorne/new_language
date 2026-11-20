@@ -2,7 +2,8 @@
 //! `dict`, optionals). Each is described by its parameter types and result type, then checked
 //! like any other call.
 
-use super::{Checker, FnCx, error_expr, plural};
+use super::generics::Extra;
+use super::{Checker, FnCx, Global, error_expr, plural};
 use crate::hir::{self, Builtin as Op};
 use crate::types::{Ty, TyKind};
 use lang_diag::{Diagnostic, Span, codes};
@@ -27,6 +28,40 @@ const LIST_METHODS: &[&str] =
     &["append", "extend", "insert", "pop", "remove", "clear", "sort", "reverse", "index", "copy"];
 const DICT_METHODS: &[&str] = &["get", "get_or", "pop", "keys", "values", "items", "clear"];
 const OPTION_METHODS: &[&str] = &["unwrap", "unwrap_or", "is_some", "is_none"];
+
+/// The prefix of the prelude functions that are methods of a built-in type: `__str_count` is
+/// `count` of a `str`.
+fn prelude_prefix(kind: &TyKind) -> Option<&'static str> {
+    Some(match kind {
+        TyKind::Str => "str",
+        TyKind::List(_) => "list",
+        TyKind::Dict(..) => "dict",
+        TyKind::FrozenList(_) | TyKind::Tuple(_) => "tuple",
+        TyKind::FrozenDict(..) => "frozendict",
+        TyKind::Int => "int",
+        TyKind::Float => "float",
+        TyKind::Bool => "bool",
+        TyKind::Option(_) => "option",
+        TyKind::Result(..) => "result",
+        _ => return None,
+    })
+}
+
+/// Python's names for methods that this language spells differently or has under another name.
+const PYTHON_METHOD_NAMES: &[(&str, &str)] = &[
+    ("startswith", "starts_with"),
+    ("endswith", "ends_with"),
+    ("splitlines", "split_lines"),
+    ("isdigit", "is_digit"),
+    ("isalpha", "is_alpha"),
+    ("isalnum", "is_alnum"),
+    ("isspace", "is_space"),
+    ("isupper", "is_upper"),
+    ("islower", "is_lower"),
+    ("removeprefix", "remove_prefix"),
+    ("removesuffix", "remove_suffix"),
+    ("setdefault", "get_or_insert"),
+];
 const RESULT_METHODS: &[&str] = &["unwrap", "unwrap_or", "unwrap_err", "is_ok", "is_err"];
 
 impl Checker<'_, '_> {
@@ -42,6 +77,62 @@ impl Checker<'_, '_> {
             return false;
         }
         true
+    }
+
+    /// `list(x)`: a new list of the elements of a list, the characters of a string, the keys of a
+    /// dict or the numbers of a `range(...)`.
+    fn list_call(&mut self, cx: &mut FnCx, args: &[ast::Arg], span: Span) -> hir::Expr {
+        if !self.no_keywords(args, "`list`") || !self.arity("list", args, 1, span) {
+            self.check_all_quietly(cx, args);
+            return error_expr(span);
+        }
+        let arg = &args[0].value;
+        if let ast::ExprKind::Call { callee, .. } = &arg.kind
+            && matches!(&callee.kind, ast::ExprKind::Name(n) if n == "range")
+        {
+            let name = ast::Ident { name: "__item".to_string(), span };
+            let element = ast::Expr { kind: ast::ExprKind::Name(name.name.clone()), span };
+            let target = ast::Target { kind: ast::TargetKind::Name(name), span };
+            let clause = ast::CompClause { target, iter: arg.clone(), conditions: Vec::new() };
+            return self.comprehension(cx, &element, None, &[clause], span, None);
+        }
+        let value = self.expr(cx, arg, None);
+        let builtin = |op: Op, value: hir::Expr, ty: Ty| hir::Expr {
+            kind: hir::ExprKind::Builtin { op, args: vec![value] },
+            ty,
+            span,
+        };
+        match self.types.kind(value.ty).clone() {
+            TyKind::List(elem) | TyKind::FrozenList(elem) => {
+                let ty = self.types.list(elem);
+                builtin(Op::ListCopy, value, ty)
+            }
+            TyKind::Dict(key, _) | TyKind::FrozenDict(key, _) => {
+                let ty = self.types.list(key);
+                builtin(Op::DictKeys, value, ty)
+            }
+            TyKind::Str => match self.globals.get("__chars") {
+                Some(&(Global::Function(func), _)) => {
+                    let ret = self.signatures[func.0].ret;
+                    hir::Expr { kind: hir::ExprKind::Call { func, args: vec![value] }, ty: ret, span }
+                }
+                _ => error_expr(span),
+            },
+            TyKind::Error => error_expr(span),
+            _ => {
+                let shown = self.display(value.ty);
+                self.error(
+                    Diagnostic::error(
+                        codes::NOT_ITERABLE,
+                        format!("cannot make a list from a `{shown}`"),
+                        arg.span,
+                        format!("has type `{shown}`"),
+                    )
+                    .with_help("`list(...)` takes a list, a string, a dict (its keys) or `range(...)`"),
+                );
+                error_expr(span)
+            }
+        }
     }
 
     /// `print(a, b, sep="-", end="", flush=True)`: the keywords Python's `print` has, except
@@ -132,6 +223,9 @@ impl Checker<'_, '_> {
         if name == "sorted" {
             return self.sorted(cx, args, span);
         }
+        if name == "list" {
+            return self.list_call(cx, args, span);
+        }
         if name == "tuple" || name == "frozendict" {
             return self.freeze_call(cx, name, args, span);
         }
@@ -182,7 +276,7 @@ impl Checker<'_, '_> {
                     span,
                     "outside a `for` loop",
                 )
-                .with_help("write `for i in range(n):`"),
+                .with_help("write `for i in range(n):`, or `list(range(n))` for a list of the numbers"),
             );
             return error_expr(span);
         }
@@ -559,7 +653,71 @@ impl Checker<'_, '_> {
         })
     }
 
+    /// The prelude function that is method `name` of a value of type `ty`, if there is one:
+    /// `__str_count` is `count` of a `str`.
+    pub(super) fn prelude_method(&self, ty: Ty, name: &str) -> Option<Global> {
+        let prefix = prelude_prefix(self.types.kind(ty))?;
+        match self.globals.get(&format!("__{prefix}_{name}")) {
+            Some(&(global @ (Global::Function(_) | Global::GenericFunction(_)), _)) => Some(global),
+            _ => None,
+        }
+    }
+
+    /// The names of the prelude's methods of the type of `ty`.
+    fn prelude_method_names(&self, ty: Ty) -> Vec<String> {
+        let Some(prefix) = prelude_prefix(self.types.kind(ty)) else { return Vec::new() };
+        let start = format!("__{prefix}_");
+        let mut names: Vec<String> = self
+            .globals
+            .iter()
+            .filter(|(_, (global, _))| matches!(global, Global::Function(_) | Global::GenericFunction(_)))
+            .filter_map(|(name, _)| name.strip_prefix(&start).map(String::from))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A call of a method the prelude defines, with the receiver as the function's first argument.
+    /// A last parameter named `__at` is filled in with the text of the call's location, so that
+    /// a panic there points at the user's line, not the prelude's.
+    fn call_prelude_method(
+        &mut self,
+        cx: &mut FnCx,
+        receiver: hir::Expr,
+        global: Global,
+        name: &ast::Ident,
+        args: &[ast::Arg],
+        span: Span,
+    ) -> hir::Expr {
+        let prefix = prelude_prefix(self.types.kind(receiver.ty)).unwrap_or("value");
+        let display = format!("{prefix}.{}", name.name);
+        let location_expr = self.location_arg(span);
+        let location = |wants: bool| wants.then(|| location_expr.clone());
+        match global {
+            Global::Function(func) => {
+                let signature = self.signatures[func.0].clone();
+                let location = location(signature.params.last().is_some_and(|p| p.name == "__at"));
+                let extra = Extra { name: Some(display.clone()), receiver: Some(receiver), location };
+                let written = extra.written(&signature.params);
+                let mut all: Vec<hir::Expr> = extra.receiver.iter().cloned().collect();
+                all.extend(self.call_args(cx, &display, signature.name_span, written, args, span));
+                all.extend(extra.location);
+                hir::Expr { kind: hir::ExprKind::Call { func, args: all }, ty: signature.ret, span }
+            }
+            Global::GenericFunction(index) => {
+                let pattern = self.generic_fns[index].pattern.expect("generic functions have a pattern");
+                let wants = self.signatures[pattern.0].params.last().is_some_and(|p| p.name == "__at");
+                let extra = Extra { name: Some(display), receiver: Some(receiver), location: location(wants) };
+                self.call_generic_with(cx, index, extra, args, span, None)
+            }
+            _ => unreachable!("prelude_method gives functions"),
+        }
+    }
+
     pub(super) fn is_builtin_method(&self, ty: Ty, name: &str) -> bool {
+        if self.prelude_method(ty, name).is_some() {
+            return true;
+        }
         let methods = match self.types.kind(ty) {
             TyKind::Str => STR_METHODS,
             TyKind::List(_) => LIST_METHODS,
@@ -716,6 +874,17 @@ impl Checker<'_, '_> {
             _ => None,
         };
 
+        // A method the prelude defines (docs/11, milestone 2) is used when the compiler has none
+        // of that name, or none that takes these arguments, as `strip()` and `strip("x")`.
+        if let Some(global) = self.prelude_method(ty, &name.name) {
+            let overloaded = match &signature {
+                None => true,
+                Some((_, params, _)) => n != params.len() || args.iter().any(|a| a.name.is_some()),
+            };
+            if overloaded {
+                return self.call_prelude_method(cx, receiver, global, name, args, span);
+            }
+        }
         let Some((op, params, ret)) = signature else {
             return match self.builtin_trait_method(cx, receiver, name, args, span) {
                 Ok(value) => value,
@@ -762,11 +931,19 @@ impl Checker<'_, '_> {
             TyKind::FrozenDict(..) => &["get", "get_or", "keys", "values", "items"],
             _ => &[],
         };
+        let prelude_names = self.prelude_method_names(ty);
         let help = match name.name.as_str() {
-            "startswith" => Some("the method is called `starts_with`".to_string()),
-            "endswith" => Some("the method is called `ends_with`".to_string()),
             "unwrap" | "unwrap_or" | "is_some" | "is_none" => None,
-            other => super::closest(other, methods.iter().copied()).map(|s| format!("did you mean `{s}`?")),
+            python
+                if PYTHON_METHOD_NAMES.iter().any(|(from, to)| {
+                    *from == python && (methods.contains(to) || prelude_names.iter().any(|n| n == to))
+                }) =>
+            {
+                let (_, to) = PYTHON_METHOD_NAMES.iter().find(|(from, _)| *from == python).unwrap();
+                Some(format!("the method is called `{to}`"))
+            }
+            other => super::closest(other, methods.iter().copied().chain(prelude_names.iter().map(String::as_str)))
+                .map(|s| format!("did you mean `{s}`?")),
         };
         let help = help.or_else(|| {
             matches!(kind, TyKind::Option(_)).then(|| {

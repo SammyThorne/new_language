@@ -312,6 +312,28 @@ C:\temp\new 11
 [1, 2] [1, 2]
 ```
 
+The other string methods Python programmers reach for are there too. A name that Python runs together has an underscore here (`split_lines`, `is_digit`, `remove_prefix`), and the compiler suggests the right one if you write Python's.
+
+```python
+def main():
+    line = "key = value = more"
+    print(line.partition(" = "), line.rpartition(" = "))
+    print(line.split(" = ", 1), line.rsplit(" = ", 1))
+    print("banana".count("an"), "banana".rfind("an"), "Content-Type".lower().remove_prefix("content-"))
+    print("*** hi ***".strip("* "), "42".is_digit(), "4x".is_digit(), "007".zfill(5), "-7".zfill(4))
+    print("hello world".title(), "hELLO".capitalize(), "a\r\nb\n".split_lines())
+    print(ord("A"), chr(97), [chr(ord("a") + i) for i in range(3)])
+```
+
+```text
+('key', ' = ', 'value = more') ('key = value', ' = ', 'more')
+['key', 'value = more'] ['key = value', 'more']
+2 3 type
+hi True False 00007 -007
+Hello World Hello ['a', 'b']
+65 a ['a', 'b', 'c']
+```
+
 Indexing and slicing count characters, not bytes. For binary data there is a separate `bytes` type: `"héllo".encode()` gives one, and `data.decode()` turns it back into text if it is valid UTF-8.
 
 ## 6. Lists, dicts and tuples
@@ -379,6 +401,28 @@ True True
 `d["missing"]` panics, like Python's `KeyError`. `d.get(key)` returns an optional (see [section 8](#8-optional-values)) and `d.get_or(key, default)` a default.
 
 An empty literal needs its type written down, because there is nothing to infer it from: `names: list[str] = []`.
+
+Lists can be counted, repeated with `*` and reversed into a new list, and `list(...)` makes one from a string, a dict's keys or a `range`. A dict has `get_or_insert` (Python's `setdefault`), `update`, `copy` and `pop_or`.
+
+```python
+def main():
+    scores = [3, 1, 3, 2, 3]
+    print(scores.count(3), [0] * 4, 2 * ["ab"], reversed(scores), list("abc"), list(range(3)))
+    groups: dict[str, list[int]] = {}
+    for word in ["a", "bb", "cc", "d"]:
+        groups.get_or_insert(str(len(word)), []).append(len(word))
+    print(groups)
+    base = {"a": 1, "b": 2}
+    merged = base.copy()
+    merged.update({"b": 20, "c": 3})
+    print(base, merged, merged.pop_or("b", 0), merged.pop_or("zz", 0))
+```
+
+```text
+3 [0, 0, 0, 0] ['ab', 'ab'] [3, 2, 3, 1, 3] ['a', 'b', 'c'] [0, 1, 2]
+{'1': [1, 1], '2': [2, 2]}
+{'a': 1, 'b': 2} {'a': 1, 'b': 20, 'c': 3} 20 0
+```
 
 Two immutable collections are for sharing data between tasks: `tuple[T, ...]`, a tuple of any length, and `frozendict[K, V]`. Sets are not implemented yet.
 
@@ -1460,6 +1504,10 @@ Programs include debug line information, so `gdb` and `perf` show function names
 | `1 + 2.5` | `float(1) + 2.5`; an `int` and a `float` don't mix silently |
 | `x.startswith(...)` | `x.starts_with(...)` |
 | `d.get(k, default)` | `d.get_or(k, default)`; `d.get(k)` returns `V?` |
+| `d.setdefault(k, v)` | `d.get_or_insert(k, v)` |
+| `s.splitlines()`, `s.isdigit()`, `s.removeprefix(p)` | `s.split_lines()`, `s.is_digit()`, `s.remove_prefix(p)` |
+| `d.pop(k, default)` | `d.pop_or(k, default)`; `d.pop(k)` returns `V?` |
+| `list(range(n))`, `reversed(xs)`, `[0] * n`, `del xs[i]` | The same; `reversed` gives a list |
 | `__eq__`, `__hash__`, `__repr__` | `@derive(Eq, Hash, Display)`, or implement the traits |
 | `@dataclass(frozen=True)` | `@frozen` |
 | `threading` / `asyncio` | `spawn`, `Channel`, `Mutex`, `Atomic`; no `async` or `await`, and no global interpreter lock |
