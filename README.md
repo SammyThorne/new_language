@@ -9,7 +9,7 @@ A compiled, Python-shaped language for web backends: indentation syntax, structs
 The prototype is complete and milestones 0 to 11 are done. Milestone 12 (performance and ecosystem) is ongoing by design. So far it has added:
 
 - TLS, an HTTP client, a PostgreSQL driver and regular expressions;
-- phases 1 to 4 of the [performance plan](docs/09-performance-plan.md), after which every benchmark and every HTTP endpoint measured runs at or ahead of Go (see [Web performance](docs/web-performance.md)).
+- the [performance plan](docs/09-performance-plan.md) and the [final optimisation plan](docs/10-final-optimization-plan.md), after which every benchmark and every HTTP endpoint measured runs ahead of Go: HTTP endpoints at 1.8 to 3.1 times Go's rate, at 35% to 40% of its CPU per request (see [Web performance](docs/web-performance.md)).
 
 The WebSocket server passes the Autobahn conformance suite, and the JSON parser passes JSONTestSuite. See the [roadmap](docs/06-roadmap.md#progress).
 
@@ -205,14 +205,14 @@ On a 6-core laptop, against the same service in Go (`net/http`) and Python. The 
 
 | Measure | Weby | Go | Python |
 |---|---|---|---|
-| Small JSON responses, 256 connections | 1.11 M req/s, p99 0.69 ms | 543 k req/s, p99 1.68 ms | 28 k req/s |
-| 20-record JSON list, 256 connections | 279 k req/s, p99 1.80 ms | 259 k req/s, p99 4.03 ms | 19 k req/s |
-| JSON POST decoded into structs, 256 connections | 690 k req/s | 306 k req/s | 21 k req/s |
-| Server CPU per small request, one core | 2.7 µs | 5.6 µs | |
-| Idle server memory | 4.2 MB | 10.9 MB | 18.2 MB |
-| Memory per idle WebSocket (50,000 open) | 15.5 KiB | not measured | not measured |
+| Small JSON responses, 256 connections | 965 k req/s, p99 0.85 ms | 489 k req/s, p99 2.03 ms | 25 k req/s |
+| 20-record JSON list, 256 connections | 528 k req/s, p99 1.14 ms | 236 k req/s, p99 5.23 ms | 17 k req/s |
+| JSON POST decoded into structs, 256 connections | 858 k req/s | 276 k req/s | 18 k req/s |
+| Server CPU per request, one core: small JSON / 20-record list | 1.9 / 3.6 µs | 5.3 / 10.2 µs | |
+| Idle server memory | 3.5 MB | 11.0 MB | 17.9 MB |
+| Memory per idle WebSocket (50,000 open) | 18.9 KiB | not measured | not measured |
 
-Every benchmark in [bench/](bench/README.md) runs at or ahead of Go: from about level (task creation, list indexing) to 2.4x faster (sorting with a key function) and 3.4x (calls through trait objects). They run 3.6x to 64x faster than CPython. Allocation-heavy programs use 1.6x to 1.8x Go's memory, because of how objects are laid out ([plan](docs/09-performance-plan.md), phase 5); servers use about the same as Go.
+Every benchmark in [bench/](bench/README.md) runs ahead of Go: from 1.1x (list indexing, task creation) to 3.0x (typed JSON) and 3.4x (calls through trait objects). They run 3.7x to 63x faster than CPython. Allocation-heavy programs use 1.6x to 2x Go's memory, because of how objects are laid out ([plan](docs/09-performance-plan.md), phase 5); servers use about the same as Go. `bench/run.py --check` and `bench/http/counts.py --check` guard these results ([bench/README.md](bench/README.md#regression-checks)).
 
 ## Building and running
 

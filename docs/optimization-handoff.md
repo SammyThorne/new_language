@@ -2,6 +2,8 @@
 
 This document is the starting point for planning the next round of performance work. It is meant to be read by someone (or an agent) with no other context, and it says where to look for detail. State as of 2026-11-19, commit `7b7c95f`.
 
+> **Since then:** the [final optimisation plan](10-final-optimization-plan.md) has been carried out (decision records D87 to D90). Its results, and what is left, are in [section 11](#11-after-the-final-optimisation-pass) at the end. The sections in between describe the state before it and are kept as the record of what the plan started from.
+
 ## 1. What the project is
 
 Weby is a compiled, Python-shaped language for web backends.
@@ -244,3 +246,32 @@ Ordered roughly by expected value for web workloads. None is started. **The [fin
 | Compiler pipeline and code generation | [03-compiler-architecture.md](03-compiler-architecture.md) |
 | Test strategy, optimisation backlog | [07-testing-and-performance.md](07-testing-and-performance.md) |
 | Building, flags, environment variables | [building.md](building.md) |
+
+## 11. After the final optimisation pass
+
+The [final optimisation plan](10-final-optimization-plan.md) was carried out on 2026-11-19 (D87 to D90 in [08](08-decisions-and-risks.md); full results in [bench/README.md](../bench/README.md) and [web-performance.md](web-performance.md)).
+
+| Measure | Before the pass | After | Against Go after |
+|---|---|---|---|
+| `/items`, CPU per request on one core | 9.6 µs | 3.6 µs | 2.84x faster |
+| `/json`, CPU per request on one core | 2.7 µs | 1.9 µs | 2.78x faster |
+| `POST /orders`, CPU per request on one core | 4.6 µs | 2.9 µs | 2.99x faster |
+| `/items`, 256 connections | 229,000 req/s | 528,000 req/s | 2.24x faster |
+| `json_orders` | 1.10x faster than Go | 2.97x faster | |
+| `word_count` | 1.22x faster than Go | 2.14x faster | |
+| `binary_trees` | 1.27x faster than Go | 1.46x faster | |
+
+**Leads from section 6:** 1 (HTTP path without the Rust heap), 2 (float formatting), 3 (system calls per request) and 4 (runtime allocation) are done. 6 (idle WebSocket memory) is explained but not fixed: LTO adds a stack page per parked connection, 14.8 to 18.9 KiB. 7 (dicts) is done for `str` and `int` keys. 5, 8, 9, 10 and 11 were left out, for the reasons in the plan's section 5.
+
+**Where the time goes now** (`bench/profile/`, 256 connections):
+- **`/plaintext`:** 74% in the system-call stub, which is the kernel's TCP work for one `recv` and one `send` per request and the polling; 18% in the server's own code, spread over the scheduler, parsing and the response; under 3% each in the collector and in `memcpy`.
+- **`/items`:** 30% in system calls; about 35% in `libgc` and the locks it takes (allocation from generated code and unscanned allocations); 23% in the program and runtime, of which JSON escaping 5% and float formatting 3%.
+- **On six CPUs the small endpoints are limited by the load generator**, not the server, which keeps about five of its six CPUs busy.
+
+**Guards.** `bench/run.py --check` (each program's time relative to Go's, and its memory) and `bench/http/counts.py --check` (system calls, clock reads and allocations per request) fail on a regression; `GC_STRESS=cache` runs every test program with short free lists.
+
+**What going further would need.** No single user-space cost above about 5% is left that the current architecture can remove. Going further needs one of:
+- fewer kernel crossings per request, which only pipelining or batching across connections gives;
+- a collector that allocates by bumping a pointer and does not sweep, which means a precise collector (stack maps, then MMTk: weeks of work and a download, see D86);
+- objects stored inline in collections (value types), a language design question, and the only thing that closes `sort`'s and `binary_trees`' memory gap with Go.
+

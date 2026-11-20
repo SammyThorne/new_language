@@ -191,7 +191,9 @@ Symbol names follow a simple reversible scheme: module path, item name, and type
 
 ### Allocation
 
-Every heap allocation is a call to one runtime function with the size and a pointer to a constant type descriptor. Codegen picks the pointer-free variant for objects with no reference fields. Details in [04](04-runtime-and-memory.md#object-model).
+Every heap allocation is a call to one runtime function with the size and a pointer to a constant type descriptor. Codegen picks the pointer-free variant for objects with no reference fields. After optimisation, calls with a small constant size become an inline pop from the thread's free list (D83). Details in [04](04-runtime-and-memory.md#object-model).
+
+Some allocations are sized up front (D89): a list comprehension with one `for` and no `if` over a list or a step-1 `range` starts with as many slots as its source has elements; a list literal stores its items straight into a buffer of the right size; and `json.encode` reserves the length of the type's last output, kept in a global per encoded type.
 
 ### Safety checks
 
@@ -213,19 +215,19 @@ Panic blocks call a `noreturn`, `cold` runtime function with a pointer to a stat
 
 ### Inline fast paths
 
-Operations that are too hot to be runtime calls are emitted directly: list length and indexing, string length and equality prefix check, enum tag tests, `Option` checks, integer and float formatting buffers in f-strings. Growth, hashing and anything rare stays in the runtime.
+Operations that are too hot to be runtime calls are emitted directly: list length and indexing (one unsigned compare on the common path), string length and equality prefix check, enum tag tests, `Option` checks, and appending to a string builder (`lang.builder.push`: a capacity check and a copy, which for a literal piece becomes a few stores). Growth, hashing and anything rare stays in the runtime. Dict lookups call an entry point chosen by key type: `str` keys as pointer and length, `int` keys by value, others through the generic functions (D90).
 
 ### Optimisation and emission
 
 - Debug builds: no optimisation passes beyond `mem2reg`, all checks on.
-- Release builds: LLVM's standard `default<O2>` pipeline through the new pass manager, native CPU features optional behind a flag.
+- Release builds: LLVM's standard `default<O2>` pipeline through the new pass manager, for a generic x86-64. Generating for the host CPU was measured and was not faster (D90).
 - Functions get accurate attributes where the compiler knows them (`nounwind` everywhere since there are no exceptions, `noalias` on fresh allocations, `readonly` on pure runtime helpers). These are cheap to add and help the optimiser.
 - The module is verified with LLVM's verifier in debug builds of the compiler and in CI.
 - Output: one object file through an LLVM `TargetMachine`, with position-independent code.
 
 ### Linking
 
-The driver invokes the system C compiler as a linker driver (`cc`), passing the object file, `liblang_rt.a`, the GC library, and the system libraries the Rust runtime needs (threads, math, dynamic loading). The runtime archive is located relative to the `weby` executable. A fully static binary (`--static`, musl target) is a later option that suits container deployment.
+The runtime archive is built with link-time optimisation in one code-generation unit (D87). The driver invokes the system C compiler as a linker driver (`cc`), passing the object file, `liblang_rt.a`, the GC library, and the system libraries the Rust runtime needs (threads, math, dynamic loading). The runtime archive is located relative to the `weby` executable. A fully static binary (`--static`, musl target) is a later option that suits container deployment.
 
 ### Debug information
 

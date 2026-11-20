@@ -565,6 +565,8 @@ Record as D90.
 
 ## Milestone 5: Close-out
 
+**Done 2026-11-19.** Full runs are in [bench/README.md](../bench/README.md) and [web-performance.md](web-performance.md); `bench/run.py --check` and `bench/http/counts.py --check` guard them; the closing statement is section 11 of the [handoff](optimization-handoff.md).
+
 1. **Full runs,** on an otherwise idle machine:
 
 ```bash

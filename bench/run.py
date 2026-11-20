@@ -1,13 +1,20 @@
 """Run each benchmark in bench/ compiled with Weby, in Go, and in CPython, and print a table.
 
-Usage: python3 bench/run.py [--runs N]
+Usage: python3 bench/run.py [--runs N] [--record | --check]
 
 The Weby program is compiled with `--release`; the Go program with `go build`. Go is found on
 PATH or in ~/.local/go/bin, and its column is left out if it is not installed. Every version must
 print the same output. Reported time is the best wall-clock time of N runs; memory is the peak
 resident set size.
+
+`--record` saves each program's time, its time relative to Go's, and its peak memory in
+bench/baseline.json. `--check` then runs only the Weby and Go versions and fails if any program's
+time relative to Go's has grown by more than 15% (and by more than 5 ms), or its memory by
+more than 10% (docs/10, milestone 5). Comparing with Go's time cancels most of this machine's
+drift of up to 10% between runs; without Go, the plain times are compared.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -19,6 +26,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / "bench"
 COMPILER = ROOT / "target" / "release" / "weby"
+BASELINE = BENCH / "baseline.json"
+TIME_TOLERANCE = 0.15
+MEMORY_TOLERANCE = 0.10
+MIN_REGRESSION = 0.005
 
 
 def find_go() -> str | None:
@@ -49,15 +60,51 @@ def version(command: list[str]) -> str:
     return subprocess.run(command, capture_output=True, text=True).stdout.split()[2]
 
 
+def check(results: dict[str, dict]) -> None:
+    """Compare `results` with the recorded baseline; exit with status 1 on a regression."""
+    baseline = json.loads(BASELINE.read_text())
+    failures = []
+    print()
+    print("| Benchmark | Recorded | Now | Change | Memory recorded / now |")
+    print("|---|---|---|---|---|")
+    for name, now in results.items():
+        old = baseline.get(name)
+        if old is None:
+            print(f"| {name} | (not recorded) | | | |")
+            continue
+        relative = "vs_go" in now and "vs_go" in old
+        before, after = (old["vs_go"], now["vs_go"]) if relative else (old["time"], now["time"])
+        change = after / before - 1
+        memory_change = now["memory_kb"] / old["memory_kb"] - 1
+        unit = "x Go's time" if relative else " s"
+        print(
+            f"| {name} | {before:.3f}{unit} | {after:.3f}{unit} | {change:+.1%} "
+            f"| {old['memory_kb'] / 1024:.0f} / {now['memory_kb'] / 1024:.0f} MB |"
+        )
+        # Programs that run for a few milliseconds vary by more than the tolerance on their own.
+        if change > TIME_TOLERANCE and now["time"] - old["time"] * (1 + TIME_TOLERANCE) > MIN_REGRESSION:
+            failures.append(f"{name}: {change:+.1%} time")
+        if memory_change > MEMORY_TOLERANCE:
+            failures.append(f"{name}: {memory_change:+.1%} memory")
+    if failures:
+        sys.exit("regressions beyond the tolerance: " + "; ".join(failures))
+    print()
+    print(f"no regressions (tolerance {TIME_TOLERANCE:.0%} time, {MEMORY_TOLERANCE:.0%} memory)")
+
+
 def main() -> None:
     runs = int(sys.argv[sys.argv.index("--runs") + 1]) if "--runs" in sys.argv else 3
+    checking = "--check" in sys.argv
+    results: dict[str, dict] = {}
     if not COMPILER.exists():
         sys.exit("build the compiler first: cargo build --release --workspace")
     go = find_go()
     python = sys.version.split()[0]
     env = dict(os.environ, GOTOOLCHAIN="local")
 
-    if go:
+    if checking:
+        pass
+    elif go:
         go_version = version([go, "version"])
         print(f"| Benchmark | Weby | Go {go_version[2:]} | CPython {python} | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |")
         print("|---|---|---|---|---|---|---|")
@@ -70,8 +117,10 @@ def main() -> None:
             executable = Path(out) / source.stem
             subprocess.run([COMPILER, "build", "--release", source, "-o", executable], check=True)
             weby, weby_mem, weby_out = measure([str(executable)], runs)
-            cpython, cpython_mem, cpython_out = measure([sys.executable, str(source.with_suffix(".py"))], runs)
-            outputs = {"Weby": weby_out, "CPython": cpython_out}
+            outputs = {"Weby": weby_out}
+            cpython, cpython_mem = 0.0, 0
+            if not checking:
+                cpython, cpython_mem, outputs["CPython"] = measure([sys.executable, str(source.with_suffix(".py"))], runs)
             if go:
                 go_executable = Path(out) / f"{source.stem}_go"
                 subprocess.run([go, "build", "-o", go_executable, source.with_suffix(".go")], check=True, env=env)
@@ -81,6 +130,11 @@ def main() -> None:
                 details = "".join(f"--- {name}\n{text}" for name, text in outputs.items())
                 sys.exit(f"{source.name}: outputs differ\n{details}")
 
+            results[source.stem] = {"time": weby, "memory_kb": weby_mem}
+            if go:
+                results[source.stem]["vs_go"] = weby / go_time
+            if checking:
+                continue
             mb = lambda kb: f"{kb / 1024:.0f}"  # noqa: E731
             if go:
                 ratio = weby / go_time
@@ -94,6 +148,11 @@ def main() -> None:
                     f"| {source.stem} | {weby:.3f} s | {cpython:.3f} s | {cpython / weby:.1f}x faster "
                     f"| {mb(weby_mem)} / {mb(cpython_mem)} MB |"
                 )
+    if "--record" in sys.argv:
+        BASELINE.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
+        print(f"recorded {BASELINE.relative_to(ROOT)}")
+    if checking:
+        check(results)
 
 
 if __name__ == "__main__":

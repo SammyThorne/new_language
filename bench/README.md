@@ -73,6 +73,26 @@ python3 bench/ab.py before_server after_server --server --one-core --endpoints /
 
 `profile/` has a sampling profiler for machines without `perf` (`sampler.c`, `report.py`; usage in `sampler.c`).
 
+## Regression checks
+
+Two checks guard what the final optimisation pass gained (docs/10, milestone 5). Run them after a change that could affect performance, on an otherwise idle machine:
+
+```bash
+python3 bench/run.py --check
+```
+
+```bash
+python3 bench/http/counts.py --check
+```
+
+```bash
+python3 bench/http/counts.py --browser --check
+```
+
+- **`run.py --check`** runs each program's Weby and Go versions (not CPython) and compares Weby's time *relative to Go's* with `baseline.json`, which cancels most of the machine's drift. It fails on a program more than 15% slower (and at least 5 ms) or using more than 10% more memory.
+- **`counts.py --check`** compares the calls and allocations per request with `http/counts.json` (and `counts_browser.json`): `recv`, `send`, clock reads, Rust heap allocations, collector calls and bytes allocated. These do not drift, so the tolerance is small: 0.1 per request or 5%. `epoll_wait` and free-list refills depend on timing and are left out.
+- After an intended change, record new baselines with `--record` in place of `--check`, and commit them.
+
 ## Idle WebSockets and task creation
 
 `ws_idle/` holds a WebSocket echo server (`server.wb`) and a Go client (`client.go`) that opens N connections from several loopback addresses, holds them idle, then checks that each still echoes. `run.py` measures the server's resident memory before and after.
@@ -84,6 +104,54 @@ python3 bench/ws_idle/run.py --connections 50000
 `spawn` (in the main suite) starts 10,000 tasks that each add two numbers, joins them, twenty times. Go uses goroutines with a result channel each; Python a pool of 64 threads.
 
 ## Results
+
+### 2026-11-19, final optimisation pass
+
+After milestones 1 to 4 of the [final optimisation plan](../docs/10-final-optimization-plan.md) (docs/08, D87 to D90). Best of 3 runs. This run was about 7% slower than the A/B runs in the decision records (Go's `json_orders` took 0.710 s here against 0.664 s for phase 5): compare the ratios, not the times.
+
+| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+|---|---|---|---|---|---|---|
+| binary_trees | 0.646 s | 0.946 s | 24.000 s | 1.46x faster | 37.1x faster | 65 / 40 / 56 MB |
+| dispatch | 0.010 s | 0.033 s | 0.617 s | 3.39x faster | 63.0x faster | 13 / 13 / 13 MB |
+| fib | 0.022 s | 0.037 s | 0.686 s | 1.72x faster | 31.7x faster | 13 / 13 / 13 MB |
+| json_orders | 0.239 s | 0.710 s | 3.714 s | 2.97x faster | 15.5x faster | 65 / 60 / 129 MB |
+| sieve | 0.055 s | 0.060 s | 2.502 s | 1.09x faster | 45.4x faster | 60 / 56 / 161 MB |
+| sort | 0.587 s | 1.212 s | 2.192 s | 2.07x faster | 3.7x faster | 149 / 75 / 302 MB |
+| spawn | 0.040 s | 0.046 s | 1.292 s | 1.14x faster | 32.4x faster | 14 / 18 / 47 MB |
+| word_count | 0.387 s | 0.829 s | 2.437 s | 2.14x faster | 6.3x faster | 13 / 13 / 13 MB |
+
+Against phase 5 (the entry below): `json_orders` went from 1.10x to 2.97x Go's speed, `word_count` from 1.22x to 2.14x, `binary_trees` from 1.27x to 1.46x, `spawn` from level to 1.14x, `sieve` from 1.05x to 1.09x. `sort` (2.24x to 2.07x) and `fib` (1.81x to 1.72x) are within this machine's run-to-run variation; their interleaved A/B runs showed no change. Memory is unchanged except `json_orders` (71 to 65 MB) and `spawn` (15 to 14 MB).
+
+HTTP at 256 connections, requests per second (median / p99 latency in ms; peak memory), median of 3 runs of 5 s, pinned:
+
+| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+|---|---|---|---|---|
+| `/plaintext` | 959,525 (0.21 / 0.85; 27 MB) | 502,591 (0.37 / 1.97; 23 MB) | 27,964 | 1.91x faster |
+| `/json` | 965,126 (0.21 / 0.85; 28 MB) | 488,599 (0.38 / 2.03; 23 MB) | 24,681 | 1.98x faster |
+| `/items` | 527,617 (0.38 / 1.14; 27 MB) | 235,700 (0.77 / 5.23; 24 MB) | 16,907 | 2.24x faster |
+| `/users/42` | 853,844 (0.24 / 1.01; 26 MB) | 461,751 (0.41 / 2.04; 25 MB) | 23,397 | 1.85x faster |
+| `POST /orders` | 857,771 (0.24 / 0.90; 20 MB) | 275,525 (0.64 / 4.31; 24 MB) | 18,272 | 3.11x faster |
+
+One CPU per server, 64 connections, best of 3 runs of 4 s (`http/one_core.py`):
+
+| Endpoint | Weby | Go 1.27.4 | Weby vs Go | CPU per request: Weby / Go |
+|---|---|---|---|---|
+| `/plaintext` | 458,331 | 189,260 | 2.42x | 2.2 / 5.3 µs |
+| `/json` | 526,076 | 189,382 | 2.78x | 1.9 / 5.3 µs |
+| `/items` | 278,452 | 97,875 | 2.84x | 3.6 / 10.2 µs |
+| `/users/42` | 433,433 | 174,870 | 2.48x | 2.3 / 5.7 µs |
+| `POST /orders` | 348,768 | 116,596 | 2.99x | 2.9 / 8.6 µs |
+
+What changed, against phase 5:
+
+- **`/items`**, the weakest row, went from level with Go to 2.24x at 256 connections and 2.84x on one CPU (9.6 to 3.6 µs per request): no Rust heap allocation in formatting or JSON (D87), runtime allocations from per-thread lists (D89), and inline builder pushes (D90).
+- **`POST /orders`** went from 2.12x to 3.11x Go at 256 connections.
+- **The small endpoints** cost 1.9 to 2.3 µs on one CPU instead of 2.6 to 3.2: one `recv` and two coarse clock reads per request, and no allocation in parsing (D88). At 256 connections on six CPUs their rates barely moved, because the load generator and the kernel on the other six CPUs set them; the server has idle CPU (D88).
+- `/plaintext` measured below `/json` on one CPU in this run, which interleaved A/B runs do not show (both about 520,000): take it as this run's variation.
+- Startup 3 ms, idle memory 3.5 MB, executable 5.2 MB (7.6 MB before LTO).
+- Idle WebSockets: 18.9 KiB each with 50,000 open, up from 15.5 KiB. LTO puts one more stack page under each parked connection (D88).
+
+Per request (`http/counts.py`; the same with a dozen browser headers): 1 `recv` (none failing), 1 `send`, 2 coarse clock reads, at most 1.5 Rust heap allocations, and on `/items` 22 collector calls and 5.3 KB allocated.
 
 ### 2026-11-19, performance plan phase 5
 
