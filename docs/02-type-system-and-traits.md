@@ -116,6 +116,9 @@ impl[T] Page[T]:
     def is_last(self) -> bool:
         return self.next_cursor is None
 
+    def map[U](self, f: def(T) -> U) -> Page[U]:      # a method's own type parameter
+        return Page(items=[f(x) for x in self.items], next_cursor=self.next_cursor)
+
 def to_json_list[T: ToJson + Display](items: list[T]) -> str:
     ...
 ```
@@ -126,7 +129,8 @@ def to_json_list[T: ToJson + Display](items: list[T]) -> str:
 - Type arguments are inferred from a call's arguments and from the expected type, or written explicitly: `Page[int](items=[], next_cursor=None)`, `Stack[str].new()`, `first[int]([])`.
 - Built-in types implement the prelude traits that describe what they support: `int` and `float` are `Number` (`+`, `-`, `*`) and `Ord`; `str`, `bool` and tuples of orderable types are `Ord`; and so on. `Number` is declared as `trait Number(AddNumber, SubNumber, MulNumber, Ord)`.
 - The built-in collections are generic by compiler special-casing, and `Option` and `Result` are built in.
-- Implemented in M4 with two limits: methods cannot declare their own type parameters (D33), and traits cannot take type parameters, so iteration is a method protocol (D34).
+- A method can declare type parameters of its own as well as use its `impl` block's (D94): `page.map(lambda x: str(x))` infers `U` from the lambda. They are inferred only, from the arguments and the expected type; there is no `page.map[str](...)`. A method with no `self` can have them too (`Stack.of(items)`). A method of a trait cannot, since a trait can be used as a type.
+- Traits cannot take type parameters, so iteration is a method protocol (D34).
 
 Not supported: higher-kinded types, const generics, variadic generics, specialisation, generic methods on trait objects.
 
@@ -192,7 +196,7 @@ stores: dict[str, Store] = {"mem": MemoryStore(), "disk": DiskStore("/var/data")
 - A method call loads the function pointer from the vtable and calls it with the data pointer.
 - A trait can be used as a type only if it is **object safe**: no generic methods, and `Self` appears only as the receiver. The compiler reports which method breaks the rule.
 - A trait object of `Entity` can be passed where `Named` is expected. Each vtable embeds or points to the vtables of its required traits.
-- Recovering the concrete type is done with `match` on a type pattern (`case Circle(c):` on a `Shape`), implemented with the type identifier in the vtable. This is planned for after M4 and should be rare.
+- Recovering the concrete type is done with `match` on a type pattern (D94): `case Circle(c):` on a `Shape` binds `c` as the `Circle` when the object is one, and `case Circle():` only tests. The type is a struct or enum that implements the trait, and not generic. A `match` on a trait object is never exhaustive without `case _:` (or a name that binds the whole object), since any type can implement the trait. The test compares slot 0 of the vtable, below, with the type's descriptor. It should be rare: calling the trait's methods is the usual way.
 
 Vtable layout:
 

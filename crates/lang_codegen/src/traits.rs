@@ -201,7 +201,7 @@ impl<'ctx> Codegen<'ctx, '_> {
         self.make_dyn(data, vtable)
     }
 
-    fn vtable_slot(&mut self, vtable: PointerValue<'ctx>, slot: usize) -> PointerValue<'ctx> {
+    pub(crate) fn vtable_slot(&mut self, vtable: PointerValue<'ctx>, slot: usize) -> PointerValue<'ctx> {
         let index = self.i64(slot as i64);
         // SAFETY (LLVM): the slot is within the vtable built for this trait.
         let ptr = unsafe { self.b.build_in_bounds_gep(self.ptr_type(), vtable, &[index], "").must() };

@@ -1,0 +1,72 @@
+error[E0325]: trait method `pick` cannot have type parameters
+ --> tests/ui/generic_method_errors.wb:4:14
+  |
+4 |     def pick[T](self, first: T, second: T) -> T
+  |              ^ not allowed in a trait
+  |
+  = help: a trait can be used as a type, which needs every method to be one function; write a generic function, or give the type parameter to the trait's implementations
+
+error[E0321]: cannot use `+` on `T` and `int`
+  --> tests/ui/generic_method_errors.wb:23:16
+   |
+23 |         return value + 1
+   |                ^^^^^^^^^ `T` + `int`
+   |
+   = help: both sides must have types that support this operator
+
+error[E0331]: `Plain` does not implement `Ord`, which `Holder.smaller` requires of `T`
+  --> tests/ui/generic_method_errors.wb:27:11
+   |
+13 |     def smaller[T: Ord](self, a: T, b: T) -> T:
+   |                 - `T: Ord` is required here
+   ...
+27 |     print(holder.smaller(Plain(1), Plain(2)))
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `T` is `Plain` here
+   |
+   = help: implement `Ord` for `Plain`, or derive it
+
+error[E0315]: cannot infer the type parameter `T` of `Holder.nothing`
+  --> tests/ui/generic_method_errors.wb:28:11
+   |
+28 |     print(holder.nothing())
+   |           ^^^^^^^^^^^^^^^^ type unknown
+   |
+   = help: add a type hint where the value is used, or give an argument that has the type
+
+error[E0300]: expected `int`, found `str`
+  --> tests/ui/generic_method_errors.wb:29:29
+   |
+13 |     def smaller[T: Ord](self, a: T, b: T) -> T:
+   |                                        - parameter `b` is declared here
+   ...
+29 |     print(holder.smaller(1, "a"))
+   |                             ^^^ expected `int`, found `str`
+
+error[E0203]: `Holder.smaller` needs a `Holder` value
+  --> tests/ui/generic_method_errors.wb:30:18
+   |
+30 |     print(Holder.smaller(1, 2), holder.make(3))
+   |                  ^^^^^^^ takes `self`
+   |
+   = help: call it on a value: `value.smaller(...)`
+
+error[E0203]: `make` does not take `self`
+  --> tests/ui/generic_method_errors.wb:30:40
+   |
+30 |     print(Holder.smaller(1, 2), holder.make(3))
+   |                                        ^^^^ called on a value
+   |
+   = help: call it on the type: `Holder.make(...)`
+
+error[E0316]: `Holder` has no field `smaller`
+  --> tests/ui/generic_method_errors.wb:31:18
+   |
+ 6 | struct Holder:
+   |        ------ `Holder` is defined here
+   ...
+31 |     print(holder.smaller)
+   |                  ^^^^^^^ this is a method
+   |
+   = help: call the method: `.smaller(...)`
+
+error: could not compile `tests/ui/generic_method_errors.wb` due to 8 errors

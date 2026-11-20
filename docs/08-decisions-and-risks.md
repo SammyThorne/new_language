@@ -317,7 +317,7 @@ Each decision records what was chosen, why, what was rejected, and what evidence
 
 A generic function, struct, enum or `impl` block is checked once with its type parameters as opaque types that only support what their bounds provide: `T: Ord` allows `<`, `T: Display` allows printing, `T: Number` allows `+`, `-` and `*`. Errors are reported from that check. Each use with concrete types then creates an instance, checked again without reporting and compiled like hand-written code, so generic code runs as fast as code written for one type. Type arguments are inferred from the arguments of a call (lambdas last, once their parameter types are known) and from the expected type, or written out: `Stack[int].new()`, `first_or[str]([], "")`. A derived trait on a generic type applies to an instance when every type argument has the trait, as if each parameter had that bound. Built-in types implement the prelude traits that describe what they support (`int` is `Number`, `Ord`, `Hash`, `Display`), so `largest([3, 1, 2])` works with `T: Ord`.
 
-### D33. Methods do not have their own type parameters yet
+### D33. Methods do not have their own type parameters yet (amended by D94: they can)
 
 `impl[T] Stack[T]:` gives methods the type's parameters, but a method cannot add one of its own (`def map[U](self, ...)`). Top-level generic functions cover the same needs. Allowing it is a small extension of the same machinery, deferred until a use needs it.
 
@@ -904,6 +904,21 @@ Milestone 3 of the [release polish plan](11-release-polish-plan.md). `set[T]` is
 - **`<`, `<=`, `>` and `>=` are not subset tests**; use `is_subset` and `is_superset`. The in-place operators `|=` and the like are not there.
 - **`frozenset` is not done.** The plan made it optional; an immutable set would follow `frozendict`'s cases (about 27 sites) and nothing needed it. A set is shared through a `Mutex`.
 - **A dict entry of a set takes 8 bytes for its tag**, not counting the element: no space for a value, as the plan hoped.
+
+### D94. Generic methods and type patterns on trait objects (release polish plan, milestone 4)
+
+Milestone 4 of the [release polish plan](11-release-polish-plan.md).
+
+**Generic methods (amends D33).** `def map[U](self, f: def(T) -> U) -> Box[U]` in `impl[T] Box[T]` works, and so do type parameters on a method of a plain `impl Counter:`, with bounds (`[A: Display]`) and on methods without `self` (`Counter.of(items)`).
+- **Mechanism.** In each instance of an `impl` block, `collect_inherent` makes the method a template, like a top-level generic function's (`declare_generic_method`, a `GenericFn` that remembers `MethodOf`: the type, the block's bindings and how its bodies are checked). `value.method(...)` finds it in `generic_methods` and calls `call_generic_with`, which infers the method's parameters from the arguments (lambdas last) and the expected type, checks the bounds, and instantiates it once per set of type arguments, with the block's type parameters bound as in the block. A method's body is checked once, reported, in the pattern of its block; the instances are checked quietly and compiled.
+- **The method's type parameters are made once**, however many instances of the block there are. Made per instance, `Box[U]` in the return type would be a new type, with its own `map`, with a new `U`, without end (the first attempt overflowed the compiler's stack).
+- **Type parameters are inferred, not written.** `box.map[str](f)` is not parsed as an explicit instantiation; when a parameter cannot be inferred the error says to add a type hint or an argument that has the type.
+- **Trait methods cannot have type parameters**: a trait can be a type (a trait object has one function per method), so the error (E0325) says so, instead of the old "unknown type `T`".
+- The cascade the plan mentioned, a method that fails to declare giving "has no method" errors at every call, was only reachable through this one error, which is gone.
+
+**Type patterns on trait objects.** `case Circle(c):` on a `Shape` binds `c` as the `Circle`; `case Circle():` only tests; `Circle(_)` and `|` alternatives work, with guards, and through supertraits (an upcast object's vtable also starts with the descriptor). The type must be a non-generic struct or enum that implements the trait (the error says a `Shape` is never one when it does not). Generic types are an error rather than `case Box[int](b)`, which the pattern syntax does not parse; none of the existing programs needed it. A pattern with two names, or two alternatives binding one name to different types, is an error. The `match` is never exhaustive without a `case _:` or a binding name, and the error says why. The code generator compares slot 0 of the object's vtable, which every vtable fills with the type's descriptor, with `desc(ty)`: one load and one compare, no calls. `SelfType`, `self` in a trait's default method, still cannot be matched.
+
+**Not done: empty collections typed by their first use (4.3, optional).** `xs = []` followed by `xs.append(1)` is still E0315 with the hint to write `xs: list[int] = []`. The plan said to stop if the work went beyond the local table, the assignment, the method checker's resolving forms, argument checking and one HIR patching walk. Both designs seen do. A type variable for the empty literal would have to be carried through every operation on the local until the first use fixes it, and patch every HIR node typed with it afterwards (there is no mutable HIR visitor to write that walk with). Checking each function twice, the first time quietly, to learn from the first use what the literal's type is and the second time as if the user had written the hint, avoids patching but needs a placeholder type that every later check tolerates, and a hook in each resolving form (`append`, `insert`, `extend`, `add`, `d[k] = v`, `return`, arguments, typed assignments). That is a project of its own, and a half-working version would be worse than the clear error, which already says what to write.
 
 ## Risks
 

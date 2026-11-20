@@ -1046,6 +1046,31 @@ impl Checker<'_, '_> {
                 _ => None,
             },
         };
+        if func.is_none()
+            && let Some(&index) = self.generic_methods.get(&(owner, name.name.clone()))
+        {
+            let pattern = self.generic_fns[index].pattern.expect("generic functions have a pattern");
+            if self.signatures[pattern.0].receiver.is_some() {
+                self.error(
+                    Diagnostic::error(
+                        codes::NOT_A_FUNCTION,
+                        format!("`{owner_name}.{}` needs a `{owner_name}` value", name.name),
+                        name.span,
+                        "takes `self`",
+                    )
+                    .with_help(format!("call it on a value: `value.{}(...)`", name.name)),
+                );
+                self.check_all(cx, args);
+                return error_expr(span);
+            }
+            let extra = super::generics::Extra {
+                name: Some(format!("{owner_name}.{}", name.name)),
+                receiver: None,
+                receiver_is_param: false,
+                location: None,
+            };
+            return self.call_generic_with(cx, index, extra, args, span, None);
+        }
         let Some(func) = func else {
             self.error(Diagnostic::error(
                 codes::NO_SUCH_MEMBER,
@@ -1221,6 +1246,29 @@ impl Checker<'_, '_> {
         match self.types.kind(ty).clone() {
             TyKind::Struct(_) | TyKind::Enum(_) => {
                 let type_name = self.display(ty);
+                if let Some(&index) = self.generic_methods.get(&(ty, name.name.clone())) {
+                    let pattern = self.generic_fns[index].pattern.expect("generic functions have a pattern");
+                    if self.signatures[pattern.0].receiver.is_none() {
+                        self.error(
+                            Diagnostic::error(
+                                codes::NOT_A_FUNCTION,
+                                format!("`{}` does not take `self`", name.name),
+                                name.span,
+                                "called on a value",
+                            )
+                            .with_help(format!("call it on the type: `{type_name}.{}(...)`", name.name)),
+                        );
+                        self.check_all(cx, args);
+                        return error_expr(span);
+                    }
+                    let extra = super::generics::Extra {
+                        name: Some(format!("{type_name}.{}", name.name)),
+                        receiver: Some(receiver),
+                        receiver_is_param: false,
+                        location: None,
+                    };
+                    return self.call_generic_with(cx, index, extra, args, span, None);
+                }
                 if let Some(&func) = self.inherent.get(&(ty, name.name.clone())) {
                     if self.signatures[func.0].receiver.is_none() {
                         self.error(
@@ -1617,6 +1665,7 @@ impl Checker<'_, '_> {
             let shown = self.display(object.ty);
             let is_method = self.is_builtin_method(object.ty, &name.name)
                 || self.inherent.contains_key(&(object.ty, name.name.clone()))
+                || self.generic_methods.contains_key(&(object.ty, name.name.clone()))
                 || self.trait_methods.contains_key(&(object.ty, name.name.clone()));
             if is_method {
                 self.error(

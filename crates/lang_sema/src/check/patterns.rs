@@ -48,6 +48,8 @@ fn simplify(pattern: &hir::Pattern) -> P {
         K::Err(inner) => P::C(Ctor::Err, vec![simplify(inner)]),
         K::Tuple(items) => P::C(Ctor::Tuple, items.iter().map(simplify).collect()),
         K::Or(alternatives) => P::Or(alternatives.iter().map(simplify).collect()),
+        // A trait has no end to its implementations, so only a wildcard covers it.
+        K::DynType { ty, .. } => P::C(Ctor::Literal(format!("type {ty:?}")), Vec::new()),
     }
 }
 
@@ -224,7 +226,7 @@ impl Checker<'_, '_> {
     }
 
     fn check_match_subject(&mut self, subject: &hir::Expr) {
-        if matches!(self.types.kind(subject.ty), TyKind::Dyn(_) | TyKind::SelfType(_)) {
+        if matches!(self.types.kind(subject.ty), TyKind::SelfType(_)) {
             let shown = self.display(subject.ty);
             self.error(
                 Diagnostic::error(
@@ -387,9 +389,16 @@ impl Checker<'_, '_> {
         } else {
             format!("not covered: {}", missing.join(", "))
         };
+        let help = match self.types.kind(ty) {
+            TyKind::Dyn(trait_id) => format!(
+                "any type can implement `{}`, so end the `match` with `case _:` for the rest",
+                self.traits[trait_id.0].name
+            ),
+            _ => "add the missing cases, or `case _:` to cover everything else".to_string(),
+        };
         self.error(
             Diagnostic::error(codes::NON_EXHAUSTIVE, "this `match` does not cover every case", span, label)
-                .with_help("add the missing cases, or `case _:` to cover everything else"),
+                .with_help(help),
         );
         false
     }
@@ -510,6 +519,87 @@ impl Checker<'_, '_> {
         hir::Pattern { kind, ty }
     }
 
+    /// `case Circle(c):` or `case Circle():` on a trait object: the value is a `Circle`, bound to
+    /// `c` as one. The type must be a struct or enum that implements the trait.
+    #[allow(clippy::too_many_arguments)]
+    fn dyn_type_pattern(
+        &mut self,
+        cx: &mut FnCx,
+        path: &[ast::Ident],
+        args: Option<&[ast::Pattern]>,
+        trait_id: crate::types::TraitId,
+        ty: Ty,
+        span: Span,
+        bindings: &mut Vec<LocalId>,
+    ) -> hir::Pattern {
+        let wild = hir::Pattern { kind: K::Wild, ty };
+        let shown = self.display(ty);
+        let trait_name = self.traits[trait_id.0].name.clone();
+        let fail = |this: &mut Self, message: String, label: &str, help: &str| {
+            this.error(Diagnostic::error(codes::BAD_PATTERN, message, span, label.to_string()).with_help(help));
+        };
+        let [name] = path else {
+            fail(
+                self,
+                format!("a pattern for a `{shown}` names a type"),
+                "not a type name",
+                "write the type's name, as in `case Circle(c):`",
+            );
+            return wild;
+        };
+        let concrete = match self.globals.get(&name.name).map(|(g, _)| *g) {
+            Some(Global::Struct(id)) => self.structs[id.0].ty,
+            Some(Global::Enum(id)) => self.enums[id.0].ty,
+            Some(Global::GenericStruct(_) | Global::GenericEnum(_)) => {
+                fail(
+                    self,
+                    format!(
+                        "`{}` is generic, and a pattern on a `{shown}` cannot name its type arguments yet",
+                        name.name
+                    ),
+                    "generic type",
+                    "match a non-generic type, or call the trait's methods",
+                );
+                return wild;
+            }
+            _ => {
+                fail(
+                    self,
+                    format!("`{}` is not a struct or enum, which a `{shown}` can be", name.name),
+                    "not a type that implements the trait",
+                    "write the name of a type that implements the trait, as in `case Circle(c):`",
+                );
+                return wild;
+            }
+        };
+        if !self.implements(concrete, trait_id) {
+            let concrete_shown = self.display(concrete);
+            fail(
+                self,
+                format!("`{concrete_shown}` does not implement `{trait_name}`, so a `{shown}` is never one"),
+                "this case can never match",
+                &format!("implement `{trait_name}` for `{concrete_shown}`, or remove the case"),
+            );
+            return wild;
+        }
+        let inner = match args {
+            None | Some([]) => hir::Pattern { kind: K::Wild, ty: concrete },
+            Some([only]) if matches!(only.kind, ast::PatternKind::Name(_) | ast::PatternKind::Wild) => {
+                self.pattern(cx, only, concrete, bindings)
+            }
+            Some(_) => {
+                fail(
+                    self,
+                    format!("a pattern for a `{shown}` takes one name for the whole value, or none"),
+                    "too much",
+                    "write `case Circle(c):` to bind the value, or `case Circle():` to only test its type",
+                );
+                return wild;
+            }
+        };
+        hir::Pattern { kind: K::DynType { ty: concrete, inner: Box::new(inner) }, ty }
+    }
+
     fn variant_pattern(
         &mut self,
         cx: &mut FnCx,
@@ -525,6 +615,9 @@ impl Checker<'_, '_> {
                 self.pattern(cx, arg, Ty::ERROR, bindings);
             }
             return wild;
+        }
+        if let TyKind::Dyn(trait_id) = *self.types.kind(ty) {
+            return self.dyn_type_pattern(cx, path, args, trait_id, ty, span, bindings);
         }
         let shown = self.display(ty);
         let mismatch = |this: &mut Self, what: &str| {

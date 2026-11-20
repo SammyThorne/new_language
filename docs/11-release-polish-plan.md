@@ -445,6 +445,10 @@ stop. Keep E0315 as it is, and record in D94 why it was left. Do not let a half-
 
 **Tests:** `tests/run/empty_collection_inference.wb`, and `tests/ui/empty_collection_errors.wb` (used before resolution, never resolved, conflicting resolutions).
 
+### Done
+
+Carried out on 2026-11-20 as D94 in [08](08-decisions-and-risks.md). 4.1 and 4.2 are done as planned, with generic types in type patterns an error (as the plan allowed) and explicit type arguments for methods not supported. 4.3 is left out, for the reason the abort criterion gives; D94 sketches what it would take.
+
 ### Exit criteria
 
 - 4.1 and 4.2 work. 4.3 works or is recorded as left out.

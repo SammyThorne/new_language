@@ -276,6 +276,7 @@ impl<'p> Analysis<'p> {
                 }
             }
             PatternKind::Some(inner) | PatternKind::Ok(inner) | PatternKind::Err(inner) => self.pattern(&inner.kind),
+            PatternKind::DynType { inner, .. } => self.pattern(&inner.kind),
             PatternKind::Wild | PatternKind::Bind(_) | PatternKind::None => {}
         }
     }

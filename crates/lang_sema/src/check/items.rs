@@ -271,6 +271,20 @@ impl<'m> Checker<'_, 'm> {
                     );
                     continue;
                 }
+                if let Some(param) = method.generics.first() {
+                    self.error(
+                        Diagnostic::error(
+                            codes::NOT_OBJECT_SAFE,
+                            format!("trait method `{}` cannot have type parameters", method.name.name),
+                            param.name.span,
+                            "not allowed in a trait",
+                        )
+                        .with_help(
+                            "a trait can be used as a type, which needs every method to be one function; write a generic function, or give the type parameter to the trait's implementations",
+                        ),
+                    );
+                    continue;
+                }
                 let signature = self.signature(method, &method.name.name, None);
                 methods.push(TraitMethod {
                     name: method.name.name.clone(),
@@ -742,16 +756,28 @@ impl<'m> Checker<'_, 'm> {
     ) {
         for method in &imp.methods {
             let name = &method.name.name;
-            if let Some(param) = method.generics.first() {
-                self.error(
-                    Diagnostic::error(
-                        codes::NOT_SUPPORTED,
-                        "methods cannot have their own type parameters yet",
-                        param.name.span,
-                        "not supported yet",
-                    )
-                    .with_help("use a generic function defined at the top level of the file"),
-                );
+            if !method.generics.is_empty() {
+                if self.inherent.contains_key(&(target, name.clone()))
+                    || self.generic_methods.contains_key(&(target, name.clone()))
+                {
+                    self.error(Diagnostic::error(
+                        codes::DUPLICATE_DEFINITION,
+                        format!("`{type_name}` already has a method named `{name}`"),
+                        method.name.span,
+                        "defined again here",
+                    ));
+                    continue;
+                }
+                self.declare_generic_method(method, target, type_name, bindings, mode);
+                continue;
+            }
+            if self.generic_methods.contains_key(&(target, name.clone())) {
+                self.error(Diagnostic::error(
+                    codes::DUPLICATE_DEFINITION,
+                    format!("`{type_name}` already has a method named `{name}`"),
+                    method.name.span,
+                    "defined again here",
+                ));
                 continue;
             }
             if let Some(&existing) = self.inherent.get(&(target, name.clone())) {

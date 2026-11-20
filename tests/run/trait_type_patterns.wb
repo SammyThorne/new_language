@@ -1,0 +1,118 @@
+# Type patterns on a trait object (docs/11, milestone 4): `case Circle(c):` binds the value as
+# a `Circle`, `case Circle():` only tests; works for structs and enums, through a supertrait,
+# with guards and `|` alternatives, and falls through to `case _:` or a plain name.
+# expect: circle 2.0
+# expect: square
+# expect: big square
+# expect: blob Flat(w=2.0)
+# expect: blob Round
+# expect: named square 1.0 sq
+# expect: square or blob
+# expect: rex says woof
+# expect: lucky cat with 9 lives
+# expect: cat says meow
+trait Shape:
+    def area(self) -> float
+
+trait Named(Shape):
+    def name(self) -> str
+
+struct Circle:
+    r: float
+
+struct Square:
+    s: float
+
+@derive(Display)
+enum Blob:
+    Round
+    Flat(w: float)
+
+struct Other:
+    n: int
+
+impl Shape for Circle:
+    def area(self) -> float:
+        return 3.0 * self.r * self.r
+
+impl Shape for Square:
+    def area(self) -> float:
+        return self.s * self.s
+
+impl Shape for Blob:
+    def area(self) -> float:
+        return 1.0
+
+impl Named for Square:
+    def name(self) -> str:
+        return "sq"
+
+impl Named for Circle:
+    def name(self) -> str:
+        return "ci"
+
+def describe(s: Shape) -> str:
+    match s:
+        case Circle(c):
+            return f"circle {c.r}"
+        case Square(q) if q.s > 5.0:
+            return "big square"
+        case Square():
+            return "square"
+        case Blob(b):
+            return f"blob {b}"
+        case other:
+            return f"other {other.area()}"
+
+
+trait Animal:
+    def sound(self) -> str
+
+struct Dog:
+    name: str
+
+struct Cat:
+    lives: int
+
+impl Animal for Dog:
+    def sound(self) -> str:
+        return "woof"
+
+impl Animal for Cat:
+    def sound(self) -> str:
+        return "meow"
+
+def intro(pets: list[Animal]) -> list[str]:
+    out: list[str] = []
+    for pet in pets:
+        match pet:
+            case Dog(dog):
+                out.append(f"{dog.name} says {pet.sound()}")
+            case Cat(cat) if cat.lives > 8:
+                out.append(f"lucky cat with {cat.lives} lives")
+            case Cat():
+                out.append(f"cat says {pet.sound()}")
+            case _:
+                out.append("unknown")
+    return out
+
+def main():
+    shapes: list[Shape] = [Circle(2.0), Square(3.0), Square(9.0), Blob.Flat(2.0), Blob.Round]
+    for s in shapes:
+        print(describe(s))
+    n: Named = Square(1.0)
+    match n:
+        case Square(sq):
+            print("named square", sq.s, n.name())
+        case _:
+            print("else")
+    s2: Shape = n
+    match s2:
+        case Circle():
+            print("circle")
+        case Square() | Blob():
+            print("square or blob")
+        case _:
+            print("other")
+    for line in intro([Dog("rex"), Cat(9), Cat(3)]):
+        print(line)

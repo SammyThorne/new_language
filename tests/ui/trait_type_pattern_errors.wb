@@ -1,0 +1,50 @@
+# Type patterns on a trait object need a struct or enum that implements the trait, name the
+# type alone, bind at most the whole value, cannot give two alternatives one name, and need a
+# `case _:` because other types can implement the trait.
+trait Shape:
+    def area(self) -> float
+
+struct Circle:
+    r: float
+
+struct Square:
+    s: float
+
+struct Unrelated:
+    n: int
+
+struct Wrapper[T]:
+    inner: T
+
+impl Shape for Circle:
+    def area(self) -> float:
+        return self.r
+
+impl Shape for Square:
+    def area(self) -> float:
+        return self.s
+
+def classify(shape: Shape) -> str:
+    match shape:
+        case Circle(_c) | Square(_c):
+            return "round or square"
+        case Unrelated(u):
+            return "unrelated"
+        case Wrapper(w):
+            return "wrapper"
+        case Square(a, b):
+            return "two names"
+        case area(x):
+            return "not a type"
+        case Circle(_c):
+            return "circle"
+
+def partial(shape: Shape) -> str:
+    match shape:
+        case Circle(_c):
+            return "circle"
+        case Square():
+            return "square"
+
+def main():
+    print(classify(Circle(1.0)), partial(Square(2.0)))

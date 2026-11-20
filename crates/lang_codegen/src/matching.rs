@@ -99,6 +99,23 @@ impl<'ctx> Codegen<'ctx, '_> {
                     self.pattern(item, Some(element), fail);
                 }
             }
+            PatternKind::DynType { ty, inner } => {
+                // Slot 0 of every vtable is the descriptor of the concrete type, so the object is
+                // a `ty` when that is `ty`'s own descriptor; the data pointer is then the value.
+                let object = value.unwrap().into_struct_value();
+                let vtable = self.b.build_extract_value(object, 1, "").must().into_pointer_value();
+                let found = self.vtable_slot(vtable, 0);
+                let expected = self.desc(*ty);
+                let i64_type = self.cx.i64_type();
+                let found = self.b.build_ptr_to_int(found, i64_type, "").must();
+                let expected = self.b.build_ptr_to_int(expected, i64_type, "").must();
+                let same = self.b.build_int_compare(IntPredicate::EQ, found, expected, "").must();
+                self.require(same, fail);
+                if !matches!(inner.kind, PatternKind::Wild) {
+                    let data = self.b.build_extract_value(object, 0, "").must();
+                    self.pattern(inner, Some(data), fail);
+                }
+            }
             PatternKind::Or(alternatives) => {
                 let success = self.block("alternative_matched");
                 let (last, rest) = alternatives.split_last().expect("an `|` pattern has alternatives");

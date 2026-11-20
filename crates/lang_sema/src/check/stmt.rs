@@ -1019,6 +1019,7 @@ impl Checker<'_, '_> {
         let struct_span = info.span;
         let ty = self.structs[id.0].ty;
         let is_method = self.inherent.contains_key(&(ty, field.name.clone()))
+            || self.generic_methods.contains_key(&(ty, field.name.clone()))
             || self.trait_methods.contains_key(&(ty, field.name.clone()));
         let info = &self.structs[id.0];
         let candidates: Vec<String> = info.fields.iter().map(|f| f.name.clone()).collect();

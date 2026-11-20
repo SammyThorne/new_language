@@ -794,6 +794,47 @@ Money(cents=1250)
 
 Operators are traits too: `AddNumber` gives `+`, `MulNumber` gives `*`, and so on. `Eq`, `Ord` and `Hash` can be written by hand instead of derived.
 
+A trait object can be taken apart again with `match`. `case Circle(c):` binds the value as the `Circle`, and `case Circle():` only tests; since any type can implement the trait, a `case _:` is needed.
+
+```python
+@derive(Display)
+struct Circle:
+    radius: float
+
+struct Square:
+    side: float
+
+trait Shape:
+    def area(self) -> float
+
+impl Shape for Circle:
+    def area(self) -> float:
+        return 3.0 * self.radius * self.radius
+
+impl Shape for Square:
+    def area(self) -> float:
+        return self.side * self.side
+
+def describe(shape: Shape) -> str:
+    match shape:
+        case Circle(c):
+            return f"{c} has area {shape.area()}"
+        case Square():
+            return f"a square with area {shape.area()}"
+        case _:
+            return "some other shape"
+
+def main():
+    shapes: list[Shape] = [Circle(1.0), Square(2.0)]
+    for shape in shapes:
+        print(describe(shape))
+```
+
+```text
+Circle(radius=1.0) has area 3.0
+a square with area 4.0
+```
+
 ## 12. Generics
 
 Functions, structs, enums and `impl` blocks can take type parameters in square brackets. A bound such as `T: Ord` says what the type must support. Type arguments are inferred from the values where possible.
@@ -870,6 +911,29 @@ Stack[1, 2] 2 1 None
 9 c
 ['#1', '#2', '#3']
 4
+```
+
+A method can have type parameters of its own as well as its type's. They are worked out from the arguments, as for functions; they cannot be written out at the call.
+
+```python
+@derive(Display)
+struct Box[T]:
+    value: T
+
+impl[T] Box[T]:
+    def map[U](self, f: def(T) -> U) -> Box[U]:
+        return Box(f(self.value))
+
+    def paired[U](self, other: U) -> tuple[T, U]:
+        return (self.value, other)
+
+def main():
+    n = Box(20)
+    print(n.map(lambda x: x + 1), n.map(lambda x: f"<{x}>"), n.paired("tag"))
+```
+
+```text
+Box(value=21) Box(value='<20>') (20, 'tag')
 ```
 
 The bounds in the standard library are `Eq`, `Ord`, `Hash`, `Display` and `Number` (anything with arithmetic). Generic code is compiled once per type it is used with, so it runs as fast as code written for that type.

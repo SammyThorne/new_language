@@ -763,7 +763,8 @@ impl Checker<'_, '_> {
             Global::Function(func) => {
                 let signature = self.signatures[func.0].clone();
                 let location = location(signature.params.last().is_some_and(|p| p.name == "__at"));
-                let extra = Extra { name: Some(display.clone()), receiver: Some(receiver), location };
+                let extra =
+                    Extra { name: Some(display.clone()), receiver: Some(receiver), receiver_is_param: true, location };
                 let written = extra.written(&signature.params);
                 let mut all: Vec<hir::Expr> = extra.receiver.iter().cloned().collect();
                 all.extend(self.call_args(cx, &display, signature.name_span, written, args, span));
@@ -773,7 +774,12 @@ impl Checker<'_, '_> {
             Global::GenericFunction(index) => {
                 let pattern = self.generic_fns[index].pattern.expect("generic functions have a pattern");
                 let wants = self.signatures[pattern.0].params.last().is_some_and(|p| p.name == "__at");
-                let extra = Extra { name: Some(display), receiver: Some(receiver), location: location(wants) };
+                let extra = Extra {
+                    name: Some(display),
+                    receiver: Some(receiver),
+                    receiver_is_param: true,
+                    location: location(wants),
+                };
                 self.call_generic_with(cx, index, extra, args, span, None)
             }
             _ => unreachable!("prelude_method gives functions"),

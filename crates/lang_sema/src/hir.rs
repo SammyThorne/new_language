@@ -249,6 +249,12 @@ pub enum PatternKind {
     Err(Box<Pattern>),
     Tuple(Vec<Pattern>),
     Or(Vec<Pattern>),
+    /// A trait object whose concrete type is `ty`: `case Circle(c):` on a `Shape`. `inner`
+    /// matches the value as that type, and binds it, or matches anything.
+    DynType {
+        ty: Ty,
+        inner: Box<Pattern>,
+    },
 }
 
 /// How a value is converted to a related type: used for implicit conversions to trait objects

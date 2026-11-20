@@ -456,6 +456,10 @@ struct Checker<'a, 'm> {
     closures: Vec<(FuncId, hir::Function)>,
     /// Methods from `impl Type:` blocks.
     inherent: HashMap<(Ty, String), FuncId>,
+    /// Methods with type parameters of their own, by type and name: indexes of `generic_fns`.
+    generic_methods: HashMap<(Ty, String), usize>,
+    /// The type parameters of each generic method, by the position of its name.
+    method_params: HashMap<(FileId, u32), Vec<generics::TypeParam>>,
     impls: Vec<ImplInfo>,
     impl_index: HashMap<(TraitId, Ty), usize>,
     /// For method calls: which implemented traits provide a method of this name for this type.
@@ -723,6 +727,8 @@ impl<'a, 'm> Checker<'a, 'm> {
             signatures: Vec::new(),
             bodies: Vec::new(),
             inherent: HashMap::new(),
+            generic_methods: HashMap::new(),
+            method_params: HashMap::new(),
             impls: Vec::new(),
             impl_index: HashMap::new(),
             trait_methods: HashMap::new(),

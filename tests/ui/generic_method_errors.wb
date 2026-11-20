@@ -1,0 +1,31 @@
+# What a method with type parameters needs: a type parameter that can be worked out, types
+# that meet its bounds, and not to be a method of a trait.
+trait Picker:
+    def pick[T](self, first: T, second: T) -> T
+
+struct Holder:
+    n: int
+
+struct Plain:
+    n: int
+
+impl Holder:
+    def smaller[T: Ord](self, a: T, b: T) -> T:
+        return a if a < b else b
+
+    def nothing[T](self) -> int:
+        return 0
+
+    def make[T](value: T) -> list[T]:
+        return [value]
+
+    def broken[T](self, value: T) -> T:
+        return value + 1
+
+def main():
+    holder = Holder(1)
+    print(holder.smaller(Plain(1), Plain(2)))
+    print(holder.nothing())
+    print(holder.smaller(1, "a"))
+    print(Holder.smaller(1, 2), holder.make(3))
+    print(holder.smaller)

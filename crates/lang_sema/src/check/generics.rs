@@ -43,6 +43,19 @@ pub(super) struct GenericFn<'m> {
     pub instances: HashMap<Vec<Ty>, FuncId>,
     /// The instance with the function's own parameters, used for inference.
     pub pattern: Option<FuncId>,
+    /// For a method with type parameters of its own: what it belongs to.
+    pub method: Option<MethodOf>,
+}
+
+/// The `impl` block instance a generic method is in (docs/11, milestone 4): the type, its name
+/// for messages, the bindings of the block's type parameters, and how the block's bodies are
+/// checked.
+#[derive(Clone)]
+pub(super) struct MethodOf {
+    pub target: Ty,
+    pub type_name: String,
+    pub bindings: Vec<(String, Ty)>,
+    pub mode: BodyMode,
 }
 
 #[derive(Clone, Copy)]
@@ -78,13 +91,16 @@ pub(super) type Arranged<'e> = Vec<Option<&'e ast::Expr>>;
 pub(super) struct Extra {
     pub name: Option<String>,
     pub receiver: Option<hir::Expr>,
+    /// Whether the receiver is the function's first parameter (a prelude function standing for
+    /// a method of a built-in type), rather than the `self` of a method, which is not one.
+    pub receiver_is_param: bool,
     pub location: Option<hir::Expr>,
 }
 
 impl Extra {
     /// The parameters the caller writes: all but the receiver and the location.
     pub fn written<'p>(&self, params: &'p [super::ParamSig]) -> &'p [super::ParamSig] {
-        let first = usize::from(self.receiver.is_some());
+        let first = usize::from(self.receiver.is_some() && self.receiver_is_param);
         let last = params.len() - usize::from(self.location.is_some());
         &params[first..last]
     }
@@ -240,14 +256,61 @@ impl<'m> Checker<'_, 'm> {
     pub(super) fn declare_generic_fn(&mut self, function: &'m ast::Function) -> usize {
         let params = self.declare_type_params(&function.generics);
         let index = self.generic_fns.len();
-        self.generic_fns.push(GenericFn { ast: function, params, instances: HashMap::new(), pattern: None });
+        self.generic_fns.push(GenericFn {
+            ast: function,
+            params,
+            instances: HashMap::new(),
+            pattern: None,
+            method: None,
+        });
         self.globals.insert(function.name.name.clone(), (Global::GenericFunction(index), function.name.span));
         index
     }
 
+    /// A method with type parameters of its own, in the `impl` block instance for `target`:
+    /// a template like a generic function's, which keeps the block's bindings and `self`.
+    pub(super) fn declare_generic_method(
+        &mut self,
+        function: &'m ast::Function,
+        target: Ty,
+        type_name: &str,
+        bindings: &[(String, Ty)],
+        mode: BodyMode,
+    ) -> usize {
+        // The method's own type parameters are made once, whichever instance of the `impl` block
+        // it is in: otherwise `Box[U]`, named in `def map[U](...) -> Box[U]`, would be a new type
+        // with a new `map` for every instance, without end.
+        let key = (function.name.span.file, function.name.span.lo);
+        let (params, fresh) = match self.method_params.get(&key) {
+            Some(params) => (params.clone(), false),
+            None => {
+                let params = self.declare_type_params(&function.generics);
+                self.method_params.insert(key, params.clone());
+                (params, true)
+            }
+        };
+        let index = self.generic_fns.len();
+        self.generic_fns.push(GenericFn {
+            ast: function,
+            params,
+            instances: HashMap::new(),
+            pattern: None,
+            method: Some(MethodOf { target, type_name: type_name.to_string(), bindings: bindings.to_vec(), mode }),
+        });
+        self.generic_methods.insert((target, function.name.name.clone()), index);
+        self.finish_generic_fn_with(index, fresh);
+        index
+    }
+
     pub(super) fn finish_generic_fn(&mut self, index: usize) {
+        self.finish_generic_fn_with(index, true);
+    }
+
+    fn finish_generic_fn_with(&mut self, index: usize, resolve: bool) {
         let (function, params) = (self.generic_fns[index].ast, self.generic_fns[index].params.clone());
-        self.resolve_bounds(&params, &function.generics);
+        if resolve {
+            self.resolve_bounds(&params, &function.generics);
+        }
         if !function.annotations.is_empty() {
             let span = function.annotations[0].span;
             self.error(Diagnostic::error(
@@ -271,19 +334,42 @@ impl<'m> Checker<'_, 'm> {
             return pattern;
         }
         let (ast, params) = (self.generic_fns[index].ast, self.generic_fns[index].params.clone());
-        let mode = self.instance_mode(&args, &Self::own_types(&params));
+        let method = self.generic_fns[index].method.clone();
+        let own_mode = self.instance_mode(&args, &Self::own_types(&params));
+        // A method's body is checked once, reported, in the pattern of its `impl` block, and its
+        // own pattern in a concrete instance of the block has nothing to compile.
+        let mode = match (&method, own_mode) {
+            (None, mode) => mode,
+            (Some(m), own) => match (m.mode, own) {
+                (BodyMode::Skip, _) => BodyMode::Skip,
+                (BodyMode::GenericCheck, BodyMode::GenericCheck) => BodyMode::GenericCheck,
+                (BodyMode::GenericCheck, _) => BodyMode::Skip,
+                (BodyMode::Quiet, BodyMode::GenericCheck) => BodyMode::Skip,
+                (_, own) => own,
+            },
+        };
         let shown: Vec<String> = args.iter().map(|a| self.display(*a)).collect();
-        let bindings = Self::bindings(&params, &args);
-        let saved_self = self.self_ty.take();
+        let mut bindings = method.as_ref().map(|m| m.bindings.clone()).unwrap_or_default();
+        bindings.extend(Self::bindings(&params, &args));
+        let target = method.as_ref().map(|m| m.target);
+        let saved_self = std::mem::replace(&mut self.self_ty, target);
         let signature = self.in_module(self.module_of(ast.name.span), |this| {
-            let base = this.qualified(&ast.name.name);
+            let base = match &method {
+                Some(m) => format!("{}.{}", m.type_name, ast.name.name),
+                None => this.qualified(&ast.name.name),
+            };
             let name = if mode == BodyMode::GenericCheck { base } else { format!("{base}[{}]", shown.join(", ")) };
-            this.with_scope(bindings.clone(), mode != BodyMode::GenericCheck, |this| this.signature(ast, &name, None))
+            let receiver = target.zip(ast.self_param);
+            this.with_scope(bindings.clone(), mode != BodyMode::GenericCheck, |this| {
+                let mut signature = this.signature(ast, &name, receiver);
+                signature.private = method.is_some() && ast.visibility == ast::Visibility::Priv;
+                signature
+            })
         });
         self.self_ty = saved_self;
         let id = FuncId(self.signatures.len());
         self.signatures.push(signature);
-        self.bodies.push(Some(Body { ast, self_ty: None, bindings, mode, extern_symbol: None }));
+        self.bodies.push(Some(Body { ast, self_ty: target, bindings, mode, extern_symbol: None }));
         self.generic_fns[index].instances.insert(args, id);
         id
     }
@@ -754,7 +840,14 @@ impl<'m> Checker<'_, 'm> {
         ok
     }
 
-    fn cannot_infer(&mut self, owner: &str, params: &[TypeParam], found: &[Option<Ty>], span: Span, example: &str) {
+    fn cannot_infer(
+        &mut self,
+        owner: &str,
+        params: &[TypeParam],
+        found: &[Option<Ty>],
+        span: Span,
+        example: Option<&str>,
+    ) {
         let missing: Vec<String> =
             params.iter().zip(found).filter(|(_, f)| f.is_none()).map(|(p, _)| format!("`{}`", p.name)).collect();
         self.error(
@@ -764,9 +857,12 @@ impl<'m> Checker<'_, 'm> {
                 span,
                 "type unknown",
             )
-            .with_help(format!(
-                "give the types explicitly, for example `{example}`, or add a type hint where the value is used"
-            )),
+            .with_help(match example {
+                Some(example) => format!(
+                    "give the types explicitly, for example `{example}`, or add a type hint where the value is used"
+                ),
+                None => "add a type hint where the value is used, or give an argument that has the type".to_string(),
+            }),
         );
     }
 
@@ -999,7 +1095,7 @@ impl<'m> Checker<'_, 'm> {
         let pairs: Vec<(Ty, &ast::Expr)> =
             slots.iter().zip(written).filter_map(|(s, p)| s.map(|e| (p.ty, e))).collect();
         let mut found = vec![None; params.len()];
-        if let Some(receiver) = &extra.receiver {
+        if let Some(receiver) = extra.receiver.as_ref().filter(|_| extra.receiver_is_param) {
             self.unify(signature.params[0].ty, receiver.ty, &params, &mut found);
         }
         self.infer_from_args(cx, &pairs, &params, &mut found);
@@ -1009,8 +1105,11 @@ impl<'m> Checker<'_, 'm> {
             self.unify(signature.ret, expected, &params, &mut found);
         }
         let Some(bound) = found.iter().copied().collect::<Option<Vec<Ty>>>() else {
+            // A method's type parameters cannot be written out, only inferred.
             let example = format!("{name}[{}](...)", params.iter().map(|_| "int").collect::<Vec<_>>().join(", "));
-            self.cannot_infer(&name, &params, &found, span, &example);
+            let is_method =
+                extra.name.is_some() && !extra.receiver_is_param && self.generic_fns[index].method.is_some();
+            self.cannot_infer(&name, &params, &found, span, (!is_method).then_some(example.as_str()));
             self.check_all_quietly(cx, args);
             return error_expr(span);
         };
@@ -1083,7 +1182,7 @@ impl<'m> Checker<'_, 'm> {
             self.unify(signature.ret, er, &params, &mut found);
         }
         let Some(bound) = found.iter().copied().collect::<Option<Vec<Ty>>>() else {
-            self.cannot_infer(&name, &params, &found, span, &format!("{name}[int]"));
+            self.cannot_infer(&name, &params, &found, span, Some(&format!("{name}[int]")));
             return error_expr(span);
         };
         if !self.check_bounds(&name, &params, &bound, span) {
@@ -1187,7 +1286,7 @@ impl<'m> Checker<'_, 'm> {
         let mut found = vec![None; params.len()];
         self.infer_from_args(cx, &pairs, &params, &mut found);
         let Some(bound) = found.iter().copied().collect::<Option<Vec<Ty>>>() else {
-            self.cannot_infer(&name, &params, &found, span, example);
+            self.cannot_infer(&name, &params, &found, span, Some(example));
             return None;
         };
         if bound.contains(&Ty::ERROR) || !self.check_bounds(&name, &params, &bound, span) {

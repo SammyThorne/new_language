@@ -1,0 +1,86 @@
+# Methods with type parameters of their own (docs/11, milestone 4), alone and in generic
+# `impl` blocks: inferred from the arguments, checked against their bounds, with the block's
+# parameters in scope, and instantiated once per use.
+# expect: 2 [1, 2, 3] 3
+# expect: Box(v=6) Box(v='a!') 5
+# expect: (7, 'x') (7, 2.5) (Box(v=7), True)
+# expect: 3 ab 123
+# expect: ['<a>', '<b>'] [3, 1] 15
+# expect: Just(value=5) Nothing 4
+# expect: [(1, 'a'), (2, 'b')] 6 bcd
+# expect: 8 xxxxxxxx
+@derive(Display)
+struct Box[T]:
+    v: T
+
+impl[T] Box[T]:
+    def map[U](self, f: def(T) -> U) -> Box[U]:
+        return Box(f(self.v))
+
+    def pair[U](self, other: U) -> tuple[T, U]:
+        return (self.v, other)
+
+    def and_then[U](self, f: def(T) -> Box[U]) -> Box[U]:
+        return f(self.v)
+
+    def flag[U: Display](self, label: U) -> tuple[Box[T], bool]:
+        return (self, len(str(label)) > 0)
+
+impl[T: Display] Box[T]:
+    def describe[U: Display](self, other: U) -> str:
+        return f"{self.v}{other}"
+
+@derive(Display)
+enum Maybe[T]:
+    Just(value: T)
+    Nothing
+
+impl[T] Maybe[T]:
+    def map[U](self, f: def(T) -> U) -> Maybe[U]:
+        match self:
+            case Just(value):
+                return Just(f(value))
+            case Nothing:
+                return Nothing
+
+    def or_else[U](self, fallback: U, use: def(T) -> U) -> U:
+        match self:
+            case Just(value):
+                return use(value)
+            case Nothing:
+                return fallback
+
+struct Counter:
+    n: int
+
+impl Counter:
+    def fold[A](self, start: A, step: def(A, int) -> A) -> A:
+        total = start
+        for i in range(self.n):
+            total = step(total, i + 1)
+        return total
+
+    def of[T](items: list[T]) -> Counter:
+        return Counter(len(items))
+
+    def collect[T](self, make: def(int) -> T) -> list[T]:
+        return [make(i) for i in range(self.n)]
+
+    def repeat[T: Display](self, item: T) -> str:
+        out = ""
+        for _ in range(self.n):
+            out += str(item)
+        return out
+
+def main():
+    one = Box(1)
+    print(one.map(lambda x: x + 1).v, Box([1, 2, 3]).map(lambda xs: xs).v, Box("abc").map(lambda s: len(s)).v)
+    print(Box(2).map(lambda x: x * 3), Box("a").map(lambda s: s + "!"), Box(1).map(lambda x: x + 4).v)
+    print(Box(7).pair("x"), Box(7).pair(2.5), Box(7).flag("y"))
+    print(Box(1).and_then(lambda x: Box(x + 2)).v, Box("a").describe("b"), Box(12).describe(3))
+    print(Box(["a", "b"]).map(lambda xs: [f"<{x}>" for x in xs]).v, Box(3).map(lambda x: [x, 1]).v, Box(5).map(lambda x: x * 3).v)
+    nothing: Maybe[int] = Nothing
+    print(Just(2).map(lambda x: x + 3), nothing.map(lambda x: x + 1), Just(2).or_else(0, lambda x: x * 2))
+    counter = Counter(3)
+    print(Counter.of(["a", "b"]).collect(lambda i: (i + 1, "ab"[i:i + 1])), counter.fold(0, lambda acc, i: acc + i), counter.fold("", lambda acc, i: acc + "abcd"[i:i + 1]))
+    print(Counter(8).fold(0, lambda acc, i: i), Counter(8).repeat("x"))
