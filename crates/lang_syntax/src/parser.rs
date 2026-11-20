@@ -1780,7 +1780,17 @@ impl Parser<'_> {
                 }
                 let key = self.expr()?;
                 if !self.at(&TokenKind::Colon) {
-                    return Err(self.not_supported("set literals are", span));
+                    // `{a, b}` and `{x for x in xs}`: a set.
+                    if self.at(&TokenKind::For) {
+                        let clauses = self.comp_clauses()?;
+                        let close = self.expect(TokenKind::RBrace, "to close the set comprehension")?;
+                        return Ok(Expr {
+                            kind: ExprKind::SetComp { element: Box::new(key), clauses },
+                            span: span.to(close),
+                        });
+                    }
+                    let (items, close) = self.sequence(TokenKind::RBrace, key, "set")?;
+                    return Ok(Expr { kind: ExprKind::Set(items), span: span.to(close) });
                 }
                 self.bump();
                 let value = self.expr()?;
@@ -1928,6 +1938,8 @@ mod tests {
             ExprKind::Unary { op, operand } => format!("({} {})", op.symbol(), show(operand)),
             ExprKind::Binary { op, lhs, rhs } => format!("({} {} {})", show(lhs), op.symbol(), show(rhs)),
             ExprKind::Match { subject, cases } => format!("match {} [{} cases]", show(subject), cases.len()),
+            ExprKind::Set(items) => format!("set[{}]", items.iter().map(show).collect::<Vec<_>>().join(", ")),
+            ExprKind::SetComp { element, clauses } => format!("setcomp[{} / {}]", show(element), clauses.len()),
             ExprKind::IfElse { cond, then, otherwise } => {
                 format!("({} if {} else {})", show(then), show(cond), show(otherwise))
             }
@@ -2058,6 +2070,38 @@ def f(x: int) -> str:
         assert!(matches!(&body[1].kind, StmtKind::Assign { ty: Some(_), .. }));
         let StmtKind::Return(Some(value)) = &body[2].kind else { panic!() };
         assert!(matches!(value.kind, ExprKind::Match { .. }));
+    }
+
+    #[test]
+    fn sets_and_dicts_in_braces() {
+        let text = "\
+def f():
+    a = {1, 2, 3,}
+    b = {x * 2 for x in xs if x > 0}
+    c = {1: 2}
+    d = {}
+    e = {k: v for k, v in pairs}
+    g = {(1, 2), (3, 4)}
+";
+        let (module, diags) = parse_text(text);
+        assert!(diags.is_empty(), "{:?}", codes_of(&diags));
+        let body = &function(&module, 0).body;
+        let kind = |i: usize| match &body[i].kind {
+            StmtKind::Assign { value, .. } => match &value.kind {
+                ExprKind::Set(items) => format!("set {}", items.len()),
+                ExprKind::SetComp { clauses, .. } => format!("setcomp {}", clauses.len()),
+                ExprKind::Dict(pairs) => format!("dict {}", pairs.len()),
+                ExprKind::DictComp { .. } => "dictcomp".to_string(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            (0..6).map(kind).collect::<Vec<_>>(),
+            ["set 3", "setcomp 1", "dict 1", "dict 0", "dictcomp", "set 2"]
+        );
+        let (_, diags) = parse_text("def f():\n    a = {1, 2\n");
+        assert!(!diags.is_empty());
     }
 
     #[test]
@@ -2298,7 +2342,7 @@ impl User:
     #[test]
     fn errors_recover_at_the_next_statement() {
         let (module, diags) =
-            parse_text("def main():\n    x = {1, 2}\n    print(1 +)\n    z()\n\ndef other():\n    w()\n");
+            parse_text("def main():\n    x = a = 1\n    print(1 +)\n    z()\n\ndef other():\n    w()\n");
         assert_eq!(codes_of(&diags), [codes::NOT_SUPPORTED_SYNTAX, codes::UNEXPECTED_TOKEN]);
         assert_eq!(module.items.len(), 2);
         assert_eq!(function(&module, 0).body.len(), 1, "only `z()` survives");

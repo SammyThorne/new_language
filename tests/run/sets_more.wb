@@ -1,0 +1,51 @@
+# Sets in structs, in JSON (as arrays; repeated elements are added once), behind a `Mutex`,
+# shared between tasks, compared inside lists and dicts, and made by the standard library
+# (docs/11, milestone 3).
+# expect: {"name":"a","tags":["x","y"],"ids":[3,1]}
+# expect: round trip equal: True
+# expect: decoded: ['p', 'q'] [] 3
+# expect: error: ids[0]: expected an integer, found a string
+# expect: error: tags: expected an array, found a string
+# expect: [0, 1, 2] 3
+# expect: True True False
+# expect: ['a', 'b'] {'k': 1}
+import json
+
+@derive(Json, Eq)
+struct Tags:
+    name: str
+    tags: set[str]
+    ids: set[int] = set()
+
+def collect(shared: Mutex[set[int]], start: int) -> int:
+    for i in range(start, start + 50):
+        with shared.lock() as items:
+            items.add(i % 60)
+    return start
+
+def main():
+    tags = Tags("a", {"x", "y"}, {3, 1})
+    text = json.encode(tags)
+    print(text)
+    back = json.decode[Tags](text).unwrap()
+    print(f"round trip equal: {back == tags}")
+    other = json.decode[Tags]('{"name":"b","tags":["p","p","q"],"ids":[]}').unwrap()
+    print(f"decoded: {sorted(other.tags)} {sorted(other.ids)} {len(back.tags) + len(back.ids) - 1}")
+    for bad in ['{"name":"b","tags":[],"ids":["z"]}', '{"name":"b","tags":"oops"}']:
+        match json.decode[Tags](bad):
+            case Ok(_):
+                print("unexpected")
+            case Err(error):
+                print(f"error: {error.message()}")
+    shared: Mutex[set[int]] = Mutex(set())
+    tasks = [spawn collect(shared, 0), spawn collect(shared, 30), spawn collect(shared, 100)]
+    for task in tasks:
+        task.join()
+    with shared.lock() as items:
+        print(sorted({i % 3 for i in items}), len({i % 3 for i in items}))
+    groups = [{1, 2}, {3}]
+    lookup = {"a": {1}, "b": {2}}
+    print({1, 2} in groups, groups == [{2, 1}, {3}], lookup == {"a": {1}, "b": {3}})
+    names: dict[str, set[int]] = {}
+    names["k"] = {1}
+    print(sorted({"b", "a"}), {k: len(v) for k, v in names.items()})

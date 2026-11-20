@@ -349,3 +349,68 @@ def __dict_pop_or[K: Hash, V](entries: dict[K, V], key: K, default: V) -> V:
         entries.pop(key)
         return value
     return default
+
+# -- set
+#
+# A `set[T]` is a dict whose values are `None` and take no room; the compiler has `add`,
+# `discard` and `clear`, and the rest is here. The operators `|`, `&`, `-` and `^` call
+# `__set_union`, `__set_intersection`, `__set_difference` and `__set_symmetric_difference`.
+
+def __set_of[T: Hash](items: list[T]) -> set[T]:
+    """`set(items)`."""
+    out: set[T] = set()
+    for item in items:
+        out.add(item)
+    return out
+
+def __set_copy[T: Hash](items: set[T]) -> set[T]:
+    return {item for item in items}
+
+def __set_remove[T: Hash](items: set[T], item: T, __at: str):
+    if not items.discard(item):
+        __panic_at("remove(): the element is not in the set", __at)
+
+def __set_pop[T: Hash](items: set[T]) -> T?:
+    """Removes and returns the element added first, or `None` if the set is empty."""
+    for item in items:
+        items.discard(item)
+        return item
+    return None
+
+def __set_update[T: Hash](items: set[T], other: set[T]):
+    for item in other:
+        items.add(item)
+
+def __set_union[T: Hash](a: set[T], b: set[T]) -> set[T]:
+    out = {item for item in a}
+    for item in b:
+        out.add(item)
+    return out
+
+def __set_intersection[T: Hash](a: set[T], b: set[T]) -> set[T]:
+    return {item for item in a if item in b}
+
+def __set_difference[T: Hash](a: set[T], b: set[T]) -> set[T]:
+    return {item for item in a if item not in b}
+
+def __set_symmetric_difference[T: Hash](a: set[T], b: set[T]) -> set[T]:
+    out = {item for item in a if item not in b}
+    for item in b:
+        if item not in a:
+            out.add(item)
+    return out
+
+def __set_is_subset[T: Hash](a: set[T], b: set[T]) -> bool:
+    for item in a:
+        if item not in b:
+            return False
+    return True
+
+def __set_is_superset[T: Hash](a: set[T], b: set[T]) -> bool:
+    return __set_is_subset(b, a)
+
+def __set_is_disjoint[T: Hash](a: set[T], b: set[T]) -> bool:
+    for item in a:
+        if item in b:
+            return False
+    return True

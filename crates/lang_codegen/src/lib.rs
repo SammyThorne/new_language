@@ -252,6 +252,7 @@ const RUNTIME: &[(&str, &str, &str)] = &[
     ("lrt_builder_finish", "s", "p"),
     ("lrt_builder_print", "v", "p"),
     ("lrt_builder_print_flush", "v", "pi"),
+    ("lrt_unit_eq_ptr", "i", "pp"),
     ("lrt_str_concat", "s", "pipi"),
     ("lrt_str_concat_n", "s", "pi"),
     ("lrt_str_repeat", "s", "pii"),
@@ -593,8 +594,12 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         self.llty(ty).expect("a value type")
     }
 
-    /// Bytes one value occupies in memory, including padding.
+    /// Bytes one value occupies in memory, including padding. `None` is the value of a set's
+    /// entries, and takes no room.
     fn size_of(&self, ty: Ty) -> u64 {
+        if ty == Ty::NONE {
+            return 0;
+        }
         self.td.get_abi_size(&self.value_type(ty))
     }
 

@@ -362,6 +362,12 @@ pub unsafe extern "C-unwind" fn lrt_dict_slot(d: *mut Dict, key: *const u8) -> *
     }
 }
 
+/// The equality function for the values of a set, which has none: any two are equal.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_unit_eq_ptr(_a: *const u8, _b: *const u8) -> i64 {
+    1
+}
+
 /// Remove `*key`. Returns 1 and copies the value to `out` (if not null) when it was present.
 ///
 /// # Safety

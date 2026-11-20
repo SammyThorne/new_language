@@ -207,6 +207,29 @@ impl Types {
         self.intern(TyKind::Dict(key, value))
     }
 
+    /// `set[T]`, which is a dict whose values are `None` and take no room (docs/11, milestone 3).
+    /// Everything that works on a dict's keys, such as `in`, `len`, iteration and equality, works
+    /// on it unchanged; the checker allows a set only what a set has.
+    pub fn set(&mut self, elem: Ty) -> Ty {
+        self.intern(TyKind::Dict(elem, Ty::NONE))
+    }
+
+    /// The element type of a `list[T]`.
+    pub fn list_elem(&self, ty: Ty) -> Option<Ty> {
+        match self.kind(ty) {
+            TyKind::List(elem) => Some(*elem),
+            _ => None,
+        }
+    }
+
+    /// The element type of a `set[T]`.
+    pub fn set_elem(&self, ty: Ty) -> Option<Ty> {
+        match self.kind(ty) {
+            TyKind::Dict(elem, value) if *value == Ty::NONE => Some(*elem),
+            _ => None,
+        }
+    }
+
     pub fn tuple(&mut self, items: Vec<Ty>) -> Ty {
         self.intern(TyKind::Tuple(items))
     }
@@ -311,6 +334,7 @@ impl Types {
             TyKind::Guard(t) => format!("MutexGuard[{}]", self.display(*t)),
             TyKind::Atomic => "Atomic".into(),
             TyKind::List(elem) => format!("list[{}]", self.display(*elem)),
+            TyKind::Dict(elem, value) if *value == Ty::NONE => format!("set[{}]", self.display(*elem)),
             TyKind::Dict(key, value) => format!("dict[{}, {}]", self.display(*key), self.display(*value)),
             TyKind::Tuple(items) => {
                 format!("tuple[{}]", items.iter().map(|t| self.display(*t)).collect::<Vec<_>>().join(", "))

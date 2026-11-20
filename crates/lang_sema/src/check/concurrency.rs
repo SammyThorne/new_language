@@ -54,6 +54,10 @@ impl Checker<'_, '_> {
                     self.display(elem)
                 ),
             )),
+            TyKind::Dict(_, Ty::NONE) => Some((
+                format!("a `{shown}` can be changed"),
+                "wrap the set in `Mutex(...)`; there is no immutable set yet".to_string(),
+            )),
             TyKind::Dict(k, v) => Some((
                 format!("a `{shown}` can be changed"),
                 format!(
@@ -425,16 +429,20 @@ impl Checker<'_, '_> {
             (_, TyKind::Error) => return error_expr(span),
             ("tuple", TyKind::List(elem)) => self.types.frozen_list(elem),
             ("tuple", TyKind::FrozenList(_)) | ("frozendict", TyKind::FrozenDict(..)) => return value,
-            ("frozendict", TyKind::Dict(k, v)) => self.types.frozen_dict(k, v),
+            ("frozendict", TyKind::Dict(k, v)) if v != Ty::NONE => self.types.frozen_dict(k, v),
             _ => {
                 let shown = self.display(value.ty);
                 let want = if name == "tuple" { "a list" } else { "a dict" };
-                self.error(Diagnostic::error(
+                let mut diagnostic = Diagnostic::error(
                     codes::TYPE_MISMATCH,
                     format!("`{name}` cannot take a `{shown}`"),
                     value.span,
                     format!("expected {want}"),
-                ));
+                );
+                if self.types.set_elem(value.ty).is_some() {
+                    diagnostic = diagnostic.with_help("there is no immutable set; share a set through a `Mutex`");
+                }
+                self.error(diagnostic);
                 return error_expr(span);
             }
         };

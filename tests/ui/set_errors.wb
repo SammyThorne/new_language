@@ -1,0 +1,27 @@
+# What a set cannot be or do: have unhashable elements, be built from `{}` or key: value pairs,
+# be indexed, assigned into or `del`ed, be used as a key, or be sent to a task.
+@derive(Eq)
+struct Loose:
+    x: int
+
+def worker(items: set[int]) -> int:
+    return len(items)
+
+def main():
+    _nested = {[1], [2]}
+    _unhashable: set[list[int]] = set()
+    _from_loose = {Loose(1)}
+    _empty: set[int] = {}
+    _pairs: set[int] = {1: 2}
+    items = {1, 2}
+    print(items[0])
+    items[0] = 5
+    del items[1]
+    _by_set = {items: 1}
+    _nested_sets = {items}
+    items.append(1)
+    items.remove()
+    items.get(1)
+    print(set(5), set(1, 2), set([1]) < set([2]), items + items, items <= items)
+    task = spawn worker(items)
+    print(task.join(), frozenset([1]))

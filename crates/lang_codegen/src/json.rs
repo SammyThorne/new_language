@@ -132,6 +132,31 @@ impl<'ctx> Codegen<'ctx, '_> {
                 }
                 self.push_text(builder, "]");
             }
+            TyKind::Dict(elem_ty, value_ty) if value_ty == Ty::NONE => {
+                // A set is an array of its elements, in the order they were added.
+                let dict = value.into_pointer_value();
+                self.push_text(builder, "[");
+                let cursor = self.alloca(self.cx.i64_type().into(), "cursor");
+                self.b.build_store(cursor, self.i64(0)).must();
+                let count = self.alloca(self.cx.i64_type().into(), "count");
+                self.b.build_store(count, self.i64(0)).must();
+                let (header, body, exit) = (self.block("loop"), self.block("body"), self.block("end"));
+                self.b.build_unconditional_branch(header).must();
+                self.b.position_at_end(header);
+                let entry = self.call_rt("lrt_dict_next", &[dict.into(), cursor.into()]).unwrap().into_pointer_value();
+                let done = self.b.build_is_null(entry, "").must();
+                self.b.build_conditional_branch(done, exit, body).must();
+                self.b.position_at_end(body);
+                let n = self.b.build_load(self.cx.i64_type(), count, "").must().into_int_value();
+                self.separator(builder, n);
+                let next = self.b.build_int_add(n, self.i64(1), "").must();
+                self.b.build_store(count, next).must();
+                let item = self.entry_key(entry, elem_ty);
+                self.emit_json(builder, elem_ty, Some(item));
+                self.b.build_unconditional_branch(header).must();
+                self.b.position_at_end(exit);
+                self.push_text(builder, "]");
+            }
             TyKind::Dict(key_ty, value_ty) => {
                 let dict = value.into_pointer_value();
                 self.push_text(builder, "{");
@@ -400,6 +425,40 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.build_unconditional_branch(header).must();
                 self.b.position_at_end(exit);
                 self.b.build_store(out, list).must();
+            }
+            TyKind::Dict(elem, value_ty) if value_ty == Ty::NONE => {
+                // A set is read from an array; repeated elements are added once.
+                let ok = self.call_rt("lrt_json_array_start", &[r]).unwrap();
+                let ok = self.nonzero(ok);
+                self.or_fail(ok, fail);
+                let desc = self.desc(ty);
+                let set = self.call_rt("lrt_dict_new", &[desc.into()]).unwrap().into_pointer_value();
+                let slot = self.alloca(self.value_type(elem), "element");
+                let counter = self.alloca(self.cx.i64_type().into(), "index");
+                self.b.build_store(counter, self.i64(0)).must();
+                let (header, body, exit) = (self.block("loop"), self.block("body"), self.block("end"));
+                self.b.build_unconditional_branch(header).must();
+                self.b.position_at_end(header);
+                let next = self.call_rt("lrt_json_array_next", &[r]).unwrap().into_int_value();
+                let failed = self.b.build_int_compare(IntPredicate::SLT, next, self.i64(0), "").must();
+                let more = self.b.build_int_compare(IntPredicate::SGT, next, self.i64(0), "").must();
+                let check = self.block("check");
+                self.b.build_conditional_branch(failed, fail, check).must();
+                self.b.position_at_end(check);
+                self.b.build_conditional_branch(more, body, exit).must();
+                self.b.position_at_end(body);
+                let i = self.b.build_load(self.cx.i64_type(), counter, "").must();
+                self.call_rt("lrt_json_push_index", &[r, i]);
+                let ok = self.decode_json(reader, elem, slot);
+                self.or_fail(ok, fail);
+                self.call_rt("lrt_json_pop", &[r]);
+                let item = self.b.build_load(self.value_type(elem), slot, "").must();
+                self.dict_entry(set.into(), item, elem, true);
+                let next_i = self.b.build_int_add(i.into_int_value(), self.i64(1), "").must();
+                self.b.build_store(counter, next_i).must();
+                self.b.build_unconditional_branch(header).must();
+                self.b.position_at_end(exit);
+                self.b.build_store(out, set).must();
             }
             TyKind::Dict(key_ty, value_ty) => {
                 let ok = self.call_rt("lrt_json_object_start", &[r]).unwrap();

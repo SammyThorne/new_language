@@ -26,6 +26,15 @@ enum ClosureBody<'e> {
     Stmts(&'e [ast::Stmt]),
 }
 
+/// What a comprehension builds: `[x for ...]`, `{x for ...}`, or `{k: v for ...}` with the
+/// value expression.
+#[derive(Clone, Copy)]
+pub(super) enum CompKind<'a> {
+    List,
+    Set,
+    Dict(&'a ast::Expr),
+}
+
 impl Checker<'_, '_> {
     /// The local a name refers to, capturing it from an enclosing function if needed.
     pub(super) fn lookup_local(&mut self, cx: &mut FnCx, name: &str) -> Option<LocalId> {
@@ -417,11 +426,16 @@ impl Checker<'_, '_> {
         &mut self,
         cx: &mut FnCx,
         element: &ast::Expr,
-        value: Option<&ast::Expr>,
+        kind: CompKind,
         clauses: &[ast::CompClause],
         span: Span,
         expected: Option<Ty>,
     ) -> hir::Expr {
+        let (value, as_set) = match kind {
+            CompKind::List => (None, false),
+            CompKind::Set => (None, true),
+            CompKind::Dict(value) => (Some(value), false),
+        };
         let saved_scope = cx.scope.clone();
         let mut loops: Vec<(hir::LoopTarget, hir::LoopSource, Vec<hir::Expr>)> = Vec::new();
         let mut failed = false;
@@ -445,6 +459,27 @@ impl Checker<'_, '_> {
             }
         }
         let (result_ty, inner) = match value {
+            None if as_set => {
+                let expected_elem = expected.and_then(|t| self.types.set_elem(t));
+                let item = match expected_elem {
+                    Some(elem) => self.expect(cx, element, elem, None),
+                    None => self.expr(cx, element, None),
+                };
+                if item.ty == Ty::NONE {
+                    self.error(Diagnostic::error(
+                        codes::CANNOT_INFER,
+                        "the elements of this set have no value",
+                        element.span,
+                        "produces `None`",
+                    ));
+                    failed = true;
+                } else if item.ty != Ty::ERROR && !self.hashable(item.ty) {
+                    self.unhashable(item.ty, item.span);
+                    failed = true;
+                }
+                let set_ty = self.types.set(item.ty);
+                (set_ty, vec![item])
+            }
             None => {
                 let expected_elem = expected.and_then(|t| match self.types.kind(t) {
                     TyKind::List(elem) => Some(*elem),
@@ -468,7 +503,7 @@ impl Checker<'_, '_> {
             }
             Some(value_expr) => {
                 let expected_kv = expected.and_then(|t| match self.types.kind(t) {
-                    TyKind::Dict(k, v) => Some((*k, *v)),
+                    TyKind::Dict(k, v) if *v != Ty::NONE => Some((*k, *v)),
                     _ => None,
                 });
                 let (key, value) = match expected_kv {
@@ -477,6 +512,20 @@ impl Checker<'_, '_> {
                 };
                 if !self.hashable(key.ty) {
                     self.unhashable(key.ty, key.span);
+                    failed = true;
+                }
+                if value.ty == Ty::NONE {
+                    self.error(
+                        Diagnostic::error(
+                            codes::CANNOT_INFER,
+                            "the values of this dict have no value",
+                            value.span,
+                            "produces `None`",
+                        )
+                        .with_help(
+                            "for a set, write `{x for x in items}`; for a dict, give a value of a type such as `int?`",
+                        ),
+                    );
                     failed = true;
                 }
                 let dict_ty = self.types.dict(key.ty, value.ty);
@@ -495,6 +544,7 @@ impl Checker<'_, '_> {
         let mut hoisted = Vec::new();
         let mut capacity = None;
         if value.is_none()
+            && !as_set
             && let [(_, source, conditions)] = loops.as_mut_slice()
             && conditions.is_empty()
         {
@@ -520,6 +570,14 @@ impl Checker<'_, '_> {
         }
         let mut inner = inner.into_iter();
         let mut body = match value {
+            None if as_set => {
+                let item = inner.next().expect("an element");
+                vec![hir::Stmt::Expr(mk(
+                    K::Builtin { op: hir::Builtin::SetAdd, args: vec![load.clone(), item] },
+                    Ty::NONE,
+                    span,
+                ))]
+            }
             None => {
                 let item = inner.next().expect("an element");
                 vec![hir::Stmt::Expr(mk(
@@ -549,6 +607,7 @@ impl Checker<'_, '_> {
             (None, Some(capacity)) => {
                 mk(K::Builtin { op: hir::Builtin::ListWithCapacity, args: vec![capacity] }, result_ty, span)
             }
+            (None, None) if as_set => mk(K::Dict(Vec::new()), result_ty, span),
             (None, None) => mk(K::List(Vec::new()), result_ty, span),
             (Some(_), _) => mk(K::Dict(Vec::new()), result_ty, span),
         };

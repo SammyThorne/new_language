@@ -54,7 +54,7 @@ Method lists are indicative; the prototype implements what the demo programs nee
 | `str` | `len`, `+`, `==`, `in`, slicing, iteration, `*` with an `int`; `upper`, `lower`, `strip`, `lstrip`, `rstrip` (with an optional set of characters), `split`, `rsplit` (with an optional limit), `join`, `replace`, `find`, `rfind`, `index`, `count`, `starts_with`, `ends_with`, `partition`, `rpartition`, `split_lines`, `remove_prefix`, `remove_suffix`, `is_digit`, `is_alpha`, `is_alnum`, `is_space`, `is_upper`, `is_lower`, `title`, `capitalize`, `zfill`, `encode`; `int.parse(s)`, `float.parse(s)` return `Result`. The methods beyond the first group are written in the prelude (D92) |
 | `list[T]` | Literal `[a, b]`, indexing, slicing, `len`, `in`, iteration, `+`, `*` with an `int`; `append`, `extend`, `insert`, `pop`, `remove`, `clear`, `sort`, `reverse`, `index`, `copy`, `count`; `del xs[i]`; `reversed(xs)` and `list(x)` make new lists |
 | `dict[K, V]` | Literal `{k: v}`, `d[k]` (panics if missing), `d[k] = v`, `in`, `len`; `get(k) -> V?`, `get_or(k, default)`, `get_or_insert(k, default)`, `pop`, `pop_or(k, default)`, `update`, `copy`, `keys`, `values`, `items`; `del d[k]` (panics if missing) |
-| `set[T]` | Literal `{a, b}`, `add`, `remove`, `in`, `len`, union and intersection |
+| `set[T]` | Literal `{a, b}` and comprehension `{x for x in xs}`, `set()` and `set(xs)`; `in`, `len`, iteration, `sorted`, `sum`, `min`, `max`, `==`; `add`, `discard`, `remove`, `pop`, `clear`, `copy`, `update`; `union`, `intersection`, `difference`, `symmetric_difference`, `is_subset`, `is_superset`, `is_disjoint`, and the operators `\|`, `&`, `-`, `^`. A JSON array (D93) |
 | `T?` | `unwrap`, `unwrap_or`, `is_some`, `is_none`, `map` |
 | `Result[T, E]` | `unwrap`, `unwrap_or`, `is_ok`, `is_err`, `map_err` |
 | `bytes`, `bytearray` | As built (M9, D57): `bytes` is defined in the prelude. `text.encode()` makes one; `len(b)`, `b[i]` (an `int` from 0 to 255), `b.slice(start, end)`, `+`, `==`, hashing, `decode() -> str?`, `hex()`, and printing as `b'...'`. `bytearray` is not implemented |
@@ -477,7 +477,7 @@ Cancellation is not in the prototype. The intended design is a deadline carried 
 |---|---|---|---|
 | `int`, `float`, `bool` arithmetic | ✔ | | |
 | `list` indexing and length | ✔ (inline) | growth, sort | methods (later: everything) |
-| `dict`, `set` | type only | implementation | (later: implementation) |
+| `dict`, `set` | type only (a set is a dict without values) | implementation | `set` methods in the prelude |
 | `str` | literals, length | operations | convenience methods |
 | f-strings | ✔ (desugaring) | number formatting | |
 | `Option`, `Result` | coercions, `?` | | defined as enums, methods |

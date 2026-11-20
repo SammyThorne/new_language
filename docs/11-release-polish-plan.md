@@ -372,6 +372,10 @@ Carried out on 2026-11-20 as D92 in [08](08-decisions-and-risks.md), by the firs
   - a set used as a dict key.
 - **JSON.** A round trip in `tests/run/json_roundtrip.wb`, or a new file.
 
+### Done
+
+Carried out on 2026-11-20 as D93 in [08](08-decisions-and-risks.md), as the plan's second option: a `Dict(T, None)` with `set[T]` as its spelling, not a new `TyKind`. That kept about 60 matches on `TyKind::Dict` working unchanged, with a dozen needing a case. `frozenset` and the subset operators `<` and `<=` are not done; the first was optional, and the second is `is_subset` instead.
+
 ### Exit criteria
 
 - All of the above works.

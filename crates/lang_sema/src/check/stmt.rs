@@ -134,6 +134,19 @@ impl Checker<'_, '_> {
                     span: target.span,
                 }
             }
+            TyKind::Dict(_, Ty::NONE) => {
+                self.error(
+                    Diagnostic::error(
+                        codes::BAD_INDEX,
+                        "`del` cannot remove an element of a set",
+                        target.span,
+                        "a set has no positions",
+                    )
+                    .with_help("use `items.remove(x)`, which panics if it is absent, or `items.discard(x)`"),
+                );
+                self.expr(cx, index, None);
+                return Vec::new();
+            }
             TyKind::Dict(key, _) => {
                 let index = self.expect(cx, index, key, None);
                 hir::Expr {
@@ -167,6 +180,14 @@ impl Checker<'_, '_> {
             }
         };
         vec![hir::Stmt::Expr(op)]
+    }
+
+    /// `items[x] = ...` where `items` is a set.
+    fn set_element_assignment(&mut self, span: Span) {
+        self.error(
+            Diagnostic::error(codes::BAD_INDEX, "cannot assign to an element of a set", span, "a set has no positions")
+                .with_help("add an element with `items.add(x)`"),
+        );
     }
 
     /// `with value as name:`. The value's type needs `def exit(self)`; with `def enter(self)`,
@@ -382,7 +403,9 @@ impl Checker<'_, '_> {
                 && matches!(name.name.as_str(), "keys" | "values" | "items")
             {
                 let receiver = self.expr(cx, object, None);
-                if let TyKind::Dict(key, value) | TyKind::FrozenDict(key, value) = *self.types.kind(receiver.ty) {
+                if let TyKind::Dict(key, value) | TyKind::FrozenDict(key, value) = *self.types.kind(receiver.ty)
+                    && value != Ty::NONE
+                {
                     return match name.name.as_str() {
                         "keys" => (hir::LoopSource::DictKeys(receiver), key),
                         "values" => (hir::LoopSource::DictValues(receiver), value),
@@ -900,6 +923,11 @@ impl Checker<'_, '_> {
                         let index = self.expect(cx, index, Ty::INT, None);
                         Some((hir::Place::Index { container, index, span: target.span }, elem, None))
                     }
+                    TyKind::Dict(_, Ty::NONE) => {
+                        self.set_element_assignment(target.span);
+                        self.expr(cx, index, None);
+                        None
+                    }
                     TyKind::Dict(key, value) => {
                         let index = self.expect(cx, index, key, None);
                         Some((hir::Place::Index { container, index, span: target.span }, value, None))
@@ -1098,6 +1126,12 @@ impl Checker<'_, '_> {
                 let container = self.expr(cx, object, None);
                 let (key_ty, elem_ty) = match self.types.kind(container.ty).clone() {
                     TyKind::List(elem) => (Ty::INT, elem),
+                    TyKind::Dict(_, Ty::NONE) => {
+                        self.set_element_assignment(target.span);
+                        self.expr(cx, index, None);
+                        self.expr(cx, value, None);
+                        return Vec::new();
+                    }
                     TyKind::Dict(key, value) => (key, value),
                     TyKind::Error => {
                         self.expr(cx, value, None);

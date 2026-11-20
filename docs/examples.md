@@ -424,7 +424,34 @@ def main():
 {'a': 1, 'b': 2} {'a': 1, 'b': 20, 'c': 3} 20 0
 ```
 
-Two immutable collections are for sharing data between tasks: `tuple[T, ...]`, a tuple of any length, and `frozendict[K, V]`. Sets are not implemented yet.
+Two immutable collections are for sharing data between tasks: `tuple[T, ...]`, a tuple of any length, and `frozendict[K, V]`. There is no immutable set; share a `set` through a `Mutex`.
+
+A `set[T]` holds each element once, in the order it was added (Python's sets have an order of their own). `{a, b}` and `{x for x in items}` make one; an empty set is `set()`, since `{}` is a dict, and `set(items)` makes one from a list, a string, a dict's keys or a `range`. Elements need to be hashable, like dict keys.
+
+```python
+def main():
+    seen: set[str] = set()
+    for word in ["to", "be", "or", "not", "to", "be"]:
+        seen.add(word)
+    print(sorted(seen), len(seen), "or" in seen)
+
+    evens = {n for n in range(10) if n % 2 == 0}
+    small = {1, 2, 3}
+    print(sorted(evens & small), sorted(evens | small), sorted(small - evens), sorted(evens ^ small))
+    print(small.is_subset({1, 2, 3, 4}), small.is_disjoint({7}), small == {3, 2, 1})
+    print(small.discard(2), small.discard(2), sorted(small), small.pop())
+    print({5}, set("aab") == {"a", "b"}, sorted(set([3, 1, 3])))
+```
+
+```text
+['be', 'not', 'or', 'to'] 4 True
+[2] [0, 1, 2, 3, 4, 6, 8] [1, 3] [0, 1, 3, 4, 6, 8]
+True True True
+True False [1, 3] 1
+{5} True [1, 3]
+```
+
+A set supports `in`, `len`, `for`, `sorted`, `sum`, `min`, `max` and `==`, and its methods are `add`, `discard` (which says whether the element was there), `remove` (panics if it is not), `pop`, `clear`, `copy`, `update`, `union`, `intersection`, `difference`, `symmetric_difference`, `is_subset`, `is_superset` and `is_disjoint`. The operators `|`, `&`, `-` and `^` give the union, intersection, difference and symmetric difference. The methods take sets, not any iterable as Python's do: write `a.union(set(items))`. Sets cannot be indexed, compared with `<`, used as dict keys or elements of other sets, and a set field in a struct with `@derive(Json)` is a JSON array.
 
 ## 7. Structs and methods
 
@@ -1512,7 +1539,7 @@ Programs include debug line information, so `gdb` and `perf` show function names
 | `@dataclass(frozen=True)` | `@frozen` |
 | `threading` / `asyncio` | `spawn`, `Channel`, `Mutex`, `Atomic`; no `async` or `await`, and no global interpreter lock |
 | Code at the top level of a file | Declarations only; the program starts in `main` |
-| `set` | Not implemented yet; use a `dict[K, bool]` |
+| `set` | `set[T]`; `{1, 2}`, `set()` for an empty one, and `discard` says whether the element was there |
 
 ## Where to go next
 

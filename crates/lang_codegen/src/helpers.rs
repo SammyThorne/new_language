@@ -523,6 +523,20 @@ impl<'ctx> Codegen<'ctx, '_> {
             }
             TyKind::Dict(key_ty, value_ty) => {
                 let dict = value.into_pointer_value();
+                // A set is a dict without values, and an empty one is written `set()`, since
+                // `{}` is a dict.
+                let is_set = value_ty == Ty::NONE;
+                let set_done = is_set.then(|| self.block("set.done"));
+                if let Some(set_done) = set_done {
+                    let len = self.dict_len(dict);
+                    let empty = self.b.build_int_compare(IntPredicate::EQ, len, self.i64(0), "").must();
+                    let (word, items) = (self.block("set.empty"), self.block("set.items"));
+                    self.b.build_conditional_branch(empty, word, items).must();
+                    self.b.position_at_end(word);
+                    self.push_text(builder, "set()");
+                    self.b.build_unconditional_branch(set_done).must();
+                    self.b.position_at_end(items);
+                }
                 self.push_text(builder, "{");
                 let cursor = self.alloca(self.cx.i64_type().into(), "cursor");
                 self.b.build_store(cursor, self.i64(0)).must();
@@ -550,12 +564,18 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.position_at_end(element);
                 let key = self.entry_key(entry, key_ty);
                 self.push_value(builder, key_ty, Some(key), true);
-                self.push_text(builder, ": ");
-                let item = self.entry_value(entry, key_ty, value_ty);
-                self.push_value(builder, value_ty, Some(item), true);
+                if !is_set {
+                    self.push_text(builder, ": ");
+                    let item = self.entry_value(entry, key_ty, value_ty);
+                    self.push_value(builder, value_ty, Some(item), true);
+                }
                 self.b.build_unconditional_branch(header).must();
                 self.b.position_at_end(exit);
                 self.push_text(builder, "}");
+                if let Some(set_done) = set_done {
+                    self.b.build_unconditional_branch(set_done).must();
+                    self.b.position_at_end(set_done);
+                }
             }
             TyKind::Struct(id) => {
                 // Like a Python dataclass: `Point(x=1, y=2)`.

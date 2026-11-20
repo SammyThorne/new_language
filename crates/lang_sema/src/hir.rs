@@ -550,6 +550,10 @@ pub enum Builtin {
     DictPop,
     /// `del d[key]`: removes the entry, and panics if the key is absent.
     DictDelete,
+    /// `set.add(x)`: inserts the element, if it is not already there.
+    SetAdd,
+    /// `set.discard(x)`: removes the element and says whether it was there.
+    SetDiscard,
     DictKeys,
     DictValues,
     DictItems,

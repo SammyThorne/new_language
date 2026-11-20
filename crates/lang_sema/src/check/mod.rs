@@ -61,6 +61,7 @@ const BUILTIN_FUNCTIONS: &[&str] = &[
     "any",
     "all",
     "list",
+    "set",
     "input",
     "i8",
     "i16",
@@ -98,7 +99,7 @@ const BUILTIN_TYPES: &[&str] = &[
 ];
 
 /// Type names that exist in the language design but are not implemented yet.
-const PLANNED_TYPES: &[&str] = &["set", "bytearray", "frozenset", "range"];
+const PLANNED_TYPES: &[&str] = &["bytearray", "frozenset", "range"];
 
 const KNOWN_TYPES: &[&str] = &[
     "int",
@@ -107,6 +108,7 @@ const KNOWN_TYPES: &[&str] = &[
     "float",
     "list",
     "dict",
+    "set",
     "tuple",
     "None",
     "Result",
@@ -995,6 +997,11 @@ impl<'a, 'm> Checker<'a, 'm> {
                 self.pending_hashable.push((key, args[0].span));
                 self.types.dict(key, value)
             }
+            "set" if arity(1) => {
+                let elem = self.resolve_value_type(&args[0]);
+                self.pending_hashable.push((elem, args[0].span));
+                self.types.set(elem)
+            }
             "tuple" if !args.is_empty() => {
                 let items = args.iter().map(|a| self.resolve_value_type(a)).collect();
                 self.types.tuple(items)
@@ -1009,9 +1016,10 @@ impl<'a, 'm> Checker<'a, 'm> {
                 };
                 self.types.result(ok, err)
             }
-            "list" | "dict" | "tuple" | "Result" => {
+            "list" | "dict" | "set" | "tuple" | "Result" => {
                 let expected = match name {
                     "list" => "`list[T]`, with one element type",
+                    "set" => "`set[T]`, with one element type",
                     "dict" => "`dict[K, V]`, with a key type and a value type",
                     "Result" => "`Result[T]` or `Result[T, E]`",
                     _ => "`tuple[A, B, ...]`, with at least one element type",

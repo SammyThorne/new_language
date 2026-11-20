@@ -6,6 +6,7 @@
 //! conversions the language has: `T` to `T?`, `None` to any optional type, `T` to `Result[T, E]`
 //! (as `Ok`), and a struct or enum to a trait it implements.
 
+use super::closures::CompKind;
 use super::{BUILTIN_CONSTRUCTORS, BUILTIN_FUNCTIONS, Checker, FnCx, Global, Reason, error_expr};
 use crate::hir::{self, BinaryOp as B, ExprKind as K};
 use crate::types::{EnumId, TraitId, Ty, TyKind};
@@ -20,7 +21,7 @@ fn planned_function_help(name: &str) -> Option<&'static str> {
         "open" => "open a file with `io.open(path)` after `import io`; it gives a `Result`",
         "map" => "use a list comprehension: `[f(x) for x in items]`",
         "filter" => "use a list comprehension with a condition: `[x for x in items if keep(x)]`",
-        "set" => "`set` is not available yet",
+        "frozenset" => "there is no immutable set yet; share a `set` through `Mutex(...)`",
         _ => return None,
     })
 }
@@ -230,14 +231,18 @@ impl Checker<'_, '_> {
             ast::ExprKind::Binary { op, lhs, rhs } => self.binary(cx, *op, lhs, rhs, span),
             ast::ExprKind::IfElse { cond, then, otherwise } => self.if_else(cx, cond, then, otherwise, span, expected),
             ast::ExprKind::Match { subject, cases } => self.match_expr(cx, subject, cases, span, expected),
+            ast::ExprKind::Set(items) => self.set_literal(cx, items, span, expected),
+            ast::ExprKind::SetComp { element, clauses } => {
+                self.comprehension(cx, element, CompKind::Set, clauses, span, expected)
+            }
             ast::ExprKind::Try(inner) => self.try_expr(cx, inner, span),
             ast::ExprKind::Lambda { params, body } => self.lambda(cx, params, body, expected, span),
             ast::ExprKind::Spawn(call) => self.spawn_expr(cx, call, span),
             ast::ExprKind::ListComp { element, clauses } => {
-                self.comprehension(cx, element, None, clauses, span, expected)
+                self.comprehension(cx, element, CompKind::List, clauses, span, expected)
             }
             ast::ExprKind::DictComp { key, value, clauses } => {
-                self.comprehension(cx, key, Some(value), clauses, span, expected)
+                self.comprehension(cx, key, CompKind::Dict(value), clauses, span, expected)
             }
         }
     }
@@ -543,6 +548,9 @@ impl Checker<'_, '_> {
                 }
                 if super::concurrency::SYNC_TYPES.contains(&name.as_str()) && name != "Task" {
                     return self.sync_constructor(cx, name, None, args, span, expected);
+                }
+                if name == "set" {
+                    return self.set_call(cx, args, span, expected);
                 }
                 if BUILTIN_FUNCTIONS.contains(&name.as_str()) {
                     return self.builtin_function(cx, name, args, span);
@@ -1646,6 +1654,14 @@ impl Checker<'_, '_> {
                 let index = self.expect(cx, index, Ty::INT, None);
                 mk(K::Index { container: Box::new(container), index: Box::new(index) }, elem, span)
             }
+            TyKind::Dict(_, Ty::NONE) => {
+                self.error(
+                    Diagnostic::error(codes::BAD_INDEX, "a set cannot be indexed", span, "a set has no positions")
+                        .with_help("test membership with `x in items`, or loop over the set"),
+                );
+                self.expr(cx, index, None);
+                error_expr(span)
+            }
             TyKind::Dict(key, value) | TyKind::FrozenDict(key, value) => {
                 let index = self.expect(cx, index, key, None);
                 mk(K::Index { container: Box::new(container), index: Box::new(index) }, value, span)
@@ -1806,6 +1822,57 @@ impl Checker<'_, '_> {
         mk(K::List(values), ty, span)
     }
 
+    /// `{a, b, c}`: a block that makes an empty set and adds each element in order.
+    fn set_literal(&mut self, cx: &mut FnCx, items: &[ast::Expr], span: Span, expected: Option<Ty>) -> hir::Expr {
+        let expected_elem = expected.and_then(|t| self.types.set_elem(t));
+        let (elem, first) = match expected_elem {
+            Some(elem) => (elem, None),
+            None => {
+                let first = self.expr(cx, &items[0], None);
+                if first.ty == Ty::NONE {
+                    self.error(
+                        Diagnostic::error(
+                            codes::CANNOT_INFER,
+                            "cannot infer the element type of this set",
+                            span,
+                            "starts with `None`",
+                        )
+                        .with_help("add a type hint, for example `items: set[int?] = {None, 1}`"),
+                    );
+                    return error_expr(span);
+                }
+                (first.ty, Some(first))
+            }
+        };
+        let reason =
+            first.as_ref().map(|f| (f.span, format!("the elements are `{}` because of this one", self.display(elem))));
+        let mut values: Vec<hir::Expr> = first.into_iter().collect();
+        for item in &items[values.len()..] {
+            values.push(self.expect(cx, item, elem, reason.clone()));
+        }
+        if elem == Ty::ERROR {
+            return error_expr(span);
+        }
+        if !self.hashable(elem) {
+            self.unhashable(elem, items[0].span);
+            return error_expr(span);
+        }
+        let ty = self.types.set(elem);
+        let temp = cx.temp(ty, span);
+        let load = mk(K::Local(temp), ty, span);
+        let mut stmts =
+            vec![hir::Stmt::Assign { place: hir::Place::Local(temp), value: mk(K::Dict(Vec::new()), ty, span) }];
+        for value in values {
+            let vspan = value.span;
+            stmts.push(hir::Stmt::Expr(mk(
+                K::Builtin { op: hir::Builtin::SetAdd, args: vec![load.clone(), value] },
+                Ty::NONE,
+                vspan,
+            )));
+        }
+        mk(K::Block { stmts, value: Box::new(load) }, ty, span)
+    }
+
     fn dict_literal(
         &mut self,
         cx: &mut FnCx,
@@ -1814,6 +1881,18 @@ impl Checker<'_, '_> {
         expected: Option<Ty>,
     ) -> hir::Expr {
         if pairs.is_empty() && expected.is_some_and(|t| self.types.contains_error(t)) {
+            return error_expr(span);
+        }
+        if expected.is_some_and(|t| self.types.set_elem(t).is_some()) {
+            self.error(
+                Diagnostic::error(
+                    codes::TYPE_MISMATCH,
+                    "`{...}` with `key: value` pairs, and `{}`, are dicts, not sets",
+                    span,
+                    "a dict",
+                )
+                .with_help("an empty set is `set()`, and a set with elements is `{a, b}`"),
+            );
             return error_expr(span);
         }
         let expected_types = expected.and_then(|t| match self.types.kind(t) {
@@ -2158,6 +2237,9 @@ impl Checker<'_, '_> {
                         "add `@derive(Eq)` to `{shown}` to compare values; use `is` to check whether two values are the same object"
                     ),
                     TyKind::Enum(_) => format!("add `@derive(Eq)` to `{shown}`, or use `match`"),
+                    TyKind::Dict(_, Ty::NONE) if ordering => {
+                        "sets are compared with `a.is_subset(b)` and `a.is_superset(b)`".to_string()
+                    }
                     _ if ordering => "`<` and friends work on numbers, strings and booleans".to_string(),
                     _ => "values of this type cannot be compared with `==`".to_string(),
                 };
@@ -2251,6 +2333,25 @@ impl Checker<'_, '_> {
             );
             return error_expr(span);
         }
+        // `a | b`, `a & b`, `a - b` and `a ^ b` on two sets of one type: the prelude's `__set_union`,
+        // `__set_intersection`, `__set_difference` and `__set_symmetric_difference`.
+        if let Some(name) = match op {
+            A::BitOr => Some("__set_union"),
+            A::BitAnd => Some("__set_intersection"),
+            A::Sub => Some("__set_difference"),
+            A::BitXor => Some("__set_symmetric_difference"),
+            _ => None,
+        } && l.ty == r.ty
+            && let Some(elem) = self.types.set_elem(l.ty)
+            && let Some(&(Global::GenericFunction(index), _)) = self.globals.get(name)
+        {
+            if !self.hashable(elem) {
+                return self.bad_operands(op, &l, &r, span);
+            }
+            let ty = l.ty;
+            let func = self.instantiate_fn(index, vec![elem], span);
+            return mk(K::Call { func, args: vec![l, r] }, ty, span);
+        }
         // `items * n` and `n * items` repeat a list: the prelude's `__list_repeat`.
         if op == A::Mul
             && let Some(&(Global::GenericFunction(index), _)) = self.globals.get("__list_repeat")
@@ -2300,6 +2401,9 @@ impl Checker<'_, '_> {
         let (ls, rs) = (self.display(l.ty), self.display(r.ty));
         let symbol = op.symbol();
         let help = match (self.types.kind(l.ty), self.types.kind(r.ty)) {
+            (TyKind::Dict(_, Ty::NONE), TyKind::Dict(_, Ty::NONE)) if matches!(op, ast::BinaryOp::Add) => {
+                "combine sets with `a | b`, which keeps each element once".to_string()
+            }
             (TyKind::Int, TyKind::Float) | (TyKind::Float, TyKind::Int) => {
                 "numbers are not converted implicitly; convert one side with `float(...)` or `int(...)`".to_string()
             }

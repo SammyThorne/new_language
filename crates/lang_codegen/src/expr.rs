@@ -874,7 +874,12 @@ impl<'ctx> Codegen<'ctx, '_> {
             }
             TyKind::Dict(_, value_ty) => {
                 let value_ty = *value_ty;
-                let eq = self.helper(Helper::EqPtr, value_ty).as_global_value().as_pointer_value();
+                // A set has no values to compare.
+                let eq = if value_ty == Ty::NONE {
+                    self.runtime("lrt_unit_eq_ptr").as_global_value().as_pointer_value()
+                } else {
+                    self.helper(Helper::EqPtr, value_ty).as_global_value().as_pointer_value()
+                };
                 let result = self.call_rt("lrt_dict_eq", &[a, b, eq.into()]).unwrap().into_int_value();
                 self.b.build_int_compare(IntPredicate::NE, result, self.i64(0), "").must()
             }

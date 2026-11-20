@@ -72,10 +72,10 @@ Weby includes Python's built-in types under Python's names, written the way Pyth
 | `list[T]` | `list[T]` | Growable array. Every element has the same type `T` | M2 |
 | `dict[K, V]` | `dict[K, V]` | Hash map, insertion ordered as in Python | M2 |
 | `tuple[A, B]` | `tuple[A, B]` | Fixed size, immutable, written `(a, b)`. The variable-length form `tuple[int, ...]` is not supported; use a list | M2 |
-| `set[T]` | `set[T]` | Hash set | M2 |
+| `set[T]` | `set[T]` | Hash set, insertion ordered like `dict` (D93). `{a, b}`, `{x for x in xs}`, `set()` and `set(xs)` make one; `{}` is a dict | M2 |
 | `bytes` | `bytes` | Immutable byte string | M2 |
 | `bytearray` | `bytearray` | Growable byte buffer | M5 |
-| `frozenset[T]` | deferred | Post-prototype | |
+| `frozenset[T]` | deferred | A set cannot be shared between tasks; wrap it in a `Mutex`. An immutable set can follow `frozendict` after the first release | |
 | `complex` | deferred | No use in web backends; can be added later as a library struct | |
 | `memoryview` | not planned | Slices of `bytes` already share the underlying data | |
 | `object`, `type`, `Any` | not available | Every value has exactly one static type | |

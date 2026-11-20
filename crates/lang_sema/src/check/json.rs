@@ -52,6 +52,8 @@ impl Checker<'_, '_> {
             TyKind::Error | TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Str | TyKind::None => true,
             TyKind::Sized(_) => true,
             TyKind::Option(t) | TyKind::List(t) | TyKind::FrozenList(t) => self.json_capable_for(*t, trait_id),
+            // A set is an array of its elements.
+            TyKind::Dict(k, Ty::NONE) => self.json_capable_for(*k, trait_id),
             TyKind::Dict(k, v) | TyKind::FrozenDict(k, v) => *k == Ty::STR && self.json_capable_for(*v, trait_id),
             TyKind::Tuple(items) => items.iter().all(|t| self.json_capable_for(*t, trait_id)),
             TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Param(_) | TyKind::Dyn(_) | TyKind::SelfType(_) => {

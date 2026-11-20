@@ -885,6 +885,26 @@ Milestone 2 of the [release polish plan](11-release-polish-plan.md). A method of
 
 **Not done.** Prelude methods for `Option`, `Result`, `int` and `float`: the machinery handles them (the prefixes exist) and nothing needed one.
 
+### D93. Sets: a dict without values (release polish plan, milestone 3)
+
+Milestone 3 of the [release polish plan](11-release-polish-plan.md). `set[T]` is the type `dict[T, None]` inside the compiler, written `set[T]` in programs and in messages (`Types::set`, `Types::set_elem`). The dict's descriptor gives its value size as 0, so an entry is a tag and the element, and everything that works on a dict's keys works on a set unchanged: `in`, `len`, `for`, equality, copying, the collector's descriptor, `sorted`, `sum`, `min` and `max`. Writing `dict[K, None]` in a program is still an error ("`None` cannot be used as a type here"), so a dict with `None` values exists only as a set.
+
+**What was done.**
+- **Syntax.** `{a, b}` and `{x for x in xs if c}` (parser: `ExprKind::Set` and `SetComp`), `set()` with the type from the context, `set(x)` of a list, string, dict's keys, set or `range(...)` (it builds the list the way `list(x)` does and calls the prelude's `__set_of`). `{}` stays an empty dict, and `x: set[int] = {}` says to write `set()`.
+- **Operations.** The compiler has two new operations, `SetAdd` (a slot made for the element, nothing stored) and `SetDiscard` (removes and says whether it was there), and `clear` is the dict's. The rest is in the prelude, written in the language: `remove`, `pop`, `copy`, `update`, `union`, `intersection`, `difference`, `symmetric_difference`, `is_subset`, `is_superset`, `is_disjoint`. The operators `|`, `&`, `-` and `^` on two sets of one type call the same functions. A set literal and a comprehension are blocks that make an empty set and `add` to it.
+- **Printing** is `{1, 2}` and `set()` when empty, and inside containers elements print as in a list. **Equality** compares the elements (the value comparison is a function that always says equal). **JSON** writes a set as an array and reads an array into a set, adding repeated elements once; a `set[T]` field with `@derive(Json)` needs `T` to be JSON-capable.
+- **What a set cannot do** is checked where the dict code would have allowed it: indexing, assigning to an element, `del`, `keys`, `values`, `items`, `get`, `pop(key)`, `frozendict(s)`, a `<` or `<=` (the message says `is_subset`), `+` (the message says `|`), use as a key or as an element of another set (not hashable), sending to a task (not shareable; `Mutex(set)` works).
+- **Fixed on the way:** `{k: None for ...}` made a dict the code generator could not handle and crashed the compiler; it is now an error that says what to write.
+
+**Differences from the plan and from Python.**
+- **Iteration order is insertion order**, as for dicts; Python's sets have an order of their own. Programs should not depend on either.
+- **`discard` returns a `bool`**, whether the element was there.
+- **The methods take sets**, not any iterable: `a.union(set(items))`. `update` likewise.
+- **`pop` removes the element added first** and gives `T?`, `None` for an empty set.
+- **`<`, `<=`, `>` and `>=` are not subset tests**; use `is_subset` and `is_superset`. The in-place operators `|=` and the like are not there.
+- **`frozenset` is not done.** The plan made it optional; an immutable set would follow `frozendict`'s cases (about 27 sites) and nothing needed it. A set is shared through a `Mutex`.
+- **A dict entry of a set takes 8 bytes for its tag**, not counting the element: no space for a value, as the plan hoped.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

@@ -325,6 +325,18 @@ impl<'ctx> Codegen<'ctx, '_> {
                 self.b.position_at_end(exit);
                 list.into()
             }
+            Builtin::SetAdd => {
+                // A slot made for the element is all there is to a set: it has no values.
+                let (key_ty, _) = dict_types.unwrap();
+                self.dict_entry(values[0], values[1], key_ty, true);
+                return None;
+            }
+            Builtin::SetDiscard => {
+                let key = self.spill(values[1]);
+                let none = self.ptr_type().const_null();
+                let removed = self.call_rt("lrt_dict_remove", &[values[0], key.into(), none.into()]).unwrap();
+                int_to_bool(self, removed)
+            }
             Builtin::DictClear => {
                 self.call_rt("lrt_dict_clear", &[values[0]]);
                 return None;

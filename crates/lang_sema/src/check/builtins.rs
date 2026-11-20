@@ -2,6 +2,7 @@
 //! `dict`, optionals). Each is described by its parameter types and result type, then checked
 //! like any other call.
 
+use super::closures::CompKind;
 use super::generics::Extra;
 use super::{Checker, FnCx, Global, error_expr, plural};
 use crate::hir::{self, Builtin as Op};
@@ -27,6 +28,7 @@ const STR_METHODS: &[&str] = &[
 const LIST_METHODS: &[&str] =
     &["append", "extend", "insert", "pop", "remove", "clear", "sort", "reverse", "index", "copy"];
 const DICT_METHODS: &[&str] = &["get", "get_or", "pop", "keys", "values", "items", "clear"];
+const SET_METHODS: &[&str] = &["add", "discard", "clear"];
 const OPTION_METHODS: &[&str] = &["unwrap", "unwrap_or", "is_some", "is_none"];
 
 /// The prefix of the prelude functions that are methods of a built-in type: `__str_count` is
@@ -35,6 +37,7 @@ fn prelude_prefix(kind: &TyKind) -> Option<&'static str> {
     Some(match kind {
         TyKind::Str => "str",
         TyKind::List(_) => "list",
+        TyKind::Dict(_, value) if *value == Ty::NONE => "set",
         TyKind::Dict(..) => "dict",
         TyKind::FrozenList(_) | TyKind::Tuple(_) => "tuple",
         TyKind::FrozenDict(..) => "frozendict",
@@ -61,6 +64,10 @@ const PYTHON_METHOD_NAMES: &[(&str, &str)] = &[
     ("removeprefix", "remove_prefix"),
     ("removesuffix", "remove_suffix"),
     ("setdefault", "get_or_insert"),
+    ("append", "add"),
+    ("issubset", "is_subset"),
+    ("issuperset", "is_superset"),
+    ("isdisjoint", "is_disjoint"),
 ];
 const RESULT_METHODS: &[&str] = &["unwrap", "unwrap_or", "unwrap_err", "is_ok", "is_err"];
 
@@ -79,10 +86,65 @@ impl Checker<'_, '_> {
         true
     }
 
+    /// A set where a list of elements is wanted (`sorted(items)`, `sum(items)`): the same
+    /// elements as a new list, in the order they were added.
+    fn set_as_list(&mut self, value: hir::Expr) -> hir::Expr {
+        let Some(elem) = self.types.set_elem(value.ty) else { return value };
+        let ty = self.types.list(elem);
+        let span = value.span;
+        hir::Expr { kind: hir::ExprKind::Builtin { op: Op::DictKeys, args: vec![value] }, ty, span }
+    }
+
     /// `list(x)`: a new list of the elements of a list, the characters of a string, the keys of a
     /// dict or the numbers of a `range(...)`.
     fn list_call(&mut self, cx: &mut FnCx, args: &[ast::Arg], span: Span) -> hir::Expr {
-        if !self.no_keywords(args, "`list`") || !self.arity("list", args, 1, span) {
+        self.elements_as_list(cx, "list", args, span)
+    }
+
+    /// `set()` makes an empty set of the type the context expects; `set(x)` the set of the
+    /// elements of a list, a string, a dict's keys, a `range(...)` or another set.
+    pub(super) fn set_call(&mut self, cx: &mut FnCx, args: &[ast::Arg], span: Span, expected: Option<Ty>) -> hir::Expr {
+        if args.is_empty() {
+            return match expected.and_then(|t| self.types.set_elem(t).map(|_| t)) {
+                Some(ty) => hir::Expr { kind: hir::ExprKind::Dict(Vec::new()), ty, span },
+                None if expected.is_some_and(|t| self.types.contains_error(t)) => error_expr(span),
+                None => {
+                    self.error(
+                        Diagnostic::error(
+                            codes::CANNOT_INFER,
+                            "cannot infer the type of an empty set",
+                            span,
+                            "element type unknown",
+                        )
+                        .with_help("add a type hint, for example `items: set[int] = set()`"),
+                    );
+                    error_expr(span)
+                }
+            };
+        }
+        let list = self.elements_as_list(cx, "set", args, span);
+        let Some(elem) = self.types.list_elem(list.ty) else { return error_expr(span) };
+        if elem == Ty::ERROR {
+            return error_expr(span);
+        }
+        if !self.hashable(elem) {
+            self.unhashable(elem, args[0].value.span);
+            return error_expr(span);
+        }
+        match self.globals.get("__set_of") {
+            Some(&(Global::GenericFunction(index), _)) => {
+                let func = self.instantiate_fn(index, vec![elem], span);
+                let ty = self.types.set(elem);
+                hir::Expr { kind: hir::ExprKind::Call { func, args: vec![list] }, ty, span }
+            }
+            _ => error_expr(span),
+        }
+    }
+
+    /// The elements of a list, a string, a dict, a set or a `range(...)` as a new list: what
+    /// `list(x)` is, and what `set(x)` starts from. `what` names the caller in messages.
+    fn elements_as_list(&mut self, cx: &mut FnCx, what: &str, args: &[ast::Arg], span: Span) -> hir::Expr {
+        if !self.no_keywords(args, &format!("`{what}`")) || !self.arity(what, args, 1, span) {
             self.check_all_quietly(cx, args);
             return error_expr(span);
         }
@@ -94,7 +156,7 @@ impl Checker<'_, '_> {
             let element = ast::Expr { kind: ast::ExprKind::Name(name.name.clone()), span };
             let target = ast::Target { kind: ast::TargetKind::Name(name), span };
             let clause = ast::CompClause { target, iter: arg.clone(), conditions: Vec::new() };
-            return self.comprehension(cx, &element, None, &[clause], span, None);
+            return self.comprehension(cx, &element, CompKind::List, &[clause], span, None);
         }
         let value = self.expr(cx, arg, None);
         let builtin = |op: Op, value: hir::Expr, ty: Ty| hir::Expr {
@@ -124,11 +186,13 @@ impl Checker<'_, '_> {
                 self.error(
                     Diagnostic::error(
                         codes::NOT_ITERABLE,
-                        format!("cannot make a list from a `{shown}`"),
+                        format!("cannot make a {what} from a `{shown}`"),
                         arg.span,
                         format!("has type `{shown}`"),
                     )
-                    .with_help("`list(...)` takes a list, a string, a dict (its keys) or `range(...)`"),
+                    .with_help(format!(
+                        "`{what}(...)` takes a list, a string, a set, a dict (its keys) or `range(...)`"
+                    )),
                 );
                 error_expr(span)
             }
@@ -417,6 +481,7 @@ impl Checker<'_, '_> {
                 }
                 let hint = matches!(name, "any" | "all").then(|| self.types.list(Ty::BOOL));
                 let list = self.expr(cx, &args[0].value, hint);
+                let list = self.set_as_list(list);
                 if list.ty == Ty::ERROR {
                     return error_expr(span);
                 }
@@ -489,6 +554,7 @@ impl Checker<'_, '_> {
             return error_expr(span);
         };
         let list = self.expr(cx, &list_arg.value, None);
+        let list = self.set_as_list(list);
         if list.ty == Ty::ERROR {
             self.check_all_quietly(cx, args);
             return error_expr(span);
@@ -721,6 +787,7 @@ impl Checker<'_, '_> {
         let methods = match self.types.kind(ty) {
             TyKind::Str => STR_METHODS,
             TyKind::List(_) => LIST_METHODS,
+            TyKind::Dict(_, Ty::NONE) => SET_METHODS,
             TyKind::Dict(..) => DICT_METHODS,
             TyKind::Option(_) => OPTION_METHODS,
             TyKind::Result(..) => RESULT_METHODS,
@@ -834,6 +901,15 @@ impl Checker<'_, '_> {
                     _ => None,
                 }
             }
+            (TyKind::Dict(elem, Ty::NONE), method) => {
+                let elem = *elem;
+                match method {
+                    "add" => Some((Op::SetAdd, vec![elem], Ty::NONE)),
+                    "discard" => Some((Op::SetDiscard, vec![elem], Ty::BOOL)),
+                    "clear" => Some((Op::DictClear, vec![], Ty::NONE)),
+                    _ => None,
+                }
+            }
             (TyKind::Dict(key, value), method) => {
                 let (key, value) = (*key, *value);
                 match method {
@@ -900,7 +976,7 @@ impl Checker<'_, '_> {
         let mut all = vec![receiver];
         for (arg, param) in args.iter().zip(params) {
             let value = self.expect(cx, &arg.value, param, None);
-            if matches!(op, Op::ListAppend | Op::ListInsert | Op::ListExtend) {
+            if matches!(op, Op::ListAppend | Op::ListInsert | Op::ListExtend | Op::SetAdd) {
                 self.check_escape(cx, &value, "stored in a collection");
             }
             all.push(value);
@@ -924,6 +1000,7 @@ impl Checker<'_, '_> {
         let methods = match kind {
             TyKind::Str => STR_METHODS,
             TyKind::List(_) => LIST_METHODS,
+            TyKind::Dict(_, Ty::NONE) => SET_METHODS,
             TyKind::Dict(..) => DICT_METHODS,
             TyKind::Result(..) => RESULT_METHODS,
             TyKind::Option(_) => OPTION_METHODS,

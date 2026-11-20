@@ -349,6 +349,8 @@ pub enum ExprKind {
     },
     List(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
+    /// `{a, b}`. (`{}` is an empty dict; an empty set is `set()`.)
+    Set(Vec<Expr>),
     Tuple(Vec<Expr>),
     Unary {
         op: UnaryOp,
@@ -386,6 +388,11 @@ pub enum ExprKind {
         clauses: Vec<CompClause>,
     },
     /// `{key: value for target in iter if condition}`
+    /// `{element for ... in ... if ...}`
+    SetComp {
+        element: Box<Expr>,
+        clauses: Vec<CompClause>,
+    },
     DictComp {
         key: Box<Expr>,
         value: Box<Expr>,
