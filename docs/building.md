@@ -14,7 +14,37 @@ Linux on x86-64 only. Two parts of the implementation are specific to it:
 - the runtime switches between tasks with a few lines of x86-64 assembly and waits for sockets with `epoll`;
 - the code generator is built with LLVM's x86 target only.
 
-macOS, Windows and ARM are not supported yet.
+macOS, Windows and ARM are not supported natively yet. On Windows and macOS the installers below run the compiler in a Linux environment (WSL 2 and a Lima VM), so you can use it there; the programs it builds are Linux programs.
+
+## Installing with a script
+
+Each script assumes nothing is installed: they add LLVM 19, the Boehm collector, a C toolchain and Rust, build the compiler and runtime from this checkout, and install the `weby` command. Each asks before it changes anything (`--yes` skips the question).
+
+**Debian, Ubuntu and other apt-based Linux (x86-64).** Installs the packages with `apt` (adding [apt.llvm.org](https://apt.llvm.org) if the release has no `llvm-19-dev`) and Rust with rustup, then runs `make install`:
+
+```bash
+scripts/install.sh
+```
+
+`--prefix DIR` chooses where `weby` goes (default `~/.local`), `--dry-run` prints what would be done, and `--no-system-packages` skips `apt` and `sudo` for a machine where the packages are already there.
+
+**Windows 10 (2004 or later) and 11.** In an administrator PowerShell, which is needed once to install WSL 2 and may ask for a restart (restart, then run the script again):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+```
+
+It installs Ubuntu 24.04 in WSL 2 if it is missing, runs the Linux installer in it, and adds `weby.cmd` to your PATH. `weby.cmd` runs the compiler in WSL in the folder you are in; programs it builds are Linux executables, so use `weby run app.wb`.
+
+**macOS.** Needs Homebrew (the script offers to install it):
+
+```bash
+scripts/install-macos.sh
+```
+
+It installs [Lima](https://lima-vm.io), creates an Ubuntu 24.04 x86-64 VM named `weby`, runs the Linux installer in it, and adds a `weby` command to `~/.local/bin` that runs the compiler in the VM in the folder you are in. Your home folder is shared with the VM. On Apple Silicon the VM emulates x86-64, so installing takes a long time and programs run several times slower than natively; on an Intel Mac it runs at full speed.
+
+Only `scripts/install.sh` is run by continuous integration (as a dry run). The Windows and macOS scripts have not been run on those systems yet; if one fails, the steps it prints are the manual ones in this page.
 
 ## Required packages
 

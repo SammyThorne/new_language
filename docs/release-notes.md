@@ -38,7 +38,7 @@ The [release polish plan](11-release-polish-plan.md) closed the gaps a Python pr
 
 These are choices made for this release, each with its reason in the decision log. None changes a program that compiles.
 
-**Platform.** Linux on x86-64 only (D13). The context switch is assembly for that CPU, the poller is `epoll`, and the compiler is built with LLVM's x86 target.
+**Platform.** Linux on x86-64 only (D13). The context switch is assembly for that CPU, the poller is `epoll`, and the compiler is built with LLVM's x86 target. Windows and macOS run it in WSL 2 and a Lima VM through the install scripts; programs built there are Linux programs.
 
 **Language.**
 - No generic traits: iteration, `with` and the like are method protocols (`next`, `iter`, `enter`, `exit`; D34, D38). Traits cannot have associated types.
@@ -63,7 +63,9 @@ These are choices made for this release, each with its reason in the decision lo
 
 ## Installing
 
-You need Linux on x86-64, LLVM 19, the Boehm collector (`libgc`), a C compiler to link with, and a Rust toolchain to build the compiler. [building.md](building.md) lists the packages and the steps:
+On Debian or Ubuntu, `scripts/install.sh` installs everything the build needs and then the compiler; `scripts/install.ps1` (Windows, through WSL 2) and `scripts/install-macos.sh` (macOS, through a Lima VM) run it in a Linux environment. They are described in [building.md](building.md#installing-with-a-script). 
+
+By hand, you need Linux on x86-64, LLVM 19, the Boehm collector (`libgc`), a C compiler to link with, and a Rust toolchain to build the compiler. [building.md](building.md) lists the packages and the steps:
 
 ```bash
 make

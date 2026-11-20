@@ -56,3 +56,8 @@ jobs:
 
       - name: Stress the concurrency programs
         run: make stress RUNS=100
+
+      - name: Installer scripts
+        run: |
+          scripts/install.sh --dry-run
+          sh -n scripts/install.sh scripts/install-macos.sh
