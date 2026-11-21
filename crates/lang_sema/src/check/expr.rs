@@ -1454,6 +1454,7 @@ impl Checker<'_, '_> {
             self.check_all_quietly(cx, args);
             return error_expr(span);
         }
+        self.ensure_field_defaults(id);
         let info = &self.structs[id.0];
         let (struct_name, struct_span, struct_ty, fields) =
             (info.name.clone(), info.span, info.ty, info.fields.clone());
@@ -2463,7 +2464,39 @@ impl Checker<'_, '_> {
     fn bad_operands(&mut self, op: ast::BinaryOp, l: &hir::Expr, r: &hir::Expr, span: Span) -> hir::Expr {
         let (ls, rs) = (self.display(l.ty), self.display(r.ty));
         let symbol = op.symbol();
+        // Methods of the left side's type that take the right side, such as
+        // `DateTime.add(Duration)` for `+` or `DateTime.since(DateTime)` for `-`.
+        let mut methods: Vec<String> = Vec::new();
+        if matches!(op, ast::BinaryOp::Add | ast::BinaryOp::Sub) && matches!(self.types.kind(l.ty), TyKind::Struct(_)) {
+            methods = self
+                .inherent
+                .iter()
+                .filter(|((ty, _), func)| {
+                    let signature = &self.signatures[func.0];
+                    *ty == l.ty
+                        && signature.receiver.is_some()
+                        && signature.params.len() == 1
+                        && signature.params[0].ty == r.ty
+                })
+                .map(|((_, name), _)| name.clone())
+                .collect();
+            methods.sort();
+        }
+        let named = match op {
+            ast::BinaryOp::Add => "add",
+            _ => "sub",
+        };
         let help = match (self.types.kind(l.ty), self.types.kind(r.ty)) {
+            _ if methods.iter().any(|m| m == named) => {
+                format!("`{ls}` has a method for this: write `a.{named}(b)` instead of `a {symbol} b`")
+            }
+            _ if !methods.is_empty() => {
+                let list: Vec<String> = methods.iter().map(|m| format!("`{m}`")).collect();
+                match list.as_slice() {
+                    [one] => format!("`{ls}` has no `{symbol}`; its method that takes a `{rs}` is {one}"),
+                    _ => format!("`{ls}` has no `{symbol}`; its methods that take a `{rs}` are {}", list.join(", ")),
+                }
+            }
             (TyKind::Dict(_, Ty::NONE), TyKind::Dict(_, Ty::NONE)) if matches!(op, ast::BinaryOp::Add) => {
                 "combine sets with `a | b`, which keeps each element once".to_string()
             }

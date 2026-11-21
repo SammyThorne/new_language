@@ -212,6 +212,7 @@ impl<'m> Checker<'_, 'm> {
             shareable: trait_named(self, "Shareable"),
             to_json: trait_named(self, "ToJson"),
             from_json: trait_named(self, "FromJson"),
+            json_string: trait_named(self, "JsonString"),
         };
         self.types.error_trait = Some(builtins.error);
         self.builtins = Some(builtins);
@@ -948,7 +949,29 @@ impl<'m> Checker<'_, 'm> {
             );
             // Registered anyway, so calls to the methods it does have are not reported too.
         }
-        self.add_impl(ImplInfo { trait_id, ty: target, span, methods, derived: false });
+        let added = self.add_impl(ImplInfo { trait_id, ty: target, span, methods, derived: false });
+        let b = self.builtin();
+        if added && trait_id == b.json_string {
+            // A type written as a JSON string can be encoded and decoded wherever JSON can.
+            if let Some(&existing) = self.impl_index.get(&(b.to_json, target)) {
+                let first = self.impls[existing].span;
+                let type_name = self.display(target);
+                self.error(
+                    Diagnostic::error(
+                        codes::DUPLICATE_DEFINITION,
+                        format!("`{type_name}` implements `JsonString` and also derives `Json`"),
+                        span,
+                        "this implements `ToJson` and `FromJson`",
+                    )
+                    .with_label(first, "and so does this")
+                    .with_help("a `JsonString` type is written as a JSON string; remove `Json` from `@derive(...)`"),
+                );
+                return;
+            }
+            for json in [b.to_json, b.from_json] {
+                self.add_impl(ImplInfo { trait_id: json, ty: target, span, methods: Vec::new(), derived: false });
+            }
+        }
     }
 
     /// An implementing method must have the trait's signature, with `Self` as the type.
@@ -1181,10 +1204,22 @@ impl<'m> Checker<'_, 'm> {
     // ---- constants, defaults, main ------------------------------------------------------
 
     pub(super) fn check_field_defaults(&mut self) {
-        for (id, decl) in self.struct_items.clone() {
-            self.enter_module(self.module_of(decl.name.span));
-            self.field_defaults(id, decl);
+        for (id, _) in self.struct_items.clone() {
+            self.ensure_field_defaults(id);
         }
+    }
+
+    /// Check a struct's field defaults if that has not happened yet. A parameter's default can
+    /// construct a struct before the pass over all of them, so construction asks for them here.
+    pub(super) fn ensure_field_defaults(&mut self, id: StructId) {
+        if !self.field_defaults_done.insert(id) {
+            return;
+        }
+        let Some(&(_, decl)) = self.struct_items.iter().find(|(s, _)| *s == id) else { return };
+        let module = self.current_module;
+        self.enter_module(self.module_of(decl.name.span));
+        self.field_defaults(id, decl);
+        self.enter_module(module);
     }
 
     pub(super) fn field_defaults(&mut self, id: StructId, decl: &ast::StructDecl) {

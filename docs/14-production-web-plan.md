@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 4 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 5 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -957,6 +957,16 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - A zone past its table, using the POSIX footer.
   - `ui` goldens for misuse.
 - **Docs:** docs/05, and a site section.
+
+**Done** (D110). Everything listed, with these differences:
+- A `DateTime` is whole seconds plus nanoseconds, not one integer of nanoseconds, so it covers years 1 to 9999. Equality, hashing and order are by instant.
+- Instants and durations combine through methods: `t.add(d)`, `t.sub(d)` and `t.since(other)` in place of `t + d` and `t - other`, because the arithmetic traits take `Self` on both sides. The compiler's error for `t + d` names the method. Durations have `+`, `-` and ordering.
+- `time.sleep` keeps its float; `datetime.sleep(d)` takes a `Duration`. The client's `http.fetch` gained `timeout: datetime.Duration` (30 seconds by default). Duration constructors take `int`.
+- JSON goes through a new prelude trait, `JsonString`, which any type can implement; the derive, the decoder's error paths and the OpenAPI schemas use it.
+- `timestamp` columns (without a zone) are read as UTC.
+- Two compiler fixes: field defaults are checked on first use (a parameter default building such a struct reported a missing field), and module-qualified explicit type arguments resolve.
+- Tests: `tests/run/dates_and_times.vi` (known values from year 1 to 9999 and before the epoch, every parse and format form, DST in the three zones, the footer in 2090 and 2100, durations, JSON, the test clock), runtime unit tests for the calendar, parser, formatter, POSIX rules and the zone files, an OpenAPI `Event` type, a `query_as` line in `tests/db/database.vi`, and the `ui` goldens `datetime_misuse` and `json_string_misuse`. The zone files used are copied from tzdata into `tests/fixtures/zoneinfo`, so results do not depend on the machine's.
+- Gates: all pass, with the counts unchanged.
 
 #### Milestone 6: `uuid` (about 0.5 day)
 

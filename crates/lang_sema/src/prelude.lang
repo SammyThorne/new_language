@@ -133,6 +133,16 @@ trait FromJson:
     """Types that `json.decode` can read. `@derive(Json)` implements it with generated code."""
     pass
 
+trait JsonString:
+    """
+    Types written to JSON as a string, such as `datetime.DateTime`. Implementing it also
+    implements `ToJson` and `FromJson`: `json.encode` writes `to_json_string()` as a JSON string,
+    and `json.decode` reads a string and passes it to `from_json_string`, whose error message
+    becomes the `JsonError`.
+    """
+    def to_json_string(self) -> str
+    def from_json_string(text: str) -> Result[Self, str]
+
 # ---- methods of the built-in types ---------------------------------------------------------
 #
 # `value.method(...)` on a `str`, `list`, `dict` and so on calls a function named

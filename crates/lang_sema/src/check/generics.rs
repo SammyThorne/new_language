@@ -1414,10 +1414,13 @@ impl<'m> Checker<'_, 'm> {
 /// Read an expression as a type: `int`, `list[str]`, `Pair[str, int]`.
 pub(super) fn expr_to_type(expr: &ast::Expr) -> Option<ast::TypeExpr> {
     let kind = match &expr.kind {
-        ast::ExprKind::Name(name) => ast::TypeExprKind::Named { name: name.clone(), args: Vec::new() },
+        // `User`, or `models.User` from an imported module.
+        ast::ExprKind::Name(_) | ast::ExprKind::Attr { .. } => {
+            ast::TypeExprKind::Named { name: Checker::dotted(expr)?, args: Vec::new() }
+        }
         ast::ExprKind::None => ast::TypeExprKind::None,
         ast::ExprKind::Index { object, index } => {
-            let ast::ExprKind::Name(name) = &object.kind else { return None };
+            let name = Checker::dotted(object)?;
             let items: Vec<&ast::Expr> = match &index.kind {
                 ast::ExprKind::Tuple(items) => items.iter().collect(),
                 _ => vec![index],

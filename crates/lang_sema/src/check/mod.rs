@@ -484,6 +484,8 @@ struct Checker<'a, 'm> {
     /// The constants being checked, innermost last, to show the chain when one uses itself.
     const_stack: Vec<usize>,
     struct_items: Vec<(StructId, &'m ast::StructDecl)>,
+    /// Structs whose field defaults have been checked (see `ensure_field_defaults`).
+    field_defaults_done: HashSet<StructId>,
     enum_items: Vec<(EnumId, &'m ast::EnumDecl)>,
     trait_items: Vec<(TraitId, &'m ast::TraitDecl)>,
     const_items: Vec<(usize, &'m ast::ConstDecl)>,
@@ -757,6 +759,7 @@ impl<'a, 'm> Checker<'a, 'm> {
             consts: Vec::new(),
             const_stack: Vec::new(),
             struct_items: Vec::new(),
+            field_defaults_done: HashSet::new(),
             enum_items: Vec::new(),
             trait_items: Vec::new(),
             const_items: Vec::new(),

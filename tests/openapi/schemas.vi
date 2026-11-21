@@ -2,6 +2,7 @@
 # output is the document, which must equal schemas.openapi.json; each line after it is a type's
 # schema name and a value of that type as `json.encode` writes it, which must fit the schema.
 
+import datetime
 import http
 import json
 
@@ -50,6 +51,13 @@ struct Everything:
     note: str = "hi \"there\""
     score: float = -1.5
 
+@derive(Json)
+struct Event:
+    at: datetime.DateTime
+    day: datetime.Date
+    length: datetime.Duration
+    ends: datetime.DateTime? = None
+
 @frozen
 struct Users:
     pass
@@ -80,6 +88,10 @@ impl Orders:
     def list(self) -> Result[list[Shape]]:
         shapes: list[Shape] = []
         return shapes
+
+    @http.get("/events")
+    def events(self) -> list[Event]:
+        return []
 
     @http.post("/raw")
     def raw(self, req: http.Request) -> http.Response:
@@ -114,6 +126,8 @@ def main():
         shape=Shape.Rect(1, 1),
     )
     print(f"Everything {json.encode(everything)}")
+    start = datetime.at(2026, 11, 20, 9, 30, nanosecond=250_000_000)
+    print(f"Event {json.encode(Event(start, start.date(), datetime.minutes(90), start.add(datetime.hours(1))))}")
     everything.shape = None
     everything.color = Color.Green
     print(f"Everything {json.encode(everything)}")

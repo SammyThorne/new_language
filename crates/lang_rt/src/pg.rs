@@ -358,6 +358,7 @@ fn json_value(out: &mut Vec<u8>, oid: u32, text: &[u8]) {
     const FLOAT8: u32 = 701;
     const NUMERIC: u32 = 1700;
     const JSONB: u32 = 3802;
+    const TIMESTAMP: u32 = 1114;
     match oid {
         BOOL => out.extend_from_slice(if text == b"t" { b"true" } else { b"false" }),
         INT8 | INT2 | INT4 | OID => out.extend_from_slice(text),
@@ -366,6 +367,12 @@ fn json_value(out: &mut Vec<u8>, oid: u32, text: &[u8]) {
             out.extend_from_slice(text)
         }
         JSON | JSONB => out.extend_from_slice(text),
+        // A `timestamp` has no zone; `datetime` reads it as UTC.
+        TIMESTAMP if text.first().is_some_and(u8::is_ascii_digit) => {
+            let mut zoned = text.to_vec();
+            zoned.push(b'Z');
+            push_json_string(out, &zoned);
+        }
         _ => push_json_string(out, text),
     }
 }
@@ -1194,6 +1201,10 @@ mod tests {
         }
         result.add_row(&row).unwrap();
         assert_eq!(String::from_utf8(result.to_json()).unwrap(), r#"[{"id":7,"ok":true,"name":null}]"#);
+        let mut out = Vec::new();
+        json_value(&mut out, 1114, b"2026-11-20 09:30:00");
+        json_value(&mut out, 1114, b"infinity");
+        assert_eq!(out, br#""2026-11-20 09:30:00Z""infinity""#);
         assert_eq!(base64_decode("cGVuY2ls").unwrap(), b"pencil");
     }
 }

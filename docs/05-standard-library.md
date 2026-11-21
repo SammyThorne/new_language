@@ -9,6 +9,7 @@ The standard library is what makes Viper a backend language and not a general-pu
 | prelude | `print` (with `sep`, `end` and `flush`), `len`, `range`, `str`, `int`, `float`, `list`, `ord`, `chr`, `reversed`, `min`, `max`, `sorted`, `panic`, built-in types and traits | M1–M4 | Compiler built-ins plus runtime |
 | `io`, `os` | Files, standard streams, environment variables, arguments | M5 | Viper wrappers over runtime |
 | `time` | Clocks, durations, `sleep` | M6 | Viper wrappers over runtime |
+| `datetime` | Instants, dates, durations, time zones, RFC 3339 | docs/14, milestone 5 | Viper, over runtime parsing, formatting and TZif reading |
 | `sync` | `Channel`, `Mutex`, `Atomic`, `spawn` support | M6 | Runtime |
 | `json` | Dynamic values, typed encode and decode | M7 | Runtime scanner and writer; compiler-derived per-type code |
 | `net` | TCP listener and stream | M8 | Runtime |
@@ -217,7 +218,8 @@ resp = http.fetch("PUT", url, body, {"Authorization": token})?    # any method, 
 | `http.post_form(url, fields, headers={})` | `POST` the `(name, value)` pairs as a form body (`application/x-www-form-urlencoded`), as OAuth token endpoints expect |
 | `http.ClientResponse` | `status`, `body: bytes`, `ok()`, `header(name) -> str?` (a header sent several times, such as `Set-Cookie`, is its values joined by newlines), `text() -> Result[str]`, `json() -> Result[json.Value]` |
 | `http.decode_json[T](response)` | The body decoded into `T` |
-| `http.ClientError` | No response: unreachable host, timeout (30 seconds), connection closed early, an untrusted TLS certificate, or a URL that is not `http://` or `https://`. Returned from a handler with `?`, it becomes a 502 |
+| `timeout=` | `http.fetch(..., timeout=datetime.seconds(5))` bounds the whole exchange, from connecting to the last byte; 30 seconds by default |
+| `http.ClientError` | No response: unreachable host, timeout (30 seconds unless the call sets one), connection closed early, an untrusted TLS certificate, or a URL that is not `http://` or `https://`. Returned from a handler with `?`, it becomes a 502 |
 
 One request per connection, HTTP/1.1 (D77). `https://` URLs use TLS and check the server's certificate against the Mozilla root store built into the program, plus the certificates in the file named by `SSL_CERT_FILE` if it is set (D79).
 
@@ -587,7 +589,7 @@ with db.transaction()? as tx:            # rolled back unless committed
 | `postgres.connect(url) -> Result[postgres.Db, postgres.DbError]` | `postgres://user:password@host:port/database?sslmode=...&pool_max=...`. Opens one connection to check the URL and credentials |
 | `postgres.Db` | Frozen: one pool, shared by every task. `query(sql, args=[]) -> Result[list[Row]]`, `query_row(...) -> Result[Row?]`, `execute(...) -> Result[int]` (rows affected), `script(sql)` (several statements, no parameters), `transaction() -> Result[Db]`, `close()` |
 | A transaction | A `Db` holding one connection: the same methods, plus `commit()`, `rollback()`, and `exit()` so that `with` rolls back if `commit` was not reached. A commit after a failed statement is an error (`25P02`) |
-| `postgres.query_as[T](db, sql, args=[]) -> Result[list[T]]`, `query_one_as[T](...) -> Result[T?]` | Rows decoded into a `@derive(Json)` type by column name: numbers, booleans and `json`/`jsonb` columns to fields of those types, NULL to `None`, anything else to `str` |
+| `postgres.query_as[T](db, sql, args=[]) -> Result[list[T]]`, `query_one_as[T](...) -> Result[T?]` | Rows decoded into a `@derive(Json)` type by column name: numbers, booleans and `json`/`jsonb` columns to fields of those types, `timestamptz` and `timestamp` to `datetime.DateTime` (a `timestamp` has no zone and is read as UTC), `date` to `datetime.Date`, NULL to `None`, anything else to `str`. Dates assume the server's default `DateStyle` (ISO) |
 | `postgres.Row` | `get(column) -> str?` (the text PostgreSQL sends), `text`, `int`, `float`, `bool` (each `Result`, an error for NULL), `columns()` |
 | `postgres.DbError` | `code` (the SQLSTATE, such as `23505` for a unique violation; `08006` when the connection failed) and `reason`. Returned from a handler, a 500 |
 
@@ -620,6 +622,7 @@ text = json.encode(customer)
 ```
 
 - `@derive(Json)` implements `ToJson` and `FromJson`. Works on structs and enums. Supported field types: numerics, `bool`, `str`, `T?`, `list[T]`, `dict[str, V]`, tuples, and other `Json` types.
+- A type written as a JSON string implements the prelude trait `JsonString` instead: `to_json_string(self) -> str` and a static `from_json_string(text) -> Result[Self, str]`, whose error message becomes the decode error, with its JSON path. Implementing it implements `ToJson` and `FromJson`, so the type works as a field, in `json.encode` and `json.decode`, and in route bodies. OpenAPI documents it as a string. `datetime.DateTime`, `Date` and `Duration` are written this way (D110).
 - Decoding rules: unknown keys are ignored by default (`@json(strict)` on the struct rejects them); a missing key is an error unless the field has a default or is optional; type mismatches report the JSON path (`addresses[1].zip: expected string, found number`).
 - Enums encode as a tagged object by default (`{"type": "Text", "body": "..."}`); fieldless enums encode as strings.
 - As built (M7): output is compact (`{"a":1}`); a struct field's default is used when its key is missing; tuples are arrays; `json.Value` derives `Eq`. See D47 and D48 in [08](08-decisions-and-risks.md).
@@ -646,6 +649,43 @@ text = json.encode(payload)
 - The **structure** is compiled, not interpreted. For each derived type the compiler generates an encoder that appends field names as pre-escaped constants and calls the writer for values, and a decoder that reads keys and dispatches with a switch on length and bytes straight into the struct's fields. No intermediate `Value` tree is built and no reflection or field-name lookup happens at run time. This is the same strategy as Rust's `serde` and is the main reason typed JSON can compete with Go's generated-code encoders and beat its reflection-based default.
 - Strings without escapes are copied once from the input buffer.
 - `http.json(value)` encodes directly into the response buffer.
+
+## Dates and times (docs/14, milestone 5)
+
+```python
+import datetime
+
+now = datetime.now()                                    # a DateTime, in UTC
+t = datetime.parse("2026-11-20T09:30:00+01:00")?        # RFC 3339; keeps its +01:00
+t.utc().format_iso()                                    # "2026-11-20T08:30:00Z"
+london = datetime.zone("Europe/London")?
+t.to_zone(london).format("%Y-%m-%d %H:%M %Z")           # "2026-11-20 08:30 GMT"
+later = t.add(datetime.hours(2))                        # DateTime + Duration
+later.since(t)                                          # Duration: 2h0m0s
+datetime.date(2026, 11, 20).weekday()                   # 4: Friday, counting Monday as 0
+datetime.at(2026, 3, 8, 2, 30, zone=datetime.zone("America/New_York")?)   # 03:30 EDT: 02:30 never happened
+datetime.parse_duration("1h30m")?.seconds()             # 5400.0
+```
+
+| Item | Shape |
+|---|---|
+| `datetime.DateTime` | An instant to the nanosecond, with the zone it is shown in. `==`, `<`, `hash`, `sorted` and `max` look at the instant alone, so the same moment in two zones is equal. `unix()`, `unix_millis()`, `nanosecond()`; `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()`, `weekday()` and `date()` in its zone; `zone()`, `utc_offset()`; `to_zone(zone)`, `in_zone(name) -> Result`, `utc()`; `add(d)`, `sub(d)`, `since(other) -> Duration`; `format_iso()`, `format(pattern)`, `http_date()`. It prints in RFC 3339 |
+| `datetime.Date` | A calendar day: `year()`, `month()`, `day()`, `weekday()`, `day_of_year()`, `add_days(n)`, `days_since(other)`, `at(hour=0, minute=0, second=0, zone=UTC) -> DateTime`, `format(pattern)`. `==`, `<` and `hash`. It prints as `2026-11-20` |
+| `datetime.Duration` | Signed nanoseconds, up to about 292 years either way. `+`, `-`, `==`, `<`; `nanoseconds()`, `microseconds()`, `milliseconds()` (whole, rounded toward zero), `seconds()`, `minutes()`, `hours()` (floats), `times(n)`, `abs()`, `is_negative()`. It prints in Go's syntax: `1h30m0s`, `1.5s`, `300ms`, `0s` |
+| `datetime.Zone` | `name()`, `offset_at(t) -> Duration`, `is_dst(t)`. Made by `datetime.utc()`, `datetime.local()` (`TZ`, else `/etc/localtime`, else UTC), `datetime.zone(name) -> Result` (IANA names such as `"Europe/London"`; `"UTC"` always works), `datetime.fixed_zone(offset)` |
+| Making instants | `datetime.now()` (UTC), `datetime.at(year, month, day, hour=0, minute=0, second=0, nanosecond=0, zone=UTC)`, `datetime.from_unix(seconds, nanosecond=0)`, `datetime.from_unix_millis(ms)`, `datetime.parse(text) -> Result` |
+| Making dates | `datetime.date(year, month, day)`, `datetime.today(zone=UTC)`, `datetime.parse_date(text) -> Result` (`YYYY-MM-DD`) |
+| Making durations | `nanos(n)`, `micros(n)`, `millis(n)`, `seconds(n)`, `minutes(n)`, `hours(n)`, `days(n)` (24-hour days), all from `int`; `parse_duration(text) -> Result` |
+| `datetime.sleep(d)` | `time.sleep` for a `Duration` |
+| `datetime.set_clock_for_tests(t)` | Makes `now()` and `today()` return `t` in every task until it is called with `None` |
+| `datetime.DateTimeError` | Text that is not a date, time or duration, or a zone that cannot be loaded. `reason`; returned from a handler, a 400 |
+
+- **Parsing.** `parse` accepts RFC 3339 and the ISO 8601 forms near it: `T`, `t` or a space between date and time, seconds optional, up to 9 digits of fractional seconds after `.` or `,`, and `Z` or an offset written `+01:00`, `+0100` or `+01` (the form PostgreSQL sends). An offset is required. The error names the unexpected character and its position: ``unexpected 'X' at position 11 in "2026-11-20X09:30:00Z": expected `T` or a space between the date and the time``. Years run from 1 to 9999.
+- **Formatting.** `format_iso()` is RFC 3339 with `Z` for a zero offset and only the fractional digits it needs. `format(pattern)` takes `%Y %m %d %H %M %S %f` (microseconds, 6 digits) `%z` (`+0100`) `%Z` (`BST`, or the offset for a fixed zone) `%a %A %b %B %j %%`; any other directive panics, since a pattern is part of the program. `http_date()` is the IMF-fixdate HTTP headers use.
+- **Wall-clock times in a zone.** `at(..., zone=z)` and `Date.at` turn a local time into an instant. A time that happens twice, as clocks go back, is the earlier of the two; a time that never happens, as clocks go forward, moves forward by the size of the gap (02:30 on the morning New York springs forward is 03:30 EDT). Python and Go do the same.
+- **Arithmetic is on instants.** `t.add(datetime.days(1))` is 24 hours later, which is not the same time of day across a daylight saving change; for calendar days use `t.date().add_days(1).at(...)`. The operators `+` and `-` are not defined between a `DateTime` and a `Duration` (D110); the compiler's error says to use `add` and `sub`.
+- **Time zones** come from the TZif files (RFC 8536, versions 1 to 3) in `TZDIR`, or `/usr/share/zoneinfo` when it is not set, read once per name and cached. Past the end of a file's table (2037 in the standard build), the POSIX TZ rule in its footer gives the transitions. Windows has no zone database: set `TZDIR` to a copy of one, or use only UTC and fixed offsets.
+- **JSON and OpenAPI.** All three types implement `JsonString`: a `DateTime` is an RFC 3339 string, a `Date` is `YYYY-MM-DD`, and a `Duration` is Go's syntax. OpenAPI documents them as `{"type": "string", "format": "date-time"}`, `"format": "date"`, and a string.
 
 ## Tasks and synchronisation
 
@@ -674,7 +714,7 @@ def with_timeout():
 | `Channel[T](capacity)` | `send`, `recv`, `try_recv`, `close`, iteration |
 | `Mutex[T](value)` | `lock()` returns a guard usable with `with` |
 | `Atomic` | `get`, `set`, `add`, `increment`, `decrement`, `compare_and_set`; holds an `int` |
-| `time.sleep(seconds)` | Pauses the calling task only; `time.monotonic()` and `time.now()` give clocks in seconds |
+| `time.sleep(seconds)` | Pauses the calling task only; `time.monotonic()` and `time.now()` give clocks in seconds. `datetime.sleep(d)` takes a `Duration` |
 
 What may be passed to `spawn`, sent on a channel or put in a `Mutex` is checked at compile time ([04](04-runtime-and-memory.md#data-race-prevention)); in the example above `Page` must be a `@frozen` struct.
 

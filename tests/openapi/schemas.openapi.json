@@ -187,6 +187,29 @@
         }
       }
     },
+    "/v2/orders/events": {
+      "get": {
+        "operationId": "events",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Event"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v2/orders/raw": {
       "post": {
         "operationId": "raw",
@@ -215,6 +238,29 @@
                   "type": "array",
                   "items": {
                     "$ref": "#/components/schemas/Shape"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/again/events": {
+      "get": {
+        "operationId": "events_2",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Event"
                   }
                 }
               }
@@ -254,6 +300,38 @@
         "properties": {
           "error": {
             "type": "string"
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "required": [
+          "at",
+          "day",
+          "length"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "day": {
+            "type": "string",
+            "format": "date"
+          },
+          "length": {
+            "type": "string",
+            "examples": [
+              "1h30m0s"
+            ]
+          },
+          "ends": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "default": null
           }
         }
       },

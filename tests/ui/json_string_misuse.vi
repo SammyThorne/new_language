@@ -1,0 +1,25 @@
+# `JsonString` implements `ToJson` and `FromJson` itself, so a type cannot also derive them, and
+# its methods must have the trait's signatures.
+@derive(Json)
+struct Twice:
+    n: int
+
+impl JsonString for Twice:
+    def to_json_string(self) -> str:
+        return str(self.n)
+
+    def from_json_string(text: str) -> Result[Twice, str]:
+        return Twice(0)
+
+struct Wrong:
+    n: int
+
+impl JsonString for Wrong:
+    def to_json_string(self) -> int:
+        return self.n
+
+    def from_json_string(text: str) -> Wrong:
+        return Wrong(0)
+
+def main():
+    pass

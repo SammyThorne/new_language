@@ -100,9 +100,9 @@ fn connect(host: &str, port: u16, deadline: Instant) -> Result<Socket, String> {
     Err(failure)
 }
 
-fn request(method: &str, url: &str, headers: &str, body: &[u8]) -> Result<(i64, Response), String> {
+fn request(method: &str, url: &str, headers: &str, body: &[u8], timeout: Duration) -> Result<(i64, Response), String> {
     let url = parse_url(url)?;
-    let deadline = Instant::now() + TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let mut socket = connect(&url.host, url.port, deadline)?;
     if url.tls {
         socket.start_tls(Session::client(&url.host, Protocol::Http)?);
@@ -209,8 +209,9 @@ fn request(method: &str, url: &str, headers: &str, body: &[u8]) -> Result<(i64, 
     Ok((status, Response { headers, body }))
 }
 
-/// Make a request. `headers` is `Name: value\r\n` lines. Returns the status, with the headers
-/// and body available from the functions below, or -1 after recording the error.
+/// Make a request. `headers` is `Name: value\r\n` lines; `timeout_ns` bounds the whole
+/// exchange (30 seconds when it is not positive). Returns the status, with the headers and body
+/// available from the functions below, or -1 after recording the error.
 ///
 /// # Safety
 /// The pointer and length pairs describe UTF-8 strings (the body may be any bytes).
@@ -224,12 +225,14 @@ pub unsafe extern "C-unwind" fn lrt_http_client(
     headers_len: i64,
     body: *const u8,
     body_len: i64,
+    timeout_ns: i64,
 ) -> i64 {
     let method = unsafe { Str::from_raw(method, method_len) }.to_ascii_uppercase();
     let url = unsafe { Str::from_raw(url, url_len) };
     let headers = unsafe { Str::from_raw(headers, headers_len) };
     let body = unsafe { Str::from_raw(body, body_len) }.as_bytes();
-    match request(&method, url, headers, body) {
+    let timeout = if timeout_ns > 0 { Duration::from_nanos(timeout_ns as u64) } else { TIMEOUT };
+    match request(&method, url, headers, body, timeout) {
         Ok((status, response)) => {
             LAST.with(|last| *last.borrow_mut() = response);
             status

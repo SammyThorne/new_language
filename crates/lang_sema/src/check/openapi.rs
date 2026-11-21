@@ -414,6 +414,18 @@ impl Checker<'_, '_> {
                 ])
             }
             TyKind::Enum(_) if self.json_value_ty() == Some(ty) => J::Obj(Vec::new()),
+            TyKind::Struct(id) if self.impl_index.contains_key(&(self.builtin().json_string, ty)) => {
+                // `JsonString` types are strings; the `datetime` ones have standard formats.
+                let module = &self.module_names[self.module_of(self.structs[id.0].span)];
+                match (module.as_str(), self.structs[id.0].name.as_str()) {
+                    ("datetime", "DateTime") => J::obj(vec![("type", J::s("string")), ("format", J::s("date-time"))]),
+                    ("datetime", "Date") => J::obj(vec![("type", J::s("string")), ("format", J::s("date"))]),
+                    ("datetime", "Duration") => {
+                        J::obj(vec![("type", J::s("string")), ("examples", J::Arr(vec![J::s("1h30m0s")]))])
+                    }
+                    _ => string(),
+                }
+            }
             TyKind::Struct(_) | TyKind::Enum(_) => {
                 pending.push(ty);
                 let name = self.component_name(ty, None);

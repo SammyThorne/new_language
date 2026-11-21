@@ -1,0 +1,53 @@
+error[E0321]: cannot use `+` on `DateTime` and `Duration`
+ --> tests/ui/datetime_misuse.vi:8:13
+  |
+8 |     later = t + datetime.hours(1)
+  |             ^^^^^^^^^^^^^^^^^^^^^ `DateTime` + `Duration`
+  |
+  = help: `DateTime` has a method for this: write `a.add(b)` instead of `a + b`
+
+error[E0321]: cannot use `-` on `DateTime` and `Duration`
+ --> tests/ui/datetime_misuse.vi:9:15
+  |
+9 |     earlier = t - datetime.minutes(5)
+  |               ^^^^^^^^^^^^^^^^^^^^^^^ `DateTime` - `Duration`
+  |
+  = help: `DateTime` has a method for this: write `a.sub(b)` instead of `a - b`
+
+error[E0321]: cannot use `-` on `DateTime` and `DateTime`
+  --> tests/ui/datetime_misuse.vi:10:11
+   |
+10 |     gap = t - t
+   |           ^^^^^ `DateTime` - `DateTime`
+   |
+   = help: `DateTime` has no `-`; its method that takes a `DateTime` is `since`
+
+error[E0335]: `DateTime` cannot be created outside module `datetime`
+  --> tests/ui/datetime_misuse.vi:11:11
+   |
+11 |     raw = datetime.DateTime(0, 0, 0, 0)
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ its field `secs` is private
+   |
+   = help: use a function from `datetime` that creates one
+
+error[E0300]: expected `Duration`, found `float`
+  --> tests/ui/datetime_misuse.vi:12:20
+   |
+12 |     datetime.sleep(1.5)
+   |                    ^^^ expected `Duration`, found `float`
+
+error[E0300]: expected `float`, found `Duration`
+  --> tests/ui/datetime_misuse.vi:13:16
+   |
+13 |     time.sleep(datetime.seconds(1))
+   |                ^^^^^^^^^^^^^^^^^^^ expected `float`, found `Duration`
+
+error[E0300]: expected `int`, found `float`
+  --> tests/ui/datetime_misuse.vi:14:29
+   |
+14 |     half = datetime.seconds(1.5)
+   |                             ^^^ expected `int`, found `float`
+   |
+   = help: convert it with `int(...)`, which drops the fraction
+
+error: could not compile `tests/ui/datetime_misuse.vi` due to 7 errors

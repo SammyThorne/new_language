@@ -13,6 +13,7 @@
 # expect: typed: ann/9.5/{"tags":["a","b"]} bob/None/None cy/2.0/None
 # expect: one: bob
 # expect: none: True
+# expect: dates: 2026-11-20T08:30:00.25Z 2026-11-20T09:30:00Z 2026-11-20 True
 # expect: unique: 23505
 # expect: syntax: 42601
 # expect: still usable: 3
@@ -24,6 +25,7 @@
 # expect: bad password: 28P01
 # expect: bad table: 42P01
 
+import datetime
 import os
 import postgres
 
@@ -38,6 +40,13 @@ struct User:
     score: float?
     admin: bool
     doc: Doc?
+
+@derive(Json)
+struct Stamps:
+    zoned: datetime.DateTime
+    plain: datetime.DateTime
+    day: datetime.Date
+    missing: datetime.DateTime?
 
 def count(db: postgres.Db) -> int:
     return db.query_row("select count(*) as n from users").unwrap().unwrap().int("n").unwrap()
@@ -89,6 +98,12 @@ def main():
     print("typed:", " ".join(parts))
     print("one:", postgres.query_one_as[User](db, "select * from users where id = $1", ["2"]).unwrap().unwrap().name)
     print("none:", postgres.query_one_as[User](db, "select * from users where id = $1", ["99"]).unwrap() == None)
+    stamps = postgres.query_one_as[Stamps](
+        db,
+        "select timestamptz '2026-11-20 09:30:00.25+01' as zoned, timestamp '2026-11-20 09:30:00' as plain, "
+        + "date '2026-11-20' as day, null::timestamptz as missing",
+    ).unwrap().unwrap()
+    print("dates:", stamps.zoned.utc(), stamps.plain, stamps.day, stamps.missing == None)
 
     print("unique:", db.execute("insert into users (name) values ($1)", ["ann"]).unwrap_err().code)
     print("syntax:", db.execute("selec 1").unwrap_err().code)

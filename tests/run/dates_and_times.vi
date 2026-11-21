@@ -1,0 +1,214 @@
+# The datetime module: known values, every accepted format, time zones across daylight saving
+# changes (from the fixtures in tests/fixtures/zoneinfo), durations, JSON, and the test clock.
+# env: TZDIR=tests/fixtures/zoneinfo
+# env: TZ=Europe/London
+# expect: epoch 1970-01-01T00:00:00Z 3 1
+# expect: before 1969-12-31T23:59:59.5Z -1 1969 23 -500
+# expect: ms 1969-12-31T23:59:59.999Z 2026-11-20T08:30:00.123Z
+# expect: leap 2024-02-29 2024-02-29 2000-02-29
+# expect: not leap 1900-03-01 2100-03-01
+# expect: last 9999-12-31T23:59:59.999999999Z 4
+# expect: first 0001-01-01T00:00:00Z -62135596800
+# expect: days 20777 365
+# expect: no such day: day 29 is out of range for 2023-02 (1 to 28)
+# expect: 2026-11-20T09:30:00Z -> 2026-11-20T09:30:00Z 1795167000 0
+# expect: 2026-11-20t09:30:00z -> 2026-11-20T09:30:00Z 1795167000 0
+# expect: 2026-11-20 09:30:00+01:00 -> 2026-11-20T09:30:00+01:00 1795163400 0
+# expect: 2026-11-20T09:30+01:00 -> 2026-11-20T09:30:00+01:00 1795163400 0
+# expect: 2026-11-20T09:30:00.5-05:30 -> 2026-11-20T09:30:00.5-05:30 1795186800 500000000
+# expect: 2026-11-20T09:30:00,123456789+0100 -> 2026-11-20T09:30:00.123456789+01:00 1795163400 123456789
+# expect: 2026-11-20 09:30:00.25+01 -> 2026-11-20T09:30:00.25+01:00 1795163400 250000000
+# expect: 1969-12-31T23:59:59.999999999Z -> 1969-12-31T23:59:59.999999999Z -1 999999999
+# expect: 2026-11-20T09:30:00 -> error: "2026-11-20T09:30:00" ends early: expected `Z` or an offset such as `+01:00`
+# expect: 2026-11-20X09:30:00Z -> error: unexpected 'X' at position 11 in "2026-11-20X09:30:00Z": expected `T` or a space between the date and the time
+# expect: 2026-13-01T00:00:00Z -> error: month 13 is out of range (1 to 12)
+# expect: 2026-11-20T24:00:00Z -> error: hour 24 is out of range (0 to 23)
+# expect: 2026-11-20T09:30:00.Z -> error: unexpected 'Z' at position 21 in "2026-11-20T09:30:00.Z": expected digits of fractional seconds
+# expect: 2026-11-20T09:30:00Z trailing -> error: unexpected ' ' at position 21 in "2026-11-20T09:30:00Z trailing": expected the end of the text
+# expect: 20261120T093000Z -> error: unexpected '1' at position 5 in "20261120T093000Z": expected `-`
+# expect: round trip 2026-11-20T09:30:00Z True True
+# expect: round trip 2026-11-20T09:30:00.5-05:30 True True
+# expect: round trip 0001-01-01T00:00:00.000000001+14:00 True True
+# expect: Fri Friday Nov November 20/11/2026 09:30:05.250000 +0100 +01:00 324 %
+# expect: Fri, 20 Nov 2026 08:30:05 GMT 2026-11-20T08:30:05.25Z 2026 11 20 9 30 5
+# expect: Monday 005 0
+# expect: America/New_York -5h0m0s -4h0m0s
+# expect: Europe/London 0s 1h0m0s
+# expect: Australia/Lord_Howe 11h0m0s 10h30m0s
+# expect: spring 2026-03-08T01:59:00-05:00 EST 2026-03-08T03:00:00-04:00 EDT
+# expect: gap 2026-03-08T03:30:00-04:00
+# expect: twice 2026-11-01T01:30:00-04:00 2026-11-01T01:30:00-05:00 True False
+# expect: london 2026-03-29T00:59:00Z 2026-03-29T02:00:00+01:00
+# expect: london 2026-10-25T01:30:00+01:00 01:00 GMT
+# expect: howe 2026-04-05T01:59:00+11:00 2026-04-05T01:30:00+10:30
+# expect: howe 2026-10-04T02:45:00+11:00 2026-10-04T02:30:00+11:00
+# expect: footer 2100-07-01T12:00:00-04:00 2100-12-01T12:00:00-05:00
+# expect: footer 2090-01-01 00:00 +11 00:00 +1030
+# expect: footer 00:59 GMT 02:00 BST
+# expect: same 2026-06-01T12:00:00+01:00 2026-06-01T07:00:00-04:00 True 2026-06-01 2026-06-01T11:00:00Z
+# expect: in_zone 2026-06-01T21:30:00+10:30 unknown time zone "Mars/Base"
+# expect: bad name unknown time zone "../../etc/passwd"
+# expect: fixed 2026-06-01T05:30:00-05:30 +05:00 UTC
+# expect: local Europe/London 01:00 BST
+# expect: keys a 2026-06-01T11:59:59.999999999+01:00 2026-06-01T07:00:00.000000001-04:00
+# expect: duration 1h30m0s 5400.0 90.0 1.5 5400000 1h30m1s -30m0s
+# expect: '1.5s' -> 1.5s 1500000000
+# expect: '-300ms' -> -300ms -300000000
+# expect: '2h45m30.5s' -> 2h45m30.5s 9930500000000
+# expect: '1µs' -> 1µs 1000
+# expect: '1us500ns' -> 1.5µs 1500
+# expect: '+5m' -> 5m0s 300000000000
+# expect: '0' -> 0s 0
+# expect: '' -> invalid duration "": expected a number and a unit, such as `30s` or `1h30m`
+# expect: '5' -> invalid duration "5": a number needs a unit (ns, us, ms, s, m or h)
+# expect: '3d' -> invalid duration "3d": unknown unit `d` (use ns, us, ms, s, m or h)
+# expect: '1.5.s' -> invalid duration "1.5.s": a number needs a unit (ns, us, ms, s, m or h)
+# expect: '9999999h' -> invalid duration "9999999h": too large
+# expect: compare True True 48h0m0s -1500
+# expect: times 15m0s 7s True [1s, 1h0m0s]
+# expect: since 8760h0m0s -8760.0
+# expect: {"title":"standup","at":"2026-11-20T09:30:00Z","day":"2026-11-20","length":"15m0s","ends":"2026-11-20T09:45:00Z"}
+# expect: True True True True
+# expect: 2026-11-20T09:30:00Z
+# expect: at: unexpected 's' at position 1 in "soon": expected a four-digit year
+# expect: day: day 30 is out of range for 2026-02 (1 to 28)
+# expect: length: expected a string, found a number
+# expect: ["2026-01-02"] [1s, 2m0s]
+# expect: clock 2030-05-06T07:08:09Z 2030-05-06 2030-05-06
+# expect: real clock True
+
+import datetime
+import json
+
+@derive(Json)
+struct Meeting:
+    title: str
+    at: datetime.DateTime
+    day: datetime.Date
+    length: datetime.Duration
+    ends: datetime.DateTime? = None
+
+def show(text: str):
+    match datetime.parse(text):
+        case Ok(t):
+            print(f"{text} -> {t} {t.unix()} {t.nanosecond()}")
+        case Err(e):
+            print(f"{text} -> error: {e.message()}")
+
+def main():
+    # Known values.
+    epoch = datetime.from_unix(0)
+    print("epoch", epoch, epoch.weekday(), epoch.date().day_of_year())
+    before = datetime.from_unix(-1, 500_000_000)
+    print("before", before, before.unix(), before.year(), before.hour(), before.unix_millis())
+    print("ms", datetime.from_unix_millis(-1), datetime.from_unix_millis(1_795_163_400_123))
+    print("leap", datetime.date(2024, 2, 29), datetime.date(2024, 2, 28).add_days(1), datetime.date(2000, 2, 28).add_days(1))
+    print("not leap", datetime.date(1900, 2, 28).add_days(1), datetime.date(2100, 2, 28).add_days(1))
+    print("last", datetime.at(9999, 12, 31, 23, 59, 59, 999_999_999), datetime.date(9999, 12, 31).weekday())
+    print("first", datetime.at(1, 1, 1), datetime.at(1, 1, 1).unix())
+    print("days", datetime.date(2026, 11, 20).days_since(datetime.date(1970, 1, 1)), datetime.date(2026, 12, 31).day_of_year())
+    match datetime.parse_date("2023-02-29"):
+        case Ok(d):
+            print(d)
+        case Err(e):
+            print("no such day:", e.message())
+
+    # Every accepted form, and some that are not.
+    for text in [
+        "2026-11-20T09:30:00Z",
+        "2026-11-20t09:30:00z",
+        "2026-11-20 09:30:00+01:00",
+        "2026-11-20T09:30+01:00",
+        "2026-11-20T09:30:00.5-05:30",
+        "2026-11-20T09:30:00,123456789+0100",
+        "2026-11-20 09:30:00.25+01",
+        "1969-12-31T23:59:59.999999999Z",
+        "2026-11-20T09:30:00",
+        "2026-11-20X09:30:00Z",
+        "2026-13-01T00:00:00Z",
+        "2026-11-20T24:00:00Z",
+        "2026-11-20T09:30:00.Z",
+        "2026-11-20T09:30:00Z trailing",
+        "20261120T093000Z",
+    ]:
+        show(text)
+    # Round-trips: what format_iso writes, parse reads back to the same instant and offset.
+    for text in ["2026-11-20T09:30:00Z", "2026-11-20T09:30:00.5-05:30", "0001-01-01T00:00:00.000000001+14:00"]:
+        t = datetime.parse(text).unwrap()
+        again = datetime.parse(t.format_iso()).unwrap()
+        print("round trip", t.format_iso(), again == t, again.utc_offset() == t.utc_offset())
+
+    # Formatting.
+    t = datetime.parse("2026-11-20T09:30:05.25+01:00").unwrap()
+    print(t.format("%a %A %b %B %d/%m/%Y %H:%M:%S.%f %z %Z %j %%"))
+    print(t.http_date(), t.utc(), t.year(), t.month(), t.day(), t.hour(), t.minute(), t.second())
+    print(datetime.date(2026, 1, 5).format("%A %j"), datetime.date(2026, 1, 5).weekday())
+
+    # Zones across daylight saving changes.
+    york = datetime.zone("America/New_York").unwrap()
+    london = datetime.zone("Europe/London").unwrap()
+    howe = datetime.zone("Australia/Lord_Howe").unwrap()
+    for zone in [york, london, howe]:
+        print(zone, zone.offset_at(datetime.at(2026, 1, 15)), zone.offset_at(datetime.at(2026, 7, 15)))
+    # New York springs forward at 02:00 on 8 March 2026 and falls back at 02:00 on 1 November.
+    spring = datetime.at(2026, 3, 8, 6, 59).to_zone(york)
+    print("spring", spring, spring.format("%Z"), spring.add(datetime.minutes(1)), spring.add(datetime.minutes(1)).format("%Z"))
+    print("gap", datetime.at(2026, 3, 8, 2, 30, zone=york))
+    early = datetime.at(2026, 11, 1, 1, 30, zone=york)
+    print("twice", early, early.add(datetime.hours(1)), york.is_dst(early), york.is_dst(early.add(datetime.hours(1))))
+    # London changes at 01:00 UTC.
+    print("london", datetime.at(2026, 3, 29, 0, 59).to_zone(london), datetime.at(2026, 3, 29, 1, 0).to_zone(london))
+    print("london", datetime.at(2026, 10, 25, 1, 30, zone=london), datetime.at(2026, 10, 25, 1, 0).to_zone(london).format("%H:%M %Z"))
+    # Lord Howe moves its clocks by 30 minutes.
+    print("howe", datetime.at(2026, 4, 4, 14, 59).to_zone(howe), datetime.at(2026, 4, 4, 15, 0).to_zone(howe))
+    print("howe", datetime.at(2026, 10, 4, 2, 15, zone=howe), datetime.at(2026, 10, 4, 1, 59, zone=howe).add(datetime.minutes(1)))
+    # Past the tables, which end in 2037, the POSIX rule in each file's footer applies.
+    print("footer", datetime.at(2100, 7, 1, 12, zone=york), datetime.at(2100, 12, 1, 12, zone=york))
+    print("footer", datetime.at(2090, 1, 1, zone=howe).format("%Y-%m-%d %H:%M %Z"), datetime.at(2090, 6, 1, zone=howe).format("%H:%M %Z"))
+    print("footer", datetime.at(2100, 3, 28, 0, 59).to_zone(london).format("%H:%M %Z"), datetime.at(2100, 3, 28, 1, 0).to_zone(london).format("%H:%M %Z"))
+    # The same instant in two zones is equal, and sorts by instant.
+    a = datetime.at(2026, 6, 1, 12, zone=london)
+    b = datetime.at(2026, 6, 1, 7, zone=york)
+    print("same", a, b, a == b, a.date(), b.to_zone(datetime.utc()))
+    print("in_zone", a.in_zone("Australia/Lord_Howe").unwrap(), a.in_zone("Mars/Base").unwrap_err().message())
+    print("bad name", datetime.zone("../../etc/passwd").unwrap_err().message())
+    print("fixed", a.to_zone(datetime.fixed_zone(datetime.minutes(-330))), datetime.fixed_zone(datetime.hours(5)), datetime.utc())
+    print("local", datetime.local(), datetime.at(2026, 7, 1).to_zone(datetime.local()).format("%H:%M %Z"))
+    seen: dict[datetime.DateTime, str] = {a: "a"}
+    print("keys", seen.get(b), sorted([b.add(datetime.seconds(1)), a.sub(datetime.nanos(1)), a])[0], max(a, b.add(datetime.nanos(1))))
+
+    # Durations.
+    span = datetime.parse_duration("1h30m").unwrap()
+    print("duration", span, span.seconds(), span.minutes(), span.hours(), span.milliseconds(), span + datetime.seconds(1), span - datetime.hours(2))
+    for text in ["1.5s", "-300ms", "2h45m30.5s", "1µs", "1us500ns", "+5m", "0", "", "5", "3d", "1.5.s", "9999999h"]:
+        match datetime.parse_duration(text):
+            case Ok(x):
+                print(f"{text!r} -> {x} {x.nanoseconds()}")
+            case Err(e):
+                print(f"{text!r} -> {e.message()}")
+    print("compare", datetime.millis(1500) > datetime.seconds(1), datetime.minutes(60) == datetime.hours(1), datetime.days(2), datetime.micros(-1500).microseconds())
+    print("times", datetime.minutes(5).times(3), datetime.seconds(-7).abs(), datetime.seconds(-7).is_negative(), sorted([datetime.hours(1), datetime.seconds(1)]))
+    print("since", datetime.at(2026, 1, 1).since(datetime.at(2025, 1, 1)), datetime.at(2025, 1, 1).since(datetime.at(2026, 1, 1)).hours())
+
+    # JSON: strings in, strings out.
+    start = datetime.at(2026, 11, 20, 9, 30, zone=london)
+    m = Meeting("standup", start, start.date(), datetime.minutes(15), start.add(datetime.minutes(15)))
+    text = json.encode(m)
+    print(text)
+    back = json.decode[Meeting](text).unwrap()
+    print(back.at == m.at, back.day == m.day, back.length == m.length, back.ends == m.ends)
+    print(json.decode[Meeting]("{\"title\":\"x\",\"at\":\"2026-11-20 09:30:00+00\",\"day\":\"2026-11-20\",\"length\":\"1h\"}").unwrap().at)
+    for bad in [
+        "{\"title\":\"x\",\"at\":\"soon\",\"day\":\"2026-11-20\",\"length\":\"1h\"}",
+        "{\"title\":\"x\",\"at\":\"2026-11-20T09:30:00Z\",\"day\":\"2026-02-30\",\"length\":\"1h\"}",
+        "{\"title\":\"x\",\"at\":\"2026-11-20T09:30:00Z\",\"day\":\"2026-11-20\",\"length\":5}",
+    ]:
+        print(json.decode[Meeting](bad).unwrap_err().message())
+    print(json.encode([datetime.date(2026, 1, 2)]), json.decode[list[datetime.Duration]]("[\"1s\", \"2m\"]").unwrap())
+
+    # The test clock.
+    datetime.set_clock_for_tests(datetime.at(2030, 5, 6, 7, 8, 9))
+    print("clock", datetime.now(), datetime.today(), datetime.today(howe))
+    datetime.set_clock_for_tests(None)
+    print("real clock", datetime.now() > datetime.at(2026, 1, 1))
+    datetime.sleep(datetime.millis(1))

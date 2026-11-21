@@ -1,0 +1,24 @@
+error[E0201]: `Twice` implements `JsonString` and also derives `Json`
+ --> tests/ui/json_string_misuse.vi:7:6
+  |
+3 | @derive(Json)
+  |         ---- and so does this
+  ...
+7 | impl JsonString for Twice:
+  |      ^^^^^^^^^^^^^^^^^^^^ this implements `ToJson` and `FromJson`
+  |
+  = help: a `JsonString` type is written as a JSON string; remove `Json` from `@derive(...)`
+
+error[E0328]: `to_json_string` does not match its declaration in `JsonString`
+  --> tests/ui/json_string_misuse.vi:18:9
+   |
+18 |     def to_json_string(self) -> int:
+   |         ^^^^^^^^^^^^^^ the return type should be `str`
+
+error[E0328]: `from_json_string` does not match its declaration in `JsonString`
+  --> tests/ui/json_string_misuse.vi:21:9
+   |
+21 |     def from_json_string(text: str) -> Wrong:
+   |         ^^^^^^^^^^^^^^^^ the return type should be `Result[Wrong, str]`
+
+error: could not compile `tests/ui/json_string_misuse.vi` due to 3 errors

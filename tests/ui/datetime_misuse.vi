@@ -1,0 +1,15 @@
+# Mistakes with the datetime module: operators it has methods for instead, its private fields,
+# and floats where it takes durations.
+import datetime
+import time
+
+def main():
+    t = datetime.now()
+    later = t + datetime.hours(1)
+    earlier = t - datetime.minutes(5)
+    gap = t - t
+    raw = datetime.DateTime(0, 0, 0, 0)
+    datetime.sleep(1.5)
+    time.sleep(datetime.seconds(1))
+    half = datetime.seconds(1.5)
+    print(later, earlier, gap, raw, half)

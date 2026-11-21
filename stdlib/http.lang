@@ -18,6 +18,7 @@ A handler returns `Result[http.Response]`. An error becomes a response: an `http
 logged, with a generic message for the client. `server.on_error(...)` replaces that mapping.
 """
 
+import datetime
 import json as jsonlib
 import log
 
@@ -112,7 +113,7 @@ def docs_asset(index: int) -> str
 def docs_hash(text: str) -> int
 
 @extern("lrt_http_client")
-def client_raw(method: str, url: str, headers: str, body: str) -> int
+def client_raw(method: str, url: str, headers: str, body: str, timeout_ns: int) -> int
 
 @extern("lrt_http_client_headers")
 def client_headers() -> str
@@ -1904,8 +1905,8 @@ pub def upgrade(req: Request, handler: WsHandler) -> Result[Response]:
 
 pub struct ClientError:
     """A request that got no response: the host could not be reached, it closed the connection
-    early, it timed out (after 30 seconds), its TLS certificate is not trusted, or the URL is
-    not `http://` or `https://`."""
+    early, it timed out (after 30 seconds, unless the call gave a `timeout`), its TLS certificate
+    is not trusted, or the URL is not `http://` or `https://`."""
     url: str
     reason: str
 
@@ -1960,13 +1961,20 @@ pub def decode_json[T: FromJson](response: ClientResponse) -> Result[T, ClientEr
         case Err(error):
             return Err(ClientError(response.url, f"invalid JSON: {error.message()}"))
 
-pub def fetch(method: str, url: str, body: str = "", headers: dict[str, str] = {}) -> Result[ClientResponse, ClientError]:
-    """Send a request and wait for the whole response. A task waiting here does not hold a
-    worker. `https://` URLs use TLS, checking the server's certificate."""
+pub def fetch(
+    method: str,
+    url: str,
+    body: str = "",
+    headers: dict[str, str] = {},
+    timeout: datetime.Duration = datetime.seconds(30),
+) -> Result[ClientResponse, ClientError]:
+    """Send a request and wait for the whole response, for at most `timeout` from connecting to
+    the last byte. A task waiting here does not hold a worker. `https://` URLs use TLS, checking
+    the server's certificate."""
     lines = ""
     for name, value in headers.items():
         lines = lines + f"{name}: {value}\r\n"
-    status = client_raw(method, url, lines, body)
+    status = client_raw(method, url, lines, body, timeout.nanoseconds())
     if status < 0:
         return Err(ClientError(url, last_error()))
     parsed: dict[str, str] = {}

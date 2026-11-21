@@ -98,6 +98,14 @@ impl<'ctx> Codegen<'ctx, '_> {
             self.b.build_return(None).must();
             return;
         }
+        if let Some(function) = self.explicit_method(self.program.builtins.json_string, ty, 0) {
+            // `JsonString`: the text its method gives, as a JSON string.
+            let text = self.call_method(function, &[value]).unwrap();
+            let [ptr, len] = self.str_parts(text);
+            self.call_rt("lrt_builder_push_json_str", &[builder.into(), ptr, len]);
+            self.b.build_return(None).must();
+            return;
+        }
         match self.kind(ty).clone() {
             TyKind::Option(inner) => {
                 let present = self.opt_is_some(ty, value);
@@ -326,6 +334,29 @@ impl<'ctx> Codegen<'ctx, '_> {
 
     fn decode_body(&mut self, reader: PointerValue<'ctx>, ty: Ty, out: PointerValue<'ctx>, fail: BasicBlock<'ctx>) {
         let r: BasicValueEnum = reader.into();
+        let json_string = self.program.builtins.json_string;
+        if let Some(func) = self.program.impl_of(json_string, ty).and_then(|i| i.methods.get(1).copied().flatten()) {
+            // `JsonString`: a JSON string, handed to `from_json_string`; its error is the message.
+            let text = self.call_rt("lrt_json_read_str", &[r]).unwrap();
+            let ptr = self.b.build_extract_value(text.into_struct_value(), 0, "").must().into_pointer_value();
+            let ok = self.b.build_is_not_null(ptr, "").must();
+            self.or_fail(ok, fail);
+            let result_ty = self.program.functions[func.0].ret;
+            let function = self.function_value(func);
+            let result = self.call_method(function, &[text]).unwrap();
+            let ok = self.result_is_ok(result);
+            let (good, bad) = (self.block("parsed"), self.block("unparsed"));
+            self.b.build_conditional_branch(ok, good, bad).must();
+            self.b.position_at_end(bad);
+            let message = self.result_err(result_ty, result);
+            let [ptr, len] = self.str_parts(message);
+            self.call_rt("lrt_json_fail", &[r, ptr, len]);
+            self.b.build_unconditional_branch(fail).must();
+            self.b.position_at_end(good);
+            let value = self.result_ok(result_ty, result).unwrap();
+            self.b.build_store(out, value).must();
+            return;
+        }
         match self.kind(ty).clone() {
             TyKind::Int => {
                 let ok = self.call_rt("lrt_json_read_int", &[r, out.into()]).unwrap();

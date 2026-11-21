@@ -54,6 +54,8 @@ pub struct BuiltinTraits {
     pub shareable: TraitId,
     pub to_json: TraitId,
     pub from_json: TraitId,
+    /// `JsonString`: written to JSON as a string. Implementing it implements the two above.
+    pub json_string: TraitId,
 }
 
 /// The standard library's `json` module, when the program imports it.

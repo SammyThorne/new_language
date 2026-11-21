@@ -1,0 +1,603 @@
+"""
+Dates, times, durations and time zones.
+
+    import datetime
+
+    now = datetime.now()                                    # a DateTime, in UTC
+    t = datetime.parse("2026-11-20T09:30:00+01:00")?        # RFC 3339
+    print(t)                                                # 2026-11-20T09:30:00+01:00
+    print(t.utc())                                          # 2026-11-20T08:30:00Z
+    london = datetime.zone("Europe/London")?
+    print(t.to_zone(london).format("%Y-%m-%d %H:%M %Z"))    # 2026-11-20 08:30 GMT
+    later = t.add(datetime.hours(2))
+    print(later.since(t))                                   # 2h0m0s
+    print(datetime.date(2026, 11, 20).weekday())            # 4 (Friday; Monday is 0)
+    print(datetime.minutes(5).seconds())                    # 300.0
+
+- `DateTime` is an instant, kept to the nanosecond, with the zone it is shown in. Two values are
+  equal, and ordered, by the instant alone.
+- `Date` is a day in the calendar, without a time or zone.
+- `Duration` is a signed count of nanoseconds (up to about 292 years either way).
+- `Zone` is a time zone: UTC, a fixed offset, or a zone from the time zone database.
+
+All four are immutable and can be shared between tasks. They are written to JSON as strings:
+RFC 3339, `YYYY-MM-DD`, and Go's duration syntax (`"1h30m0s"`). Years run from 1 to 9999.
+
+Time zones are read from the TZif files in `TZDIR`, or `/usr/share/zoneinfo` when it is not
+set, and cached. Windows has no such directory: set `TZDIR` to a copy of one, or use only UTC
+and fixed offsets.
+"""
+
+import time
+
+@extern("lrt_dt_now_ns")
+def now_ns() -> int
+
+@extern("lrt_dt_set_clock")
+def set_clock(ns: int, on: int)
+
+@extern("lrt_dt_days")
+def days_raw(year: int, month: int, day: int) -> int
+
+@extern("lrt_dt_civil")
+def civil(days: int, part: int) -> int
+
+@extern("lrt_dt_parse")
+def parse_raw(text: str) -> int
+
+@extern("lrt_dt_parsed")
+def parsed(part: int) -> int
+
+@extern("lrt_dt_parse_date")
+def parse_date_raw(text: str) -> int
+
+@extern("lrt_dt_parse_duration")
+def parse_duration_raw(text: str) -> int
+
+@extern("lrt_dt_duration_str")
+def duration_str(ns: int) -> str
+
+@extern("lrt_dt_format_iso")
+def format_iso_raw(seconds: int, nano: int, offset: int) -> str
+
+@extern("lrt_dt_format")
+def format_raw(seconds: int, nano: int, offset: int, abbrev: str, pattern: str) -> str
+
+@extern("lrt_tz_load")
+def tz_load(name: str) -> int
+
+@extern("lrt_tz_local")
+def tz_local() -> int
+
+@extern("lrt_tz_offset")
+def tz_offset(id: int, seconds: int) -> int
+
+@extern("lrt_tz_abbrev")
+def tz_abbrev(id: int, seconds: int) -> str
+
+@extern("lrt_tz_is_dst")
+def tz_is_dst(id: int, seconds: int) -> int
+
+@extern("lrt_tz_resolve")
+def tz_resolve(id: int, local: int) -> int
+
+@extern("lrt_tz_name")
+def tz_name(id: int) -> str
+
+@extern("lrt_time_sleep")
+def sleep_raw(seconds: float)
+
+@extern("lrt_io_error")
+def last_error() -> str
+
+const NS_PER_SECOND: int = 1_000_000_000
+const SECONDS_PER_DAY: int = 86_400
+
+pub struct DateTimeError:
+    """Text that is not a valid date, time or duration, a date that does not exist, or a time
+    zone that cannot be loaded."""
+    reason: str
+
+impl Error for DateTimeError:
+    def message(self) -> str:
+        return self.reason
+
+    def status(self) -> int:
+        """Returned from a handler, it is a 400 Bad Request: the text usually came from the
+        request."""
+        return 400
+
+def failed[T]() -> Result[T, DateTimeError]:
+    return Err(DateTimeError(last_error()))
+
+# ---- durations -----------------------------------------------------------------------------
+
+@frozen
+@derive(Eq, Hash)
+pub struct Duration:
+    """A signed span of time in nanoseconds. Add and subtract durations with `+` and `-`, and
+    compare them with `<`. It prints in Go's syntax: `1h30m0s`, `1.5s`, `300ms`."""
+    priv ns: int
+
+impl Duration:
+    def nanoseconds(self) -> int:
+        return self.ns
+
+    def microseconds(self) -> int:
+        """Whole microseconds, rounded toward zero."""
+        return truncate(self.ns, 1_000)
+
+    def milliseconds(self) -> int:
+        """Whole milliseconds, rounded toward zero."""
+        return truncate(self.ns, 1_000_000)
+
+    def seconds(self) -> float:
+        return float(self.ns) / 1e9
+
+    def minutes(self) -> float:
+        return float(self.ns) / 6e10
+
+    def hours(self) -> float:
+        return float(self.ns) / 3.6e12
+
+    def times(self, n: int) -> Duration:
+        """This duration `n` times over."""
+        return Duration(self.ns * n)
+
+    def abs(self) -> Duration:
+        if self.ns < 0:
+            return Duration(-self.ns)
+        return self
+
+    def is_negative(self) -> bool:
+        return self.ns < 0
+
+def truncate(n: int, unit: int) -> int:
+    if n < 0:
+        return -(-n // unit)
+    return n // unit
+
+impl Ord for Duration:
+    def cmp(self, other: Duration) -> int:
+        if self.ns < other.ns:
+            return -1
+        if self.ns > other.ns:
+            return 1
+        return 0
+
+impl AddNumber for Duration:
+    def add(self, other: Duration) -> Duration:
+        return Duration(self.ns + other.ns)
+
+impl SubNumber for Duration:
+    def sub(self, other: Duration) -> Duration:
+        return Duration(self.ns - other.ns)
+
+impl Display for Duration:
+    def to_str(self) -> str:
+        return duration_str(self.ns)
+
+impl JsonString for Duration:
+    def to_json_string(self) -> str:
+        return duration_str(self.ns)
+
+    def from_json_string(text: str) -> Result[Duration, str]:
+        match parse_duration(text):
+            case Ok(d):
+                return d
+            case Err(e):
+                return Err(e.reason)
+
+pub def nanos(n: int) -> Duration:
+    return Duration(n)
+
+pub def micros(n: int) -> Duration:
+    return Duration(n * 1_000)
+
+pub def millis(n: int) -> Duration:
+    return Duration(n * 1_000_000)
+
+pub def seconds(n: int) -> Duration:
+    """`n` seconds. For a fraction of a second, use `millis` (or `parse_duration("1.5s")`)."""
+    return Duration(n * NS_PER_SECOND)
+
+pub def minutes(n: int) -> Duration:
+    return Duration(n * 60 * NS_PER_SECOND)
+
+pub def hours(n: int) -> Duration:
+    return Duration(n * 3600 * NS_PER_SECOND)
+
+pub def days(n: int) -> Duration:
+    """`n` times 24 hours. Across a daylight saving change that is not the same time of day; use
+    `Date.add_days` for calendar days."""
+    return Duration(n * SECONDS_PER_DAY * NS_PER_SECOND)
+
+pub def parse_duration(text: str) -> Result[Duration, DateTimeError]:
+    """Go's syntax: an optional sign, then numbers with units, as in `"1h30m"`, `"1.5s"` or
+    `"-300ms"`. The units are `ns`, `us` (or `µs`), `ms`, `s`, `m` and `h`; `"0"` needs none."""
+    ns = parse_duration_raw(text)
+    if ns == 0:
+        error = last_error()
+        if error != "":
+            return Err(DateTimeError(error))
+    return Duration(ns)
+
+pub def sleep(d: Duration):
+    """Pause the current task for a duration. Other tasks keep running."""
+    sleep_raw(d.seconds())
+
+# ---- zones ---------------------------------------------------------------------------------
+
+@frozen
+@derive(Eq, Hash)
+pub struct Zone:
+    """A time zone: UTC, a fixed offset from it, or a zone from the time zone database."""
+    priv id: int
+    priv fixed: int = 0
+
+impl Zone:
+    def name(self) -> str:
+        """`"Europe/London"`, `"UTC"`, or for a fixed offset `"+05:30"`."""
+        if self.id != 0:
+            return tz_name(self.id)
+        if self.fixed == 0:
+            return "UTC"
+        return offset_text(self.fixed)
+
+    def offset_at(self, t: DateTime) -> Duration:
+        """How far ahead of UTC the zone's clocks are at an instant."""
+        return seconds(self.offset_seconds(t.secs))
+
+    def is_dst(self, t: DateTime) -> bool:
+        """Whether the zone keeps daylight saving time at an instant."""
+        return self.id != 0 and tz_is_dst(self.id, t.secs) == 1
+
+    priv def offset_seconds(self, secs: int) -> int:
+        if self.id == 0:
+            return self.fixed
+        return tz_offset(self.id, secs)
+
+    priv def abbrev(self, secs: int) -> str:
+        if self.id == 0:
+            return self.name()
+        return tz_abbrev(self.id, secs)
+
+impl Display for Zone:
+    def to_str(self) -> str:
+        return self.name()
+
+def offset_text(offset: int) -> str:
+    sign = "+"
+    n = offset
+    if n < 0:
+        sign = "-"
+        n = -n
+    return f"{sign}{n // 3600:02}:{n // 60 % 60:02}"
+
+pub def utc() -> Zone:
+    return Zone(0)
+
+pub def local() -> Zone:
+    """The machine's zone: from the `TZ` environment variable, or `/etc/localtime`; UTC when
+    neither names one."""
+    return Zone(tz_local())
+
+pub def zone(name: str) -> Result[Zone, DateTimeError]:
+    """A zone by its IANA name, such as `"America/New_York"`. `"UTC"` always works."""
+    if name == "UTC" or name == "Etc/UTC":
+        return Zone(0)
+    id = tz_load(name)
+    if id == 0:
+        return failed[Zone]()
+    return Zone(id)
+
+pub def fixed_zone(offset: Duration) -> Zone:
+    """A zone always `offset` ahead of UTC (behind, when negative), to the second."""
+    return Zone(0, offset.ns // NS_PER_SECOND)
+
+# ---- dates ---------------------------------------------------------------------------------
+
+@frozen
+@derive(Eq, Hash, Ord)
+pub struct Date:
+    """A day in the (proleptic Gregorian) calendar. It prints as `2026-11-20`."""
+    priv n: int
+
+impl Date:
+    def year(self) -> int:
+        return civil(self.n, 0)
+
+    def month(self) -> int:
+        """1 to 12."""
+        return civil(self.n, 1)
+
+    def day(self) -> int:
+        """1 to 31."""
+        return civil(self.n, 2)
+
+    def weekday(self) -> int:
+        """0 for Monday up to 6 for Sunday."""
+        return civil(self.n, 3)
+
+    def day_of_year(self) -> int:
+        """1 for January 1st."""
+        return civil(self.n, 4)
+
+    def add_days(self, n: int) -> Date:
+        return checked_date(self.n + n)
+
+    def days_since(self, other: Date) -> int:
+        """Days from `other` to this date; negative if `other` is later."""
+        return self.n - other.n
+
+    def at(self, hour: int = 0, minute: int = 0, second: int = 0, zone: Zone = Zone(0, 0)) -> DateTime:
+        """The instant this date shows the given wall-clock time in a zone (UTC by default). A
+        time that happens twice, as clocks go back, is the earlier; one that never happens, as
+        clocks go forward, is moved forward by the size of the gap."""
+        check_time(hour, minute, second, 0)
+        return wall(self.n * SECONDS_PER_DAY + hour * 3600 + minute * 60 + second, 0, zone)
+
+    def format(self, pattern: str) -> str:
+        """The date with `DateTime.format`'s directives; the time is midnight UTC."""
+        return format_checked(self.n * SECONDS_PER_DAY, 0, 0, "UTC", pattern)
+
+impl Display for Date:
+    def to_str(self) -> str:
+        return f"{self.year():04}-{self.month():02}-{self.day():02}"
+
+impl JsonString for Date:
+    def to_json_string(self) -> str:
+        return str(self)
+
+    def from_json_string(text: str) -> Result[Date, str]:
+        match parse_date(text):
+            case Ok(d):
+                return d
+            case Err(e):
+                return Err(e.reason)
+
+def checked_date(n: int) -> Date:
+    year = civil(n, 0)
+    if year < 1 or year > 9999:
+        panic(f"the date is out of range: year {year} (years run from 1 to 9999)")
+    return Date(n)
+
+pub def date(year: int, month: int, day: int) -> Date:
+    """A date. It panics if there is no such day; use `parse_date` for text from users."""
+    n = days_raw(year, month, day)
+    if n == 0:
+        error = last_error()
+        if error != "":
+            panic(f"datetime.date({year}, {month}, {day}): {error}")
+    return Date(n)
+
+pub def parse_date(text: str) -> Result[Date, DateTimeError]:
+    """`YYYY-MM-DD`."""
+    n = parse_date_raw(text)
+    if n == 0:
+        error = last_error()
+        if error != "":
+            return Err(DateTimeError(error))
+    return Date(n)
+
+pub def today(zone: Zone = Zone(0, 0)) -> Date:
+    """Today's date in a zone (UTC by default)."""
+    return now().to_zone(zone).date()
+
+# ---- instants ------------------------------------------------------------------------------
+
+@frozen
+pub struct DateTime:
+    """An instant, to the nanosecond, shown in a zone. `==`, `<` and `hash` look at the instant
+    alone, so the same moment in two zones is equal. It prints in RFC 3339."""
+    priv secs: int
+    priv nano: int
+    priv offset: int
+    priv zone_id: int
+
+impl DateTime:
+    def unix(self) -> int:
+        """Whole seconds since 1970-01-01 UTC, rounded down."""
+        return self.secs
+
+    def unix_millis(self) -> int:
+        """Milliseconds since 1970-01-01 UTC, rounded down."""
+        return self.secs * 1000 + self.nano // 1_000_000
+
+    def nanosecond(self) -> int:
+        """0 to 999,999,999: the fraction of the second."""
+        return self.nano
+
+    def year(self) -> int:
+        return civil(self.local_days(), 0)
+
+    def month(self) -> int:
+        return civil(self.local_days(), 1)
+
+    def day(self) -> int:
+        return civil(self.local_days(), 2)
+
+    def hour(self) -> int:
+        return self.local_seconds() // 3600
+
+    def minute(self) -> int:
+        return self.local_seconds() // 60 % 60
+
+    def second(self) -> int:
+        return self.local_seconds() % 60
+
+    def weekday(self) -> int:
+        """0 for Monday up to 6 for Sunday."""
+        return civil(self.local_days(), 3)
+
+    def date(self) -> Date:
+        """The date in this value's zone."""
+        return Date(self.local_days())
+
+    def zone(self) -> Zone:
+        return Zone(self.zone_id, self.offset if self.zone_id == 0 else 0)
+
+    def utc_offset(self) -> Duration:
+        """How far ahead of UTC this value's clock is."""
+        return seconds(self.offset)
+
+    def to_zone(self, zone: Zone) -> DateTime:
+        """The same instant, shown in another zone."""
+        return at_instant(self.secs, self.nano, zone)
+
+    def in_zone(self, name: str) -> Result[DateTime, DateTimeError]:
+        """The same instant, shown in a zone named as `datetime.zone` takes it."""
+        return self.to_zone(zone(name)?)
+
+    def utc(self) -> DateTime:
+        return DateTime(self.secs, self.nano, 0, 0)
+
+    def add(self, d: Duration) -> DateTime:
+        """The instant `d` later (earlier when `d` is negative), in the same zone."""
+        secs = self.secs + d.ns // NS_PER_SECOND
+        nano = self.nano + d.ns % NS_PER_SECOND
+        if nano >= NS_PER_SECOND:
+            secs = secs + 1
+            nano = nano - NS_PER_SECOND
+        return at_instant(secs, nano, self.zone())
+
+    def sub(self, d: Duration) -> DateTime:
+        """The instant `d` earlier."""
+        return self.add(Duration(-d.ns))
+
+    def since(self, other: DateTime) -> Duration:
+        """The time from `other` to this instant; negative if `other` is later."""
+        return Duration((self.secs - other.secs) * NS_PER_SECOND + self.nano - other.nano)
+
+    def format_iso(self) -> str:
+        """RFC 3339, with `Z` for UTC and only as many fractional digits as it needs:
+        `2026-11-20T09:30:00Z`, `2026-11-20T09:30:00.25+01:00`."""
+        return format_iso_raw(self.secs, self.nano, self.offset)
+
+    def format(self, pattern: str) -> str:
+        """The value in a pattern of strftime directives: `%Y` year, `%m` month, `%d` day, `%H`
+        hour (00 to 23), `%M` minute, `%S` second, `%f` microseconds (6 digits), `%z` offset
+        (`+0100`), `%Z` zone abbreviation (`BST`), `%a` and `%A` weekday (`Fri`, `Friday`), `%b`
+        and `%B` month (`Nov`, `November`), `%j` day of the year (001 to 366), and `%%`. Any
+        other directive panics."""
+        return format_checked(self.secs, self.nano, self.offset, self.zone().abbrev(self.secs), pattern)
+
+    def http_date(self) -> str:
+        """The form HTTP headers use (IMF-fixdate): `Fri, 20 Nov 2026 08:30:00 GMT`."""
+        return format_raw(self.secs, 0, 0, "", "%a, %d %b %Y %H:%M:%S GMT")
+
+    priv def local_days(self) -> int:
+        return (self.secs + self.offset) // SECONDS_PER_DAY
+
+    priv def local_seconds(self) -> int:
+        return (self.secs + self.offset) % SECONDS_PER_DAY
+
+impl Eq for DateTime:
+    def eq(self, other: DateTime) -> bool:
+        return self.secs == other.secs and self.nano == other.nano
+
+impl Hash for DateTime:
+    def hash(self) -> int:
+        return self.secs * 1_000_003 + self.nano
+
+impl Ord for DateTime:
+    def cmp(self, other: DateTime) -> int:
+        if self.secs != other.secs:
+            return -1 if self.secs < other.secs else 1
+        if self.nano != other.nano:
+            return -1 if self.nano < other.nano else 1
+        return 0
+
+impl Display for DateTime:
+    def to_str(self) -> str:
+        return self.format_iso()
+
+impl JsonString for DateTime:
+    def to_json_string(self) -> str:
+        return self.format_iso()
+
+    def from_json_string(text: str) -> Result[DateTime, str]:
+        match parse(text):
+            case Ok(t):
+                return t
+            case Err(e):
+                return Err(e.reason)
+
+def at_instant(secs: int, nano: int, zone: Zone) -> DateTime:
+    return DateTime(secs, nano, zone.offset_seconds(secs), zone.id)
+
+def wall(local: int, nano: int, zone: Zone) -> DateTime:
+    """The instant a wall-clock time (seconds since the epoch, as if in UTC) names in a zone."""
+    offset = zone.fixed
+    if zone.id != 0:
+        offset = tz_resolve(zone.id, local)
+    return at_instant(local - offset, nano, zone)
+
+def check_time(hour: int, minute: int, second: int, nanosecond: int):
+    if hour < 0 or hour > 23:
+        panic(f"hour {hour} is out of range (0 to 23)")
+    if minute < 0 or minute > 59:
+        panic(f"minute {minute} is out of range (0 to 59)")
+    if second < 0 or second > 59:
+        panic(f"second {second} is out of range (0 to 59)")
+    if nanosecond < 0 or nanosecond >= NS_PER_SECOND:
+        panic(f"nanosecond {nanosecond} is out of range (0 to 999999999)")
+
+def format_checked(secs: int, nano: int, offset: int, abbrev: str, pattern: str) -> str:
+    text = format_raw(secs, nano, offset, abbrev, pattern)
+    if text == "":
+        error = last_error()
+        if error != "":
+            panic(error)
+    return text
+
+pub def now() -> DateTime:
+    """The current instant, in UTC. In tests, `set_clock_for_tests` can fix it."""
+    ns = now_ns()
+    return DateTime(ns // NS_PER_SECOND, ns % NS_PER_SECOND, 0, 0)
+
+pub def at(
+    year: int,
+    month: int,
+    day: int,
+    hour: int = 0,
+    minute: int = 0,
+    second: int = 0,
+    nanosecond: int = 0,
+    zone: Zone = Zone(0, 0),
+) -> DateTime:
+    """The instant a date and wall-clock time name in a zone (UTC by default). It panics if
+    the date or time does not exist; use `parse` for text from users. A time that happens twice,
+    as clocks go back, is the earlier; one that never happens, as clocks go forward, is moved
+    forward by the size of the gap."""
+    d = date(year, month, day)
+    check_time(hour, minute, second, nanosecond)
+    return wall(d.n * SECONDS_PER_DAY + hour * 3600 + minute * 60 + second, nanosecond, zone)
+
+pub def from_unix(seconds: int, nanosecond: int = 0) -> DateTime:
+    """The instant `seconds` after 1970-01-01 UTC, in UTC."""
+    check_time(0, 0, 0, nanosecond)
+    return DateTime(seconds, nanosecond, 0, 0)
+
+pub def from_unix_millis(ms: int) -> DateTime:
+    """The instant `ms` milliseconds after 1970-01-01 UTC, as JavaScript counts them."""
+    return DateTime(ms // 1000, ms % 1000 * 1_000_000, 0, 0)
+
+pub def parse(text: str) -> Result[DateTime, DateTimeError]:
+    """RFC 3339, and the ISO 8601 forms close to it: `T` or a space between the date and the
+    time, seconds optional, up to 9 digits of fractional seconds, and `Z` or an offset written
+    `+01:00`, `+0100` or `+01`. The value keeps the offset it was written with. The error says
+    which character was unexpected."""
+    secs = parse_raw(text)
+    if parsed(2) == 0:
+        return Err(DateTimeError(last_error()))
+    return DateTime(secs, parsed(0), parsed(1), 0)
+
+pub def set_clock_for_tests(fixed: DateTime?):
+    """Make `now()` and `today()` return `fixed`, in every task, until it is called with
+    `None`. For tests only."""
+    match fixed:
+        case Some(t):
+            set_clock(t.secs * NS_PER_SECOND + t.nano, 1)
+        case None:
+            set_clock(0, 0)

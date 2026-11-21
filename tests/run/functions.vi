@@ -5,6 +5,15 @@
 # expect: -9223372036854775808
 # expect: 6
 # expect: -2 -9223372036854775808
+# expect: 8 9 10
+
+struct Pen:
+    width: int
+    extra: int = 7
+
+def pen_size(pen: Pen = Pen(1)) -> int:
+    # A default that constructs a struct whose own field has a default.
+    return pen.width + pen.extra
 
 def greet(name: str):
     print("Hello,", name)
@@ -22,6 +31,7 @@ def main():
     print(area(2, 3))  # functions may be defined after their use
     lowest = -9223372036854775808
     print(-5 - -3, lowest)
+    print(pen_size(), pen_size(Pen(2)), pen_size(Pen(1, 9)))
 
 def area(width: int, height: int) -> int:
     return width * height
