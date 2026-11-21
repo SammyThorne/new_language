@@ -129,7 +129,9 @@
     const nullable = kinds.includes("null") && kinds.length > 1;
     const kind = kinds.filter((t) => t !== "null")[0] || (schema.properties ? "object" : "any");
     let label = kind;
-    if (kind === "array") {
+    if (kind === "string" && schema.format === "binary") {
+      label = "file";
+    } else if (kind === "array") {
       if (Array.isArray(schema.prefixItems)) {
         label = "[" + schema.prefixItems.map((s) => typeLabel(doc, s)).join(", ") + "]";
       } else {
@@ -193,9 +195,52 @@
     return [op.method, op.path, op.summary, op.tag, op.id].some((field) => String(field).toLowerCase().includes(text));
   }
 
+  const URLENCODED = "application/x-www-form-urlencoded";
+  const MULTIPART = "multipart/form-data";
+
+  /** The media type an operation's form body is sent as, or `null` if it takes no form. */
+  function formMedia(op) {
+    const content = (op.requestBody && op.requestBody.content) || {};
+    if (content["application/json"]) return null;
+    if (content[URLENCODED]) return URLENCODED;
+    if (content[MULTIPART]) return MULTIPART;
+    return null;
+  }
+
+  function isFile(doc, schema) {
+    const resolved = resolve(doc, schema);
+    return types(resolved).includes("string") && resolved.format === "binary";
+  }
+
+  /**
+   * The fields of a form body's schema, through `allOf`: each with its `name`, `schema`,
+   * whether it is `required`, a `file`, and `multiple` (an array).
+   */
+  function formFields(doc, schema) {
+    const fields = [];
+    const visit = (raw, depth) => {
+      if (depth > MAX_DEPTH) return;
+      const resolved = resolve(doc, raw);
+      for (const part of Array.isArray(resolved.allOf) ? resolved.allOf : []) visit(part, depth + 1);
+      const properties = resolved.properties || {};
+      const required = Array.isArray(resolved.required) ? resolved.required : [];
+      for (const name of Object.keys(properties)) {
+        if (fields.some((f) => f.name === name)) continue;
+        const property = resolve(doc, properties[name]);
+        const multiple = types(property).includes("array");
+        const file = isFile(doc, property) || (multiple && isFile(doc, property.items));
+        fields.push({ name, schema: property, required: required.includes(name), file, multiple });
+      }
+    };
+    visit(schema, 0);
+    return fields;
+  }
+
   /**
    * The request an operation makes with the values typed in: `values.params` maps `in:name` to
-   * text, `values.body` is the body text, `auth` maps security scheme names to credentials.
+   * text, `values.body` is the body text, `values.form` maps a form field's name to its text
+   * or to a list of files, and `auth` maps security scheme names to credentials. A multipart
+   * form comes back as `form`, a list of `[name, value]` for the page to send as `FormData`.
    */
   function buildRequest(doc, op, values, baseUrl, auth) {
     const params = (values && values.params) || {};
@@ -224,7 +269,25 @@
     applyAuth(doc, op, auth || {}, headers, query, cookies);
     if (cookies.length > 0) headers.Cookie = cookies.join("; ");
     let body = null;
-    if (op.requestBody) {
+    let form = null;
+    const media = formMedia(op);
+    if (media) {
+      const typed = (values && values.form) || {};
+      const entries = [];
+      for (const field of formFields(doc, op.requestBody.content[media].schema)) {
+        const value = typed[field.name];
+        const list = Array.isArray(value) ? value : value === undefined || value === "" ? [] : [value];
+        if (list.length === 0 && field.required) missing.push(field.name);
+        for (const item of list) entries.push([field.name, item]);
+      }
+      if (media === URLENCODED) {
+        body = entries.map(([name, value]) => encodeURIComponent(name) + "=" + encodeURIComponent(value)).join("&");
+        headers["Content-Type"] = URLENCODED;
+      } else {
+        // The browser writes the boundary into the Content-Type.
+        form = entries;
+      }
+    } else if (op.requestBody) {
       const text = values && typeof values.body === "string" ? values.body : "";
       if (text.trim() !== "") {
         body = text;
@@ -235,7 +298,7 @@
     }
     const base = String(baseUrl || "").replace(/\/+$/, "");
     const url = base + path + (query.length > 0 ? "?" + query.join("&") : "");
-    return { method: op.method.toUpperCase(), url, headers, body, missing };
+    return { method: op.method.toUpperCase(), url, headers, body, form, missing };
   }
 
   /** Add the credentials of the security schemes the operation uses. */
@@ -288,6 +351,11 @@
       parts.push("-H", shellQuote(name + ": " + request.headers[name]));
     }
     if (request.body !== null && request.body !== undefined) parts.push("--data", shellQuote(request.body));
+    for (const [name, value] of request.form || []) {
+      // A file is sent from a local path of the same name; text exactly as typed.
+      if (typeof value === "string") parts.push("--form-string", shellQuote(name + "=" + value));
+      else parts.push("-F", shellQuote(name + "=@" + value.name));
+    }
     return parts.join(" ");
   }
 
@@ -416,6 +484,8 @@
     operations,
     matches,
     buildRequest,
+    formMedia,
+    formFields,
     curl,
     shellQuote,
     escapeHtml,

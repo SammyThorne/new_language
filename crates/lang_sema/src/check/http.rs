@@ -42,6 +42,9 @@ pub(super) struct HttpTypes {
     websocket: Ty,
     header: Ty,
     cookie: Ty,
+    upload: Ty,
+    /// The generic struct `Form[T]`.
+    form: usize,
 }
 
 /// The `auth` module's types, when the program imports it (docs/13).
@@ -78,6 +81,23 @@ impl Scalar {
 }
 
 #[derive(Clone, Debug)]
+pub(super) enum UploadKind {
+    One,
+    Optional,
+    List,
+}
+
+impl UploadKind {
+    pub(super) fn suffix(&self) -> &'static str {
+        match self {
+            UploadKind::One => "",
+            UploadKind::Optional => "_opt",
+            UploadKind::List => "_list",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(super) enum Binding {
     Request,
     /// The connection, in a WebSocket handler.
@@ -97,6 +117,13 @@ pub(super) enum Binding {
         kind: Scalar,
     },
     Body(Ty),
+    /// `signup: http.Form[T]`: the form's text fields, decoded into `T`.
+    Form(Ty),
+    /// `avatar: http.Upload`, `http.Upload?` or `list[http.Upload]`: the files sent as `avatar`.
+    Upload {
+        name: String,
+        kind: UploadKind,
+    },
     /// `user: auth.User`, or `auth.User?`: the signed-in user.
     User {
         optional: bool,
@@ -179,7 +206,11 @@ impl<'m> Checker<'_, 'm> {
         ) else {
             return;
         };
-        self.http = Some(HttpTypes { module, server, group, request, response, websocket, header, cookie });
+        let Some(upload) = struct_ty(self, "Upload") else { return };
+        let Some((Global::GenericStruct(form), _, _)) = self.exports[module].get("Form") else { return };
+        let form = *form;
+        self.http =
+            Some(HttpTypes { module, server, group, request, response, websocket, header, cookie, upload, form });
     }
 
     /// Find the `auth` module's types if the program imports it.
@@ -295,6 +326,41 @@ impl<'m> Checker<'_, 'm> {
             diagnostic = diagnostic.with_help(help);
         }
         self.error(diagnostic);
+    }
+
+    fn form_conflict(&mut self, message: String, span: Span, label: &str) {
+        self.error(
+            Diagnostic::error(codes::FORM_CONFLICT, message, span, label).with_help(
+                "a request has one body: take a JSON body, or the form's fields (`http.Form[T]`) and files (`http.Upload`), or `http.Request` and read it yourself",
+            ),
+        );
+    }
+
+    /// What an `http.Form[T]`, `http.Upload`, `http.Upload?` or `list[http.Upload]` parameter
+    /// binds (with the upload's name still to fill in); `Err(T)` for a form whose `T` is not
+    /// decodable; `None` for any other type.
+    fn form_binding(&mut self, ty: Ty) -> Option<Result<Binding, Ty>> {
+        let http = self.http?;
+        if let Some((template, args)) = self.instance_of.get(&ty)
+            && *template == http.form
+        {
+            let inner = args[0];
+            return Some(if self.json_capable_for(inner, self.builtin().from_json) {
+                Ok(Binding::Form(inner))
+            } else {
+                Err(inner)
+            });
+        }
+        let kind = if ty == http.upload {
+            UploadKind::One
+        } else if self.types.option_inner(ty) == Some(http.upload) {
+            UploadKind::Optional
+        } else if self.types.list_elem(ty) == Some(http.upload) {
+            UploadKind::List
+        } else {
+            return None;
+        };
+        Some(Ok(Binding::Upload { name: String::new(), kind }))
     }
 
     // ---- checking annotated handlers ----------------------------------------------------
@@ -527,6 +593,9 @@ impl<'m> Checker<'_, 'm> {
         let signature = self.signatures[func.0].clone();
         let mut params = Vec::new();
         let mut body: Option<String> = None;
+        // The first parameter read from a form, and the `http.Form[T]` one.
+        let mut form: Option<String> = None;
+        let mut form_fields: Option<String> = None;
         let mut used_names = Vec::new();
         for (index, param) in signature.params.iter().enumerate() {
             let ast_param = &function.params[index];
@@ -620,6 +689,57 @@ impl<'m> Checker<'_, 'm> {
                         .join("-");
                     Binding::Header { name, optional }
                 }
+            } else if let Some(binding) = self.form_binding(param.ty) {
+                let binding = match binding {
+                    Ok(binding) => binding,
+                    Err(inner) => {
+                        let shown = self.display(inner);
+                        self.route_error(
+                            format!("the fields of form `{}` cannot be decoded into a `{shown}`", param.name),
+                            param.hint_span,
+                            "not decodable",
+                            Some(&format!("add `@derive(Json)` to `{shown}`")),
+                        );
+                        return None;
+                    }
+                };
+                let binding = match binding {
+                    Binding::Upload { kind, .. } => Binding::Upload { name: param.name.clone(), kind },
+                    other => other,
+                };
+                if let Some(first) = &body {
+                    self.form_conflict(
+                        format!("`{}` reads the request body as a form, but `{first}` reads it as JSON", param.name),
+                        param.hint_span,
+                        "a form parameter",
+                    );
+                    return None;
+                }
+                if method == "GET" || method == "DELETE" || ws {
+                    let what = if ws { "a WebSocket endpoint".to_string() } else { format!("a {method} route") };
+                    let mut diagnostic = Diagnostic::error(
+                        codes::FORM_CONFLICT,
+                        format!("{what} has no request body to read form `{}` from", param.name),
+                        param.hint_span,
+                        "a form parameter",
+                    );
+                    diagnostic = diagnostic.with_help("use `@http.post` (or `put` or `patch`); a form sent with GET puts its fields in the query, so take them as query parameters");
+                    self.error(diagnostic);
+                    return None;
+                }
+                if matches!(binding, Binding::Form(_)) {
+                    if let Some(first) = &form_fields {
+                        self.form_conflict(
+                            format!("a handler has one form, but `{first}` and `{}` both want its fields", param.name),
+                            param.hint_span,
+                            "second `http.Form` parameter",
+                        );
+                        return None;
+                    }
+                    form_fields = Some(param.name.clone());
+                }
+                form.get_or_insert_with(|| param.name.clone());
+                binding
             } else if names.contains(&param.name) {
                 used_names.push(param.name.clone());
                 match self.scalar_of(param.ty) {
@@ -672,6 +792,14 @@ impl<'m> Checker<'_, 'm> {
                 };
                 Binding::Query { name: param.name.clone(), kind, optional, default }
             } else if self.json_capable_for(param.ty, self.builtin().from_json) {
+                if let Some(first) = &form {
+                    self.form_conflict(
+                        format!("`{}` reads the request body as JSON, but `{first}` reads it as a form", param.name),
+                        param.hint_span,
+                        "a JSON body parameter",
+                    );
+                    return None;
+                }
                 if let Some(first) = &body {
                     self.route_error(
                         format!("a handler has one JSON body, but `{first}` and `{}` both want it", param.name),
@@ -697,7 +825,7 @@ impl<'m> Checker<'_, 'm> {
                 let help = if matches!(self.types.kind(param.ty), TyKind::Struct(_) | TyKind::Enum(_)) {
                     format!("to read it from the JSON body, add `@derive(Json)` to `{shown}`")
                 } else {
-                    "a parameter is the request (`http.Request`), a `{name}` in the path, a JSON body, a header (`http.Header`), a cookie (`http.Cookie`), or a query parameter of type `int`, `float`, `bool`, `str` or a type with a string form such as `uuid.Uuid`".to_string()
+                    "a parameter is the request (`http.Request`), a `{name}` in the path, a JSON body, a header (`http.Header`), a cookie (`http.Cookie`), a form (`http.Form[T]`) or a file in it (`http.Upload`), or a query parameter of type `int`, `float`, `bool`, `str` or a type with a string form such as `uuid.Uuid`".to_string()
                 };
                 self.route_error(
                     format!("cannot tell where parameter `{}` comes from", param.name),
@@ -1001,6 +1129,9 @@ impl<'m> Checker<'_, 'm> {
                 text.push_str("                pass\n");
             }
             let mut args = Vec::new();
+            if route.params.iter().any(|b| matches!(b, Binding::Form(_) | Binding::Upload { .. })) {
+                text.push_str("        __form = __http.form_data(__req)?\n");
+            }
             for (n, binding) in route.params.iter().enumerate() {
                 let line = match binding {
                     Binding::Request => {
@@ -1026,6 +1157,13 @@ impl<'m> Checker<'_, 'm> {
                     Binding::Body(ty) => {
                         let body_name = self.alias_type(*ty, &mut aliases);
                         format!("__http.body[{body_name}](__req)?")
+                    }
+                    Binding::Form(ty) => {
+                        let form_name = self.alias_type(*ty, &mut aliases);
+                        format!("__http.form_value[{form_name}](__form)?")
+                    }
+                    Binding::Upload { name, kind } => {
+                        format!("__http.upload_param{}(__form, {name:?})?", kind.suffix())
                     }
                     Binding::User { optional: false } => "__auth.user_param(__req)?".to_string(),
                     Binding::User { optional: true } => "__auth.user(__req)".to_string(),

@@ -125,6 +125,9 @@ pub const BAD_ROUTE: &str = "E0340";
 pub const DOC_NAME_CLASH: &str = "E0341";
 /// `@auth.required` or an `auth.User` parameter where it does not fit.
 pub const BAD_SIGN_IN: &str = "E0342";
+/// Form or upload parameters with a JSON body parameter, on a route without a body, or two
+/// `http.Form[T]` parameters.
+pub const FORM_CONFLICT: &str = "E0343";
 
 /// A variable that is assigned but never read.
 pub const UNUSED_VARIABLE: &str = "W0001";

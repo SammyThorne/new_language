@@ -1,0 +1,85 @@
+# Forms and uploads (docs/14, milestone 12). Run by crates/lang_cli/tests/forms.rs, which sends
+# urlencoded and multipart forms, files large enough to be kept on disk, and forms past each
+# limit; and by crates/lang_cli/tests/viewer.rs, which uploads a file from the documentation
+# page. Large uploads wait in $UPLOAD_DIR.
+
+import http
+import io
+import os
+
+@derive(Json)
+struct Signup:
+    name: str
+    age: int
+    tags: list[str] = []
+    agree: bool = False
+
+@derive(Json)
+struct Caption:
+    caption: str = ""
+
+@http.post("/signup")
+def signup(form: http.Form[Signup]) -> Signup:
+    """Echo a form's fields, decoded."""
+    return form.value
+
+@http.post("/avatar")
+def avatar(details: http.Form[Caption], avatar: http.Upload) -> Result[str, http.HttpError]:
+    """Describe one uploaded file."""
+    data = avatar.bytes()?
+    return f"{avatar.filename} {avatar.content_type} {avatar.size} {len(data)} {details.value.caption!r} {waiting()}"
+
+@http.post("/many")
+def many(docs: list[http.Upload], note: http.Upload?) -> str:
+    """Name several files and an optional one."""
+    names: list[str] = []
+    for doc in docs:
+        names.append(f"{doc.filename}:{doc.size}")
+    match note:
+        case Some(file):
+            names.append(f"note={file.filename}")
+        case None:
+            names.append("no note")
+    return " ".join(names)
+
+@http.post("/keep")
+def keep(file: http.Upload) -> Result[str, http.HttpError]:
+    """Save a file in the upload directory as `kept-<name>`."""
+    file.save(upload_dir() + "/kept-" + file.filename)?
+    return f"kept {file.size}"
+
+def raw(req: http.Request) -> Result[http.Response]:
+    form = req.form()?
+    files: list[str] = []
+    for name in ["a", "b"]:
+        for upload in form.files(name):
+            files.append(f"{name}={upload.filename}:{upload.text()?}")
+    return http.text(f"fields {form.names()} all {form.all('x')} files {files}")
+
+def upload_dir() -> str:
+    return os.getenv("UPLOAD_DIR").unwrap_or("/tmp")
+
+# How many large uploads are waiting in the upload directory.
+def waiting() -> int:
+    count = 0
+    for name in io.list_dir(upload_dir()).unwrap_or([]):
+        if name.starts_with("upload-"):
+            count += 1
+    return count
+
+def main():
+    server = http.Server()
+    server.max_body = 4000000
+    server.max_files = 3
+    server.max_fields = 5
+    server.max_part_headers = 300
+    server.upload_dir = upload_dir()
+    server.post("/raw", raw)
+    server.mount(signup)
+    server.mount(avatar)
+    server.mount(many)
+    server.mount(keep)
+    server.docs(title="Uploads")
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()

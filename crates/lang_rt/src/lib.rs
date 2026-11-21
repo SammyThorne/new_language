@@ -28,6 +28,7 @@ pub mod json;
 pub mod list;
 pub mod log;
 pub mod metrics;
+pub mod multipart;
 pub mod num;
 pub mod out;
 pub mod overflow;

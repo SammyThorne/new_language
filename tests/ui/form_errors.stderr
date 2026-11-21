@@ -1,0 +1,41 @@
+error[E0343]: `note` reads the request body as JSON, but `form` reads it as a form
+  --> tests/ui/form_errors.vi:11:49
+   |
+11 | def form_then_json(form: http.Form[Note], note: Note) -> str:
+   |                                                 ^^^^ a JSON body parameter
+   |
+   = help: a request has one body: take a JSON body, or the form's fields (`http.Form[T]`) and files (`http.Upload`), or `http.Request` and read it yourself
+
+error[E0343]: `file` reads the request body as a form, but `note` reads it as JSON
+  --> tests/ui/form_errors.vi:15:38
+   |
+15 | def json_then_file(note: Note, file: http.Upload) -> str:
+   |                                      ^^^^^^^^^^^ a form parameter
+   |
+   = help: a request has one body: take a JSON body, or the form's fields (`http.Form[T]`) and files (`http.Upload`), or `http.Request` and read it yourself
+
+error[E0343]: a GET route has no request body to read form `file` from
+  --> tests/ui/form_errors.vi:19:23
+   |
+19 | def file_on_get(file: http.Upload?) -> str:
+   |                       ^^^^^^^^^^^^ a form parameter
+   |
+   = help: use `@http.post` (or `put` or `patch`); a form sent with GET puts its fields in the query, so take them as query parameters
+
+error[E0343]: a handler has one form, but `first` and `second` both want its fields
+  --> tests/ui/form_errors.vi:23:47
+   |
+23 | def two_forms(first: http.Form[Note], second: http.Form[Note]) -> str:
+   |                                               ^^^^^^^^^^^^^^^ second `http.Form` parameter
+   |
+   = help: a request has one body: take a JSON body, or the form's fields (`http.Form[T]`) and files (`http.Upload`), or `http.Request` and read it yourself
+
+error[E0340]: the fields of form `form` cannot be decoded into a `Plain`
+  --> tests/ui/form_errors.vi:27:25
+   |
+27 | def not_decodable(form: http.Form[Plain]) -> str:
+   |                         ^^^^^^^^^^^^^^^^ not decodable
+   |
+   = help: add `@derive(Json)` to `Plain`
+
+error: could not compile `tests/ui/form_errors.vi` due to 5 errors

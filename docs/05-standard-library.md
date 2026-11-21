@@ -202,6 +202,10 @@ Each parameter is matched against these rules in order, at compile time. A param
 | 7 | Type `http.Header` or `http.Header?` (M12) | The request header named after the parameter: `user_agent` is `User-Agent` | 400 if missing, unless `T?` |
 | 8 | Type `http.Cookie` or `http.Cookie?` (M12) | The cookie with the parameter's name | 400 if missing, unless `T?` |
 | 9 | Type `auth.User` or `auth.User?` (D104), matched before rule 5 although `auth.User` derives `Json` | The signed-in user. At most one per handler, and not under `@http.ws` | `auth.User` protects the route: signed out is a 401, or a redirect to sign in for a browser. `auth.User?` is `None` |
+| 10 | Type `http.Form[T]`, with `T` deriving `Json` (docs/14, milestone 12) | The form's text fields decoded into `T`, as `.value` (see "Forms and uploads"). At most one per handler | 400 naming each missing or malformed field; 415 for a body that is not a form |
+| 11 | Type `http.Upload`, `http.Upload?` or `list[http.Upload]` | The file, or files, sent in the form under the parameter's name | 400 if missing, unless `T?` or a list |
+
+Rules 10 and 11 read the body as a form, so they cannot be combined with a JSON body parameter (rule 5), nor used on a `get` or `delete` route or a WebSocket endpoint: error E0343.
 
 `http.Header` and `http.Cookie` are frozen structs with a `value: str` field and `Display`. Other request details are read from an `http.Request` parameter; `req.cookie(name)` reads a cookie.
 
@@ -249,6 +253,7 @@ server.listen_tls(":8443", "cert.pem", "key.pem").unwrap()      # or bind_tls(..
 - A `{name}` in the path with no parameter of that name.
 - A parameter that no binding rule accepts, for example an ordinary struct that does not derive `Json`.
 - Two body parameters, or a body parameter on a `get` or `delete` route.
+- A form or upload parameter with a JSON body parameter, on a `get` or `delete` route, or two `http.Form[T]` parameters (E0343).
 - A path parameter whose type cannot be parsed from text.
 - A return type that cannot be turned into a response.
 - Two routes with the same method and path on one type. Duplicates across separate `mount` calls are reported when the server starts.
@@ -340,12 +345,13 @@ def remove(self, id: int): ...
 | `server.metrics(path="/metrics", dashboard=True, user=None, password=None, public=False)` | Serves the metrics in the Prometheus text format, and a dashboard at `path + "/dashboard"`, behind HTTP Basic authentication; see "Metrics and health" |
 | `server.health(live="/healthz", ready="/readyz", checks={})` | Liveness and readiness routes for a load balancer; see "Metrics and health" |
 | `server.drain_delay` | Seconds to go on serving after SIGTERM, with readiness failing, before closing; 0 by default |
+| `server.max_files`, `server.max_fields`, `server.max_part_headers`, `server.upload_dir` | Limits on a form: 10 files and 1000 text fields (else 413), 8 KiB of headers in one multipart part (else 400); the directory where files over 1 MiB wait while the request is handled (`""`, the default, for the system's temporary directory). See "Forms and uploads" |
 | `http.Handler` | `def(http.Request) -> Result[http.Response]` |
-| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `query_string() -> str` (as sent, without `?`), `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes` (any bytes, for binary uploads), `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr() -> str` (the connection's other end, `host:port`), `client_ip() -> str` (the client's address without a port: through `server.trusted_proxies`, the rightmost address in `X-Forwarded-For` that is not one of them, so a client cannot choose it; otherwise the connection's; `""` for a test request); `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13); `route() -> str` is the pattern of the route that took the request (`/todos/{id}`), `""` before routing or when none did |
+| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `query_string() -> str` (as sent, without `?`), `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes` (any bytes, for binary uploads), `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr() -> str` (the connection's other end, `host:port`), `client_ip() -> str` (the client's address without a port: through `server.trusted_proxies`, the rightmost address in `X-Forwarded-For` that is not one of them, so a client cannot choose it; otherwise the connection's; `""` for a test request); `form() -> Result[http.FormData]` (see "Forms and uploads"); `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13); `route() -> str` is the pattern of the route that took the request (`/todos/{id}`), `""` before routing or when none did |
 | `http.Response` | `status`, `headers`, `body`; built with `http.text`, `http.json`, `http.binary(data, content_type="application/octet-stream", status=200)` (a body of any bytes), `http.error`, `http.redirect`, `http.no_content`; `body_bytes()` is the body as sent, for tests. `with_header(name, value)` sets a header; `add_header(name, value)` adds another value, sent as its own line (in `headers`, the values are joined by newlines) |
 | `response.set_cookie(name, value, max_age=-1, path="/", http_only=True, secure=False, same_site="Lax")` | Adds a `Set-Cookie` header; any number per response. Characters a cookie cannot hold, and `%`, are sent as `%XX`, which `req.cookie` decodes. `__Host-` and `__Secure-` cookies, and `same_site="None"`, are always `Secure`. An invalid name, path or `same_site` is a bug and panics (a 500). `delete_cookie(name, path="/")` expires one; `response.cookie(name) -> str?` reads one back, for tests |
 | `http.url_encode(text)`, `http.url_decode(text, plus_is_space=True) -> str?`, `http.form_encode([(name, value), ...])` | Percent-encoding: everything but ASCII letters, digits and `-._~` as `%XX` of its UTF-8 bytes. `form_encode` makes a query string or an `application/x-www-form-urlencoded` body |
-| `http.test_request(method, path, body="", headers={})` | A request without a connection, for `server.handle(...)` in tests. A query string on `path` is what `query` reads; `headers` are what `header` and `cookie` read |
+| `http.test_request(method, path, body="", headers={}, form={}, files={})` | A request without a connection, for `server.handle(...)` in tests. A query string on `path` is what `query` reads; `headers` are what `header` and `cookie` read. `form` (`dict[str, str]`) sends text fields as an urlencoded body; with `files` (`dict[str, http.Upload]`, each made by `http.test_file(filename, content, content_type="application/octet-stream")`), a multipart form |
 | `http.Error` | An `Error` carrying a status code |
 
 ### Request size limits (docs/14, milestone 11)
@@ -368,6 +374,42 @@ def avatar(req: http.Request) -> Result[str, http.HttpError]: ...
 - **Time.** A body read later must keep arriving: 30 seconds without any of it is a 408 (an upload may take longer in all).
 - **Heads.** At most `server.max_headers` headers (100; else **431**), a request target, path and query string, of at most `server.max_url` bytes (8 KiB; else **414**), and a head of at most 64 KiB (431).
 - **Test requests** (`server.handle(http.test_request(...))`) check a route's or group's `max_body` in `req.text()`, so a test can see the 413; `server.max_body` and the head limits apply only to requests from a connection.
+
+### Forms and uploads (docs/14, milestone 12)
+
+```python
+@derive(Json)
+struct Profile:
+    name: str
+    age: int
+    newsletter: bool = False                     # an unchecked box sends nothing
+
+@http.post("/profile", max_body=10_485_760)
+def save_profile(form: http.Form[Profile], photo: http.Upload?) -> Result[str, http.HttpError]:
+    match photo:
+        case Some(file):
+            file.save(f"photos/{form.value.name}.jpg")?     # choose the path: `filename` is the client's
+        case None:
+            pass
+    return f"saved {form.value.name}"
+
+def handler(req: http.Request) -> Result[http.Response]:   # or by hand
+    form = req.form()?
+    tags = form.all("tag")                       # list[str]
+    for doc in form.files("docs"):               # list[http.Upload]
+        print(doc.filename, doc.size)
+    return http.text(form.get("title").unwrap_or("untitled"))
+```
+
+- **What is read.** `req.form()` reads `application/x-www-form-urlencoded` and `multipart/form-data` (RFC 7578) bodies; any other content type is a **415**. The body is read whole first, under the route's `max_body` (see "Request size limits"), and then split, in the runtime.
+- **`http.FormData`.** `get(name) -> str?` and `file(name) -> http.Upload?` give the first text field or file of a name; `all(name) -> list[str]` and `files(name) -> list[http.Upload]` give every one, in order; `names()` lists the text fields. `req.form()` parses the body each time it is called, so keep the result.
+- **`http.Upload`.** `filename`, `content_type` and `size`; `bytes() -> Result[bytes]`, `text() -> Result[str]` (a 400 if it is not UTF-8) and `save(path) -> Result[None]`. `filename` is the base name the client sent, without any directory, `/`, `\` or control character (`../../etc/passwd` is `passwd`, `C:\photos\me.jpg` is `me.jpg`), and may be `""`; neither it nor `content_type` is checked against the contents. A file sent as `filename*` (RFC 5987) gets that name. A file input left empty, which browsers send as a part with an empty file name and no data, is no file.
+- **Large files.** A file over 1 MiB is written to a temporary file (readable only by the program's user) in `server.upload_dir`, the system's temporary directory by default, and removed when the request ends. `save` moves it rather than copying it when it can. Read or save an upload in the handler: after the request, `bytes()` on a large one is a 500.
+- **`http.Form[T]`** decodes the text fields into `T` as `config.load` reads environment variables: numbers and booleans from their text (`on`, which a checked box sends, is `True`), a field sent several times as a list, and a list field sent once may be comma-separated. Every missing or malformed field is named in one 400: ``invalid form: field `age` must be an integer, got "x"; field `name` is required``. Files are not part of `T`: take them as `http.Upload` parameters.
+- **Limits.** More than `server.max_files` files (10) or `server.max_fields` text fields (1000) is a **413**; a multipart part with more than `server.max_part_headers` bytes of headers (8 KiB), or a malformed body, is a **400** that says what is wrong.
+- **Lenient where browsers and libraries differ.** Lines may end in a lone LF as well as CRLF, a boundary line may have trailing spaces, a preamble before the first boundary is ignored, and a quoted file name may hold unescaped backslashes (a Windows path, as some browsers send). A line that only starts like the boundary (`--boundaryX`) is data.
+- **The API documentation** shows such routes with a `multipart/form-data` request body (and `application/x-www-form-urlencoded` when there are no files): `T`'s schema for the text fields and `{"type": "string", "format": "binary"}` for each file, an array of them for a list. The page's "Try it out" has a file input for each file and sends the form as the browser would.
+- **Test requests.** `http.test_request("POST", "/profile", form={"name": "Ada", "age": "36"}, files={"photo": http.test_file("me.jpg", data, content_type="image/jpeg")})` sends a form without a connection; a multipart body can also be given whole with `body=` and its `Content-Type` header. Test requests keep every file in memory, and use `max_files` and the other limits once the server has composed its routes.
 
 ### Error mapping
 
@@ -783,7 +825,7 @@ How a variable's text becomes a field:
 |---|---|
 | `str` | As it is |
 | `int`, `float` | Trimmed, then parsed: `8080`, `0.25`. Not `inf` or `nan` |
-| `bool` | `true`, `1`, `yes` or `false`, `0`, `no`, in any case |
+| `bool` | `true`, `1`, `yes`, `on` or `false`, `0`, `no`, `off`, in any case |
 | A type with a string form (`datetime.Duration`, `datetime.Date`, `uuid.Uuid`, `config.Secret`, users' `JsonString` types) | Its own parser: `45s`, `2026-11-20` |
 | `list[...]` | Comma-separated, each item trimmed and empty ones dropped (`a, b, c`), or JSON when it starts with `[` (`["a", "b,c"]`, `[1, 2]`) |
 | A struct or `dict` | JSON: `{"burst": 10}` |

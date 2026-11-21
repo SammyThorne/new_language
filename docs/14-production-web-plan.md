@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 11 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 12 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1122,6 +1122,14 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - A real upload from the built-in browser through the documentation viewer.
   - `ui` goldens for E0343.
 - **Docs:** docs/05, docs/errors.md (E0343), and a site section.
+
+**Done** (D117). Everything listed, with these differences:
+- The parsed form is `http.FormData`; `http.Form[T]` is only the handler parameter, whose decoded fields are its `value`. `FormData` also has `file(name)` and `names()`.
+- The body is read whole, under the route's `max_body`, before it is split; files over 1 MiB are then written to `upload_dir`. Parsing while the body arrives is left for later.
+- `Upload.open()` is left out: the `io` module has no binary file handle yet. `bytes()`, `text()` and `save(path)` are there.
+- The lenient decoder reads `on` and `off` as booleans, for checkboxes (and so `config.load` does too).
+- The viewer sends a form without files urlencoded, and lists such routes with both media types.
+- Tests: unit tests in `multipart.rs` (CRLF and lone LF, a preamble, delimiter-like lines in data, `filename*` in UTF-8 and ISO-8859-1, Windows paths and `..`, empty fields, empty file inputs, every malformed-body error, the three limits, spilling and removal); `crates/lang_cli/tests/forms.rs` runs `tests/http/upload_server.vi` over the wire (decoding, a 1.5 MB file waiting on disk during the request and gone after, `save`, lists and optional files, each limit, and the documented bodies); `tests/run/http_forms.vi` covers test requests; `tests/ui/form_errors.vi` gives E0343; `core.test.js` covers the viewer's form fields, urlencoded and multipart requests and curl `-F`. A 1.5 MB file was uploaded from the built-in browser through the documentation page's "Try it out" (`tests/http/docs_page_check.md`).
 
 #### Milestone 13: timeouts and cancellation (about 3 days; after 5)
 

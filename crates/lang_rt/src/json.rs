@@ -347,11 +347,12 @@ fn shown(text: &str) -> String {
     if chars.next().is_some() { format!("{:?}...", start) } else { format!("{start:?}") }
 }
 
-/// The boolean spellings an environment variable may use.
+/// The boolean spellings an environment variable or a form field may use (`on` is what a
+/// checked box sends).
 fn lenient_bool(text: &str) -> Option<bool> {
     match text.to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" => Some(true),
-        "false" | "0" | "no" => Some(false),
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
         _ => None,
     }
 }

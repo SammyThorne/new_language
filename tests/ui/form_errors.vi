@@ -1,0 +1,31 @@
+import http
+
+@derive(Json)
+struct Note:
+    text: str
+
+struct Plain:
+    text: str
+
+@http.post("/a")
+def form_then_json(form: http.Form[Note], note: Note) -> str:
+    return "a"
+
+@http.post("/b")
+def json_then_file(note: Note, file: http.Upload) -> str:
+    return "b"
+
+@http.get("/c")
+def file_on_get(file: http.Upload?) -> str:
+    return "c"
+
+@http.post("/d")
+def two_forms(first: http.Form[Note], second: http.Form[Note]) -> str:
+    return "d"
+
+@http.post("/e")
+def not_decodable(form: http.Form[Plain]) -> str:
+    return "e"
+
+def main():
+    pass

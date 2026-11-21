@@ -9,7 +9,7 @@
 //! None of it is generated unless the program calls `docs` or `openapi_json` somewhere, so a
 //! server that does not document itself is compiled exactly as before.
 
-use super::http::{Binding, Reply, Route, Scalar};
+use super::http::{Binding, Reply, Route, Scalar, UploadKind};
 use super::{Checker, ModuleInput};
 use crate::hir::{self, ExprKind as K};
 use crate::types::{SizedKind, Ty, TyKind};
@@ -268,6 +268,8 @@ impl Checker<'_, '_> {
         let mut parameters = Vec::new();
         let mut can_fail = false;
         let mut body = None;
+        let mut form = None;
+        let mut uploads = Vec::new();
         for binding in &route.params {
             match binding {
                 Binding::Path { name, kind } => {
@@ -309,6 +311,14 @@ impl Checker<'_, '_> {
                     can_fail = true;
                     body = Some(*ty);
                 }
+                Binding::Form(ty) => {
+                    can_fail = true;
+                    form = Some(*ty);
+                }
+                Binding::Upload { name, kind } => {
+                    can_fail = true;
+                    uploads.push((name.clone(), kind.clone()));
+                }
                 Binding::Request | Binding::Socket | Binding::User { .. } => {}
             }
         }
@@ -324,6 +334,9 @@ impl Checker<'_, '_> {
                     ("content", J::obj(vec![("application/json", J::obj(vec![("schema", schema)]))])),
                 ]),
             ));
+        }
+        if form.is_some() || !uploads.is_empty() {
+            op.push(("requestBody", self.form_body(form, &uploads, pending)));
         }
 
         let mut responses: Vec<(String, J)> = Vec::new();
@@ -359,6 +372,42 @@ impl Checker<'_, '_> {
             op.push(("x-websocket", J::Bool(true)));
         }
         (id, J::obj(op), !errors.is_empty())
+    }
+
+    /// A form's request body: `T`'s schema for the text fields, and a binary string for each
+    /// file (an array of them for `list[http.Upload]`). Text alone may be sent urlencoded.
+    fn form_body(&mut self, form: Option<Ty>, uploads: &[(String, UploadKind)], pending: &mut Vec<Ty>) -> J {
+        let file = || J::obj(vec![("type", J::s("string")), ("format", J::s("binary"))]);
+        let mut properties = Vec::new();
+        let mut required = Vec::new();
+        for (name, kind) in uploads {
+            let schema = match kind {
+                UploadKind::List => J::obj(vec![("type", J::s("array")), ("items", file())]),
+                UploadKind::One | UploadKind::Optional => file(),
+            };
+            properties.push((name.clone(), schema));
+            if matches!(kind, UploadKind::One) {
+                required.push(J::s(name));
+            }
+        }
+        let mut files = vec![("type", J::s("object"))];
+        if !properties.is_empty() {
+            files.push(("properties", J::Obj(properties)));
+        }
+        if !required.is_empty() {
+            files.push(("required", J::Arr(required)));
+        }
+        let schema = match form {
+            Some(ty) if uploads.is_empty() => self.schema(ty, pending),
+            Some(ty) => J::obj(vec![("allOf", J::Arr(vec![self.schema(ty, pending), J::obj(files)]))]),
+            None => J::obj(files),
+        };
+        let mut content = Vec::new();
+        if uploads.is_empty() {
+            content.push(("application/x-www-form-urlencoded", J::obj(vec![("schema", schema.clone())])));
+        }
+        content.push(("multipart/form-data", J::obj(vec![("schema", schema)])));
+        J::obj(vec![("required", J::Bool(true)), ("content", J::obj(content))])
     }
 
     /// Whether more than one type with routes has a route method of this name, so that the

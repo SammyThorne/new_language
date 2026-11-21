@@ -54,6 +54,11 @@
       return box;
     }
     if (schema.description) box.append(prose(schema.description));
+    if (Array.isArray(schema.allOf)) {
+      box.append(h("div", { class: "note" }, "All of:"));
+      for (const part of schema.allOf) box.append(schemaView(part, depth + 1));
+      return box;
+    }
     const branches = schema.oneOf || schema.anyOf;
     if (Array.isArray(branches)) {
       box.append(h("div", { class: "note" }, "One of:"));
@@ -218,7 +223,27 @@
       fields.append(h("label", { for: id }, h("code", {}, p.name), " ", h("span", { class: "muted" }, p.in + (p.required ? ", required" : ""))), input);
     }
     let bodyInput = null;
-    if (op.requestBody) {
+    const formInputs = {};
+    const media = core.formMedia(op);
+    if (media) {
+      for (const field of core.formFields(doc, op.requestBody.content[media].schema)) {
+        const id = core.anchor(op) + "-form-" + field.name;
+        const schema = field.schema;
+        let input;
+        if (field.file) {
+          input = h("input", { id, type: "file" });
+          input.multiple = field.multiple;
+        } else if (schema.type === "boolean" || (Array.isArray(schema.enum) && schema.enum.length < 20)) {
+          const choices = schema.type === "boolean" ? ["true", "false"] : schema.enum.map(String);
+          input = h("select", { id }, h("option", { value: "" }, field.required ? "choose" : "(none)"), choices.map((c) => h("option", { value: c }, c)));
+        } else {
+          input = h("input", { id, type: "text", autocomplete: "off", placeholder: core.typeLabel(doc, schema) + (field.multiple ? ", comma-separated" : "") });
+        }
+        if (Object.prototype.hasOwnProperty.call(schema, "default") && !field.file) input.value = String(schema.default);
+        formInputs[field.name] = input;
+        fields.append(h("label", { for: id }, h("code", {}, field.name), " ", h("span", { class: "muted" }, (field.file ? "file" : "form") + (field.required ? ", required" : ""))), input);
+      }
+    } else if (op.requestBody) {
       const id = core.anchor(op) + "-body";
       const json = (op.requestBody.content || {})["application/json"];
       const sample = json ? core.example(doc, json.schema) : "";
@@ -227,22 +252,23 @@
       fields.append(h("label", { for: id }, "Request body ", h("span", { class: "muted" }, "JSON")), bodyInput);
     }
     const result = h("div", { class: "result", "aria-live": "polite" });
-    const send = h("button", { type: "button", class: "primary", onclick: () => run(op, inputs, bodyInput, result, send) }, "Send");
+    const send = h("button", { type: "button", class: "primary", onclick: () => run(op, inputs, bodyInput, formInputs, result, send) }, "Send");
     const reset = h("button", { type: "button", class: "secondary", onclick: () => { result.replaceChildren(); } }, "Clear");
     panel.append(fields, h("div", { class: "actions" }, send, reset), result);
     return h("div", {}, open, panel);
   }
 
-  async function run(op, inputs, bodyInput, result, button) {
-    const values = { params: {}, body: bodyInput ? bodyInput.value : "" };
+  async function run(op, inputs, bodyInput, formInputs, result, button) {
+    const values = { params: {}, body: bodyInput ? bodyInput.value : "", form: {} };
     for (const [key, input] of Object.entries(inputs)) values.params[key] = input.value;
+    for (const [name, input] of Object.entries(formInputs)) values.form[name] = input.type === "file" ? Array.from(input.files) : input.value;
     const request = core.buildRequest(doc, op, values, baseUrl, auth);
     result.replaceChildren();
     if (request.missing.length > 0) {
       result.append(h("p", { class: "error" }, "Fill in: " + request.missing.join(", ")));
       return;
     }
-    if (request.body !== null) {
+    if (request.body !== null && !core.formMedia(op)) {
       try {
         JSON.parse(request.body);
       } catch (error) {
@@ -254,7 +280,12 @@
     button.disabled = true;
     const started = performance.now();
     try {
-      const response = await fetch(request.url, { method: request.method, headers: request.headers, body: request.body === null ? undefined : request.body, credentials: "same-origin" });
+      let payload = request.body === null ? undefined : request.body;
+      if (request.form) {
+        payload = new FormData();
+        for (const [name, value] of request.form) payload.append(name, value);
+      }
+      const response = await fetch(request.url, { method: request.method, headers: request.headers, body: payload, credentials: "same-origin" });
       const text = await response.text();
       const elapsed = Math.round(performance.now() - started);
       const headers = [];

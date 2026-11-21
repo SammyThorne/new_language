@@ -7,7 +7,7 @@ Settings from environment variables and `.env` files.
     struct Settings:
         database_url: config.Secret          # DATABASE_URL, required; prints as ***
         port: int = 8080                     # PORT, "8080" read as an int
-        debug: bool = False                  # DEBUG: true/false, 1/0, yes/no
+        debug: bool = False                  # DEBUG: true/false, 1/0, yes/no, on/off
         allowed_origins: list[str] = []      # ALLOWED_ORIGINS="https://a.example, https://b.example"
         request_timeout: datetime.Duration = datetime.seconds(30)   # REQUEST_TIMEOUT=45s
 
@@ -138,10 +138,10 @@ pub def load_env(path: str? = None, override: bool = False) -> Result[None, Conf
 
 pub def load[T: FromJson](prefix: str = "", env_file: str = ".env") -> Result[T, ConfigError]:
     """Settings of type `T`, a struct deriving `Json`: field `port` is read from the variable
-    `PORT` (or `prefix + "PORT"`). Numbers, booleans (`true`/`false`, `1`/`0`, `yes`/`no`, in
-    any case) and types with a string form (`datetime.Duration`, `uuid.Uuid`, `Secret`) are
-    parsed from the text; a list is written comma-separated (`a, b, c`) or as JSON, and a
-    nested struct or dict as JSON. Fields with defaults, and optional ones, may be left
+    `PORT` (or `prefix + "PORT"`). Numbers, booleans (`true`/`false`, `1`/`0`, `yes`/`no`,
+    `on`/`off`, in any case) and types with a string form (`datetime.Duration`, `uuid.Uuid`,
+    `Secret`) are parsed from the text; a list is written comma-separated (`a, b, c`) or as
+    JSON, and a nested struct or dict as JSON. Fields with defaults, and optional ones, may be left
     unset. The variables come from the environment and, where it does not set them, from
     `env_file` if that exists (`""` reads no file); the environment is not changed. The error
     lists every problem."""

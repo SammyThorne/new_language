@@ -747,6 +747,8 @@ pub struct Request {
     /// Why a pending body could not be read (413, 408 or 400), which the client is told
     /// whatever the handler answers; 0 if nothing went wrong.
     refused: u16,
+    /// Temporary files holding large uploads, removed when the request ends.
+    uploads: crate::multipart::TempFiles,
 }
 
 impl Request {
@@ -1228,6 +1230,7 @@ impl Connection {
             bytes: 0,
             limit: 0,
             refused: 0,
+            uploads: crate::multipart::TempFiles(Vec::new()),
         })
     }
 
@@ -1287,7 +1290,7 @@ fn hex(b: u8) -> Option<u8> {
 
 /// Decode `%XX` escapes (and, in query strings, `+` as a space). `None` if the result is not
 /// valid UTF-8 or an escape is malformed.
-fn percent_decode(text: &str, plus_is_space: bool) -> Option<String> {
+pub(crate) fn percent_decode(text: &str, plus_is_space: bool) -> Option<String> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -1878,6 +1881,26 @@ pub unsafe extern "C-unwind" fn lrt_http_req_body_bytes(handle: i64) -> Str {
     // Past the limit, empty: the client is answered 413 whatever the handler does.
     let _ = request.load_body();
     Str::from_bytes(request.body())
+}
+
+/// The body parsed as a form (`req.form()`), read first if it is pending: a form handle for
+/// the `lrt_http_form_*` functions, or minus the status to answer (400, 413 or 415) with the
+/// reason as the last error.
+///
+/// # Safety
+/// `handle` is a live request.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_req_form(handle: i64) -> i64 {
+    let request = unsafe { request(handle) };
+    if let Err((status, message)) = request.load_body() {
+        set_error(message);
+        return -i64::from(status);
+    }
+    let content_type = request.header("content-type").unwrap_or("");
+    let mut temp = Vec::new();
+    let form = crate::multipart::request_form(content_type, request.body(), &mut temp);
+    request.uploads.0.append(&mut temp);
+    form
 }
 
 /// The client's IP address: the peer's, or, when the peer is a trusted proxy (see

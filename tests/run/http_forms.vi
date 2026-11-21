@@ -1,0 +1,64 @@
+# Forms and uploads on test requests (docs/14, milestone 12): `test_request(form=..., files=...)`
+# through mounted `http.Form[T]` and `http.Upload` parameters, and `req.form()`.
+# expect: signup: 200 {"name":"Ada","age":36,"newsletter":true}
+# expect: bad: 400 {"error":"invalid form: field `age` must be an integer, got \"many\""}
+# expect: upload: 200 notes.txt text/plain 5 hello for Ada
+# expect: no file: 400 {"error":"missing file `doc`"}
+# expect: optional: 200 none
+# expect: by hand: ['red', 'blue'] 2 a.txt
+# expect: json: 415 a form must be sent as application/x-www-form-urlencoded or multipart/form-data
+
+import http
+
+@derive(Json)
+struct Signup:
+    name: str
+    age: int
+    newsletter: bool = False
+
+@derive(Json)
+struct Owner:
+    owner: str
+
+@http.post("/signup")
+def signup(form: http.Form[Signup]) -> Signup:
+    return form.value
+
+@http.post("/upload")
+def upload(details: http.Form[Owner], doc: http.Upload) -> Result[str, http.HttpError]:
+    return f"{doc.filename} {doc.content_type} {doc.size} {doc.text()?} for {details.value.owner}"
+
+@http.post("/maybe")
+def maybe(doc: http.Upload?) -> str:
+    match doc:
+        case Some(file):
+            return file.filename
+        case None:
+            return "none"
+
+def show(response: http.Response) -> str:
+    return f"{response.status} {response.body.strip()}"
+
+def main():
+    server = http.Server()
+    server.mount(signup)
+    server.mount(upload)
+    server.mount(maybe)
+    fields = {"name": "Ada", "age": "36", "newsletter": "on"}
+    print(f"signup: {show(server.handle(http.test_request('POST', '/signup', form=fields)))}")
+    bad = {"name": "Ada", "age": "many"}
+    print(f"bad: {show(server.handle(http.test_request('POST', '/signup', form=bad)))}")
+    notes = http.test_file("notes.txt", "hello".encode(), content_type="text/plain")
+    sent = http.test_request("POST", "/upload", form={"owner": "Ada"}, files={"doc": notes})
+    print(f"upload: {show(server.handle(sent))}")
+    print(f"no file: {show(server.handle(http.test_request('POST', '/upload', form={'owner': 'Ada'})))}")
+    print(f"optional: {show(server.handle(http.test_request('POST', '/maybe', form={'x': '1'})))}")
+    body = "--b\r\nContent-Disposition: form-data; name=\"colour\"\r\n\r\nred\r\n--b\r\nContent-Disposition: form-data; name=\"colour\"\r\n\r\nblue\r\n--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\r\nhi\r\n--b--\r\n"
+    form = http.test_request("POST", "/", body=body, headers={"Content-Type": "multipart/form-data; boundary=b"}).form().unwrap()
+    print(f"by hand: {form.all('colour')} {form.files('f')[0].size} {form.file('f').unwrap().filename}")
+    json = http.test_request("POST", "/", body="{}", headers={"Content-Type": "application/json"})
+    match json.form():
+        case Ok(_):
+            print("json: parsed")
+        case Err(error):
+            print(f"json: {error}")

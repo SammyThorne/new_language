@@ -34,6 +34,16 @@ Build and start `tests/http/secured_docs.vi` the same way and open its `/docs`.
 13. **Authorize.** Press "Authorize": a field for each of `key`, `login`, `session` and `token`, with the token's description, and a note under `session` that a page cannot set cookies.
 14. **Try it out with a token.** Send `POST /notes` with no token: `401`. Type `secret` into the `token` field and send again: `201`, and the `curl` command has `-H 'Authorization: Bearer secret'`. `GET /report` with `k123` in `key` instead: `200`.
 
+## Uploads
+
+Build `tests/http/upload_server.vi` the same way and start it with `UPLOAD_DIR` set to an empty directory, then open its `/docs`.
+
+15. **Form bodies.** `POST /avatar` shows a `multipart/form-data` request body, "All of:" `Caption` and an object with `avatar` of type `file`. `POST /signup` lists both `application/x-www-form-urlencoded` and `multipart/form-data`.
+16. **Upload a file.** In `POST /avatar`, press "Try it out": a `caption` text field and an `avatar` file input. Choose a file over 1 MiB, type a caption and send: `200` with the file's name, type, size (twice), the caption and `1`, the large file waiting in `UPLOAD_DIR` while the handler ran. The `curl` command has `--form-string 'caption=...'` and `-F 'avatar=@<name>'`. Afterwards `UPLOAD_DIR` is empty.
+17. **Several files.** `POST /many` has a file input that takes several files; send two: both are named in the response.
+
 ## Last run
 
 2026-11-20, Chromium in the desktop app's browser pane, against the todo service (steps 1 to 11) and the secured service (steps 12 to 14): every step as described, with no script errors (the console shows only the browser's own note of the deliberate `401`).
+
+2026-11-21, the same browser against the upload service: steps 15 and 17 as described (the two files set as below), and step 16 with a 1,500,000-byte `photo.png` set on the file input from the page's console (the pane cannot drive a file dialog) and sent with the "Send" button: `200 photo.png image/png 1500000 1500000 'from the viewer' 1`, and the upload directory empty afterwards.

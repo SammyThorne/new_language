@@ -1101,6 +1101,24 @@ error[E0342]: `@auth.required` is on `helper`, which is not a route
 
 **What to do.** Put `@auth.required` on a route, or wrap a call-style handler with `auth.protect(handler)`. To limit who may sign in, give `auth.google` `allowed_domains=` or `allowed_emails=`, or check the user in the handler. In a WebSocket handler, take an `http.Request` and call `auth.user(req)`. One `auth.User` parameter is enough.
 
+### E0343: form parameters that conflict
+
+A handler's `http.Form[T]` and `http.Upload` parameters read the request body as a form (docs/05, "Forms and uploads"). The error is such a parameter together with a JSON body parameter, on a `get` or `delete` route or a WebSocket endpoint, which have no body, or two `http.Form[T]` parameters.
+
+From `tests/ui/form_errors.vi`:
+
+```text
+error[E0343]: `note` reads the request body as JSON, but `form` reads it as a form
+  --> tests/ui/form_errors.vi:11:49
+   |
+11 | def form_then_json(form: http.Form[Note], note: Note) -> str:
+   |                                                 ^^^^ a JSON body parameter
+   |
+   = help: a request has one body: take a JSON body, or the form's fields (`http.Form[T]`) and files (`http.Upload`), or `http.Request` and read it yourself
+```
+
+**What to do.** Decide how clients send the data: as JSON (one body parameter) or as a form (one `http.Form[T]` and any number of `http.Upload` parameters). To accept both, take an `http.Request` and call `req.json()` or `req.form()` depending on its `Content-Type`. A form sent with `GET` puts its fields in the query string: take them as query parameters.
+
 ## Warnings
 
 ### W0001: unused variable

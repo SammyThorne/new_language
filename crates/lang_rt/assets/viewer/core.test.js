@@ -195,3 +195,35 @@ test("schemes are described in words, and an operation's requirements listed onc
   assert.deepEqual(core.requirements({ security: [{ key: [] }, { token: [], key: [] }] }), ["key", "token"]);
   assert.deepEqual(core.requirements({}), []);
 });
+
+test("forms: fields through allOf, urlencoded text, and multipart files", () => {
+  const formDoc = {
+    components: { schemas: { Caption: { type: "object", properties: { caption: { type: "string" }, tags: { type: "array", items: { type: "string" } } }, required: ["caption"] } } },
+  };
+  const file = { type: "string", format: "binary" };
+  const upload = {
+    method: "post", path: "/avatar", parameters: [], security: [],
+    requestBody: { required: true, content: { "multipart/form-data": { schema: { allOf: [{ $ref: "#/components/schemas/Caption" }, { type: "object", properties: { avatar: file, extra: { type: "array", items: file } }, required: ["avatar"] }] } } } },
+  };
+  assert.equal(core.formMedia(upload), "multipart/form-data");
+  assert.deepEqual(core.formFields(formDoc, upload.requestBody.content["multipart/form-data"].schema).map((f) => [f.name, f.required, f.file, f.multiple]),
+    [["caption", true, false, false], ["tags", false, false, true], ["avatar", true, true, false], ["extra", false, true, true]]);
+  assert.equal(core.typeLabel(formDoc, file), "file");
+  const missing = core.buildRequest(formDoc, upload, { params: {}, form: { caption: "", avatar: [] } }, "");
+  assert.deepEqual(missing.missing, ["caption", "avatar"]);
+  const photo = { name: "me.png" };
+  const request = core.buildRequest(formDoc, upload, { params: {}, form: { caption: "it's me", avatar: [photo], extra: [] } }, "");
+  assert.deepEqual(request.missing, []);
+  assert.equal(request.body, null);
+  assert.deepEqual(request.headers, {});
+  assert.deepEqual(request.form, [["caption", "it's me"], ["avatar", photo]]);
+  assert.equal(core.curl(request), `curl -X POST '/avatar' --form-string 'caption=it'\\''s me' -F 'avatar=@me.png'`);
+
+  const signup = { ...upload, requestBody: { required: true, content: { "application/x-www-form-urlencoded": { schema: { $ref: "#/components/schemas/Caption" } }, "multipart/form-data": { schema: { $ref: "#/components/schemas/Caption" } } } } };
+  assert.equal(core.formMedia(signup), "application/x-www-form-urlencoded");
+  const text = core.buildRequest(formDoc, signup, { params: {}, form: { caption: "a&b c", tags: "x, y" } }, "");
+  assert.equal(text.body, "caption=a%26b%20c&tags=x%2C%20y");
+  assert.equal(text.headers["Content-Type"], "application/x-www-form-urlencoded");
+  assert.equal(text.form, null);
+  assert.equal(core.formMedia({ requestBody: { content: { "application/json": {} } } }), null);
+});

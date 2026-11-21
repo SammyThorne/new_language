@@ -45,6 +45,48 @@ def set_request_limits_raw(headers: int, target: int)
 @extern("lrt_http_req_read_body")
 def req_read_body(handle: int) -> int
 
+@extern("lrt_http_set_form_limits")
+def set_form_limits_raw(files: int, fields: int, part_headers: int, upload_dir: str)
+
+@extern("lrt_http_req_form")
+def req_form_raw(handle: int) -> int
+
+@extern("lrt_http_parse_form")
+def parse_form_raw(content_type: str, body: str) -> int
+
+@extern("lrt_http_form_count")
+def form_count_raw(form: int) -> int
+
+@extern("lrt_http_form_part")
+def form_part_raw(form: int, i: int, what: int) -> str
+
+@extern("lrt_http_form_filename")
+def form_filename_raw(form: int, i: int) -> str?
+
+@extern("lrt_http_form_size")
+def form_size_raw(form: int, i: int) -> int
+
+@extern("lrt_http_form_free")
+def form_free_raw(form: int)
+
+@extern("lrt_http_upload_read")
+def upload_read_raw(path: str) -> str
+
+@extern("lrt_http_upload_save")
+def upload_save_raw(path: str, data: str, dest: str) -> int
+
+@extern("lrt_http_sanitise_filename")
+def sanitise_filename_raw(name: str) -> str
+
+@extern("lrt_json_set_lenient")
+def set_lenient_raw(on: int)
+
+@extern("lrt_json_problem_count")
+def problem_count_raw() -> int
+
+@extern("lrt_json_problem")
+def problem_raw(i: int, part: int) -> str
+
 @extern("lrt_http_req_method")
 def req_method(handle: int) -> str
 
@@ -251,6 +293,8 @@ struct TestParts:
     query: str
     # Names lower-cased.
     headers: dict[str, str]
+    # The form `test_request(files=...)` was given, which no text body can hold.
+    form: FormData? = None
 
 impl Request:
     def param(self, name: str) -> str:
@@ -425,6 +469,25 @@ impl Request:
                     return "".encode()
         return __bytes(req_body_bytes(self.handle))
 
+    def form(self) -> Result[FormData, HttpError]:
+        """The body as a form, sent as `application/x-www-form-urlencoded` or
+        `multipart/form-data`: its text fields and its files. A 415 for another content type,
+        a 400 for a malformed body, and a 413 past the route's `max_body` or the server's
+        `max_files` or `max_fields`. The body is parsed on each call, so keep the result."""
+        if self.handle < 0:
+            match self.test_parts():
+                case Some(parts):
+                    match parts.form:
+                        case Some(form):
+                            return form
+                        case None:
+                            pass
+                    body = self.text()?
+                    return read_form(parse_form_raw(parts.headers.get_or("content-type", ""), body))
+                case None:
+                    return Err(HttpError(415, "a form must be sent as application/x-www-form-urlencoded or multipart/form-data"))
+        return read_form(req_form_raw(self.handle))
+
     def remote_addr(self) -> str:
         """The address and port of the other end of the connection: the client's, or a proxy's
         when there is one in front. `""` for a test request."""
@@ -480,6 +543,164 @@ impl Display for Cookie:
     def to_str(self) -> str:
         return self.value
 
+# ---- forms and uploads --------------------------------------------------------------------
+
+pub struct Upload:
+    """A file sent in a form: from `form.files(name)`, or a handler parameter
+    `avatar: http.Upload`. `filename` is the base name the client gave, without any directory
+    or control characters (it may be `""`), and `content_type` what the client said it is;
+    neither is checked against the contents. A file over 1 MiB is kept in a temporary file in
+    `server.upload_dir` until the request ends: read or `save` it in the handler."""
+    filename: str
+    content_type: str
+    size: int
+    priv data: bytes
+    # The temporary file holding a large upload, or "".
+    priv path: str = ""
+
+impl Upload:
+    def bytes(self) -> Result[bytes, HttpError]:
+        """The contents. A 500 error if a large upload's temporary file is gone, as it is once
+        the request has ended."""
+        if self.path == "":
+            return self.data
+        data = upload_read_raw(self.path)
+        if len(data) != self.size:
+            return Err(HttpError(500, last_error()))
+        return __bytes(data)
+
+    def text(self) -> Result[str, HttpError]:
+        """The contents as text; a 400 error if they are not UTF-8."""
+        match self.bytes()?.decode():
+            case Some(text):
+                return text
+            case None:
+                return Err(HttpError(400, f"the upload `{self.filename}` is not UTF-8 text"))
+
+    def save(self, path: str) -> Result[None, HttpError]:
+        """Write the contents to `path`, replacing any file there. A large upload's temporary
+        file is moved there rather than copied when it is on the same file system. Choose the
+        path yourself: `filename` comes from the client."""
+        if upload_save_raw(self.path, __bytes_data(self.data), path) != 0:
+            return Err(HttpError(500, last_error()))
+        return Ok(None)
+
+pub def test_file(filename: str, content: bytes, content_type: str = "application/octet-stream") -> Upload:
+    """An upload for `test_request(files={...})`. `filename` is cut down to its base name, as
+    a client's is."""
+    return Upload(sanitise_filename_raw(filename), content_type, len(content), content)
+
+pub struct FormData:
+    """A form's text fields and files, from `req.form()`. Names may repeat (checkboxes, several
+    files): `get` and `file` give the first, `all` and `files` every one, in order."""
+    priv fields: dict[str, list[str]]
+    priv uploads: dict[str, list[Upload]]
+
+impl FormData:
+    def get(self, name: str) -> str?:
+        """The first text field called `name`, or `None`."""
+        match self.fields.get(name):
+            case Some(values):
+                return values[0]
+            case None:
+                return None
+
+    def all(self, name: str) -> list[str]:
+        """Every text field called `name`."""
+        return self.fields.get_or(name, [])
+
+    def file(self, name: str) -> Upload?:
+        """The first file sent as `name`, or `None`."""
+        match self.uploads.get(name):
+            case Some(files):
+                return files[0]
+            case None:
+                return None
+
+    def files(self, name: str) -> list[Upload]:
+        """Every file sent as `name`."""
+        return self.uploads.get_or(name, [])
+
+    def names(self) -> list[str]:
+        """The names of the text fields, in the order they first appear."""
+        return list(self.fields.keys())
+
+def read_form(handle: int) -> Result[FormData, HttpError]:
+    if handle < 0:
+        return Err(HttpError(0 - handle, last_error()))
+    fields: dict[str, list[str]] = {}
+    uploads: dict[str, list[Upload]] = {}
+    for i in range(form_count_raw(handle)):
+        name = form_part_raw(handle, i, 0)
+        match form_filename_raw(handle, i):
+            case Some(filename):
+                path = form_part_raw(handle, i, 4)
+                data = __bytes(form_part_raw(handle, i, 3))
+                upload = Upload(filename, form_part_raw(handle, i, 2), form_size_raw(handle, i), data, path)
+                match uploads.get(name):
+                    case Some(files):
+                        files.append(upload)
+                    case None:
+                        uploads[name] = [upload]
+            case None:
+                value = form_part_raw(handle, i, 3)
+                match fields.get(name):
+                    case Some(values):
+                        values.append(value)
+                    case None:
+                        fields[name] = [value]
+    form_free_raw(handle)
+    return FormData(fields, uploads)
+
+pub struct Form[T]:
+    """A handler parameter holding the form's text fields decoded into `T`, a struct deriving
+    `Json`: `signup: http.Form[Signup]`, then `signup.value`. Numbers and booleans are read from
+    the fields' text (`on`, as a checked box sends, is `True`); a field sent several times fills
+    a list. A missing or malformed field is a 400 naming it."""
+    value: T
+
+pub def form_data(req: Request) -> Result[FormData, HttpError]:
+    return req.form()
+
+pub def form_value[T: FromJson](form: FormData) -> Result[Form[T], HttpError]:
+    parts: list[str] = []
+    for name, values in form.fields.items():
+        if len(values) == 1:
+            parts.append(jsonlib.encode(name) + ":" + jsonlib.encode(values[0]))
+        else:
+            parts.append(jsonlib.encode(name) + ":" + jsonlib.encode(values))
+    set_lenient_raw(1)
+    match jsonlib.decode[T]("{" + ",".join(parts) + "}"):
+        case Ok(value):
+            return Form(value)
+        case Err(error):
+            problems: list[str] = []
+            for i in range(problem_count_raw()):
+                problems.append(form_problem(problem_raw(i, 0), problem_raw(i, 1)))
+            if len(problems) == 0:
+                problems.append(form_problem(error.path, error.message()))
+            return Err(HttpError(400, "invalid form: " + "; ".join(sorted(problems))))
+
+def form_problem(path: str, message: str) -> str:
+    if path == "":
+        return message
+    if message.starts_with("must ") or message.starts_with("is "):
+        return f"field `{path}` {message}"
+    return f"field `{path}`: {message}"
+
+pub def upload_param(form: FormData, name: str) -> Result[Upload, HttpError]:
+    match form.file(name):
+        case Some(upload):
+            return upload
+        case None:
+            return Err(HttpError(400, f"missing file `{name}`"))
+
+pub def upload_param_opt(form: FormData, name: str) -> Result[Upload?, HttpError]:
+    return Ok(form.file(name))
+
+pub def upload_param_list(form: FormData, name: str) -> Result[list[Upload], HttpError]:
+    return Ok(form.files(name))
+
 pub def header_param(req: Request, name: str) -> Result[Header, HttpError]:
     match req.header(name):
         case Some(value):
@@ -508,16 +729,33 @@ pub def cookie_param_opt(req: Request, name: str) -> Result[Cookie?, HttpError]:
         case None:
             return Ok(None)
 
-pub def test_request(method: str, path: str, body: str = "", headers: dict[str, str] = {}) -> Request:
+pub def test_request(method: str, path: str, body: str = "", headers: dict[str, str] = {}, form: dict[str, str] = {}, files: dict[str, Upload] = {}) -> Request:
     """A request that is not from a connection, for calling `server.handle(...)` in tests.
     `path` may end in a query string (`"/items?limit=5"`), which `query` reads; `headers` are
-    what `header` and `cookie` read, with names in any case."""
+    what `header` and `cookie` read, with names in any case. `form` sends text fields as an
+    urlencoded body, and `files` (made with `http.test_file`) a multipart form with them."""
     before, _mark, after = path.partition("?")
     lowered: dict[str, str] = {}
     for name, value in headers.items():
         lowered[name.lower()] = value
     request = Request(method, before)
-    request.extra = RequestExtra(TestParts(body, after, lowered), None)
+    parts = TestParts(body, after, lowered)
+    if len(files) > 0:
+        fields: dict[str, list[str]] = {}
+        for name, value in form.items():
+            fields[name] = [value]
+        uploads: dict[str, list[Upload]] = {}
+        for name, upload in files.items():
+            uploads[name] = [upload]
+        parts.form = Some(FormData(fields, uploads))
+        lowered["content-type"] = "multipart/form-data; boundary=test"
+    elif len(form) > 0:
+        pairs: list[tuple[str, str]] = []
+        for name, value in form.items():
+            pairs.append((name, value))
+        parts.body = form_encode(pairs)
+        lowered["content-type"] = "application/x-www-form-urlencoded"
+    request.extra = RequestExtra(parts, None)
     return request
 
 def parse_bool(text: str, what: str) -> Result[bool, HttpError]:
@@ -1415,6 +1653,13 @@ pub struct Server:
     # (else 414).
     max_headers: int = 100
     max_url: int = 8192
+    # Forms (`req.form()`): the most files (else 413), text fields (else 413) and bytes of
+    # headers in one part (else 400), and where files over 1 MiB wait until the request ends
+    # ("" for the system's temporary directory).
+    max_files: int = 10
+    max_fields: int = 1000
+    max_part_headers: int = 8192
+    upload_dir: str = ""
     max_message: int = 16777216
     ping_interval: int = 30
     trusted_proxies: list[str] = []
@@ -1616,6 +1861,7 @@ impl Server:
             case None:
                 pass
         self.build_fixed()
+        set_form_limits_raw(self.max_files, self.max_fields, self.max_part_headers, self.upload_dir)
         server = self
         handler: Handler = lambda req: server.dispatch(req)
         for i in range(len(self.middleware) - 1, -1, -1):

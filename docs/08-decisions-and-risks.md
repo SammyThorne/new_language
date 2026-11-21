@@ -1219,6 +1219,17 @@ The first part of docs/14, section 4.10:
 - **Progress, not total, times a late body.** Each wait for more of a pending `Content-Length` body has 30 seconds, rather than the whole request 30 seconds, so a large upload on a slow link is not cut off.
 - **Head limits** are counted while the head is parsed: the 101st header gives 431, a target past 8 KiB 414 (`server.max_headers`, `server.max_url`). The 64 KiB cap on the head stays.
 
+### D117. Forms and uploads (production web plan, milestone 12)
+
+Section 4.13 of docs/14:
+
+- **Parsed in the runtime, after the body is read.** `crates/lang_rt/src/multipart.rs` splits urlencoded and multipart bodies once the body has been read under the route's limit (D116). It does not parse while the body arrives: the limit already bounds memory, and a parser over a complete buffer is simpler to make correct with lone LFs, padding after a boundary and delimiter-like lines in data. Text fields are ranges of the body, copied into collected memory only when the program reads them; nothing is copied for a part the program does not ask about.
+- **Large files go to disk anyway.** A file part over 1 MiB is written to a new file (`create_new`, mode 0600, a random name) in `server.upload_dir`, and its path is kept on the request, whose end removes it. This keeps a large upload out of collected memory, where `Upload.bytes()` would otherwise copy it again, and lets `save` move it with a rename. An upload read after its request has ended is an error, not a dangling read.
+- **`FormData`, not `Form`, for `req.form()`.** Section 4.13 names both the result of `req.form()` and the handler parameter `Form`; the parameter is the generic `http.Form[T]`, so the parsed form is `http.FormData`.
+- **`Form[T]` reuses the configuration decoder.** The fields are written as a JSON object (a repeated name as an array) and decoded with the lenient mode `config.load` uses (D112), so numbers, booleans and lists read from text the same way in both, and every bad field is reported at once. That mode now also reads `on` and `off` as booleans, since `on` is what a checked box sends.
+- **E0343** covers the ways a form parameter can conflict: with a JSON body parameter, on a route without a body, or two `http.Form[T]` parameters. A form parameter whose `T` cannot be decoded is E0340, like a body parameter that is not `Json`.
+- **Test requests hold the form.** A test request's body is `str`, which cannot hold every file, so `test_request(files=...)` stores the `FormData` itself; `form=` alone becomes an urlencoded body, so `req.text()` sees it as it would on the wire.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |
