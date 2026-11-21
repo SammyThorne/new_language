@@ -179,6 +179,7 @@ There is no reflection and no scanning at startup.
 | `@http.get(path)`, `@http.post(path)`, `@http.put(path)`, `@http.patch(path)`, `@http.delete(path)` | On a function or a method: a route for that HTTP method and path. Paths support `{name}` segments and a trailing `{rest...}` wildcard |
 | `status=201` | Optional argument: the status for a successful response. The default is 200, or 204 when the handler returns nothing |
 | `tags=["todos"]`, `deprecated=True`, `errors=[404, 409]`, `security=["token"]` | Optional arguments for the API documentation (below): the operation's tags, whether it is deprecated, the error statuses it can return besides the `400` the compiler generates, and the security schemes it accepts (any one of them). The handler's docstring gives the summary (its first paragraph) and the description (the rest). They change nothing about how requests are served |
+| `max_body=10485760` | Optional argument: the largest request body the route reads, in bytes, in place of the group's or the server's (see "Request size limits") |
 | `@http.ws(path)` | A WebSocket endpoint (below) |
 | `server.mount(value)` | Registers every annotated method of the value's type, bound to that value |
 | `server.mount(function)` | Registers one annotated function |
@@ -320,8 +321,8 @@ def remove(self, id: int): ...
 |---|---|
 | `http.Server()` | Creates a server with an empty router |
 | `server.mount(value_or_function, prefix="")` | Registers annotated routes (above) |
-| `server.get/post/put/patch/delete/head/options(path, handler)` | Register one route in call style |
-| `server.route(method, path, handler)` | General form |
+| `server.get/post/put/patch/delete/head/options(path, handler)` | Register one route in call style; `post`, `put`, `patch` and `delete` take `max_body=` |
+| `server.route(method, path, handler, max_body=0)` | General form |
 | `server.group(prefix)` | Returns a sub-router sharing a prefix and its own middleware |
 | `server.use(middleware)` | Middleware has the type `def(http.Request, http.Handler) -> Result[http.Response]` |
 | `http.request_log(skip=[], trace=False)` | Middleware that gives each request an ID and logs one line when it is answered: `GET /photos/7 200` with the fields `method`, `path` (without the query string), `status`, `ms`, `route` (the pattern of the route that took it, when one did) and, for a request from a connection, `client` (`req.client_ip()`); `error` for a 5xx, otherwise `info`. The ID is the client's `X-Request-Id` when it is 1 to 128 ASCII letters, digits, `.`, `_` and `-`, otherwise a new one; it is sent back in `X-Request-Id` (error responses included), kept as the request local `"request_id"`, and carried by log lines (see "Logging"). Paths in `skip` get neither, and nor do `server.health`'s routes. Add it first, so it times the other middleware too. A handler that panics gets no line: the panic is reported instead. With `trace=True`, it also turns tracing on from the environment (see "Traces"), and its lines carry `trace_id` and `span_id` |
@@ -346,6 +347,27 @@ def remove(self, id: int): ...
 | `http.url_encode(text)`, `http.url_decode(text, plus_is_space=True) -> str?`, `http.form_encode([(name, value), ...])` | Percent-encoding: everything but ASCII letters, digits and `-._~` as `%XX` of its UTF-8 bytes. `form_encode` makes a query string or an `application/x-www-form-urlencoded` body |
 | `http.test_request(method, path, body="", headers={})` | A request without a connection, for `server.handle(...)` in tests. A query string on `path` is what `query` reads; `headers` are what `header` and `cookie` read |
 | `http.Error` | An `Error` carrying a status code |
+
+### Request size limits (docs/14, milestone 11)
+
+```python
+server.max_body = 1_048_576                                # 1 MiB for every route; the default is 8 MiB
+server.post("/photos", upload, max_body=50 * 1_048_576)   # 50 MiB for this one
+admin = server.group("/admin")
+admin.max_body = 10_000                                    # for the group's routes
+
+@http.post("/avatars", max_body=2_097_152)
+def avatar(req: http.Request) -> Result[str, http.HttpError]: ...
+```
+
+- **Which limit.** A route's `max_body`, else its group's (a nested group starts with its parent's), else `server.max_body`. A body larger than it gets **413**, with `the request body is larger than N bytes`.
+- **Bodies are read when the handler asks.** A body of up to 64 KiB (and `server.max_body`) is read with the request's head, as nearly every API request's is. A larger one, by `Content-Length` or chunked, is read only when the handler calls `req.text()`, `req.json()`, `req.body()` or `http.body[T]`, against the route's limit: a `Content-Length` past it is refused before any of it is read. So a route that allows large uploads does not make every route accept them.
+- **The 413 is final.** `req.text()` and the others return it as an error, and `req.body()`, which has no error to return, gives empty bytes: either way the client is answered 413, whatever the handler returns.
+- **`Expect: 100-continue`** is answered with `100 Continue` only when the handler first reads the body, so a client that asks first never sends an upload that is refused, or that the handler does not want.
+- **A body the handler does not read** is read and dropped after the response when no more than 1 MiB of it is left, so the connection can serve its next request; past that, the response says `Connection: close` and the connection closes. A closing connection goes on reading what arrives for up to two seconds, so the client sees the response rather than a reset.
+- **Time.** A body read later must keep arriving: 30 seconds without any of it is a 408 (an upload may take longer in all).
+- **Heads.** At most `server.max_headers` headers (100; else **431**), a request target, path and query string, of at most `server.max_url` bytes (8 KiB; else **414**), and a head of at most 64 KiB (431).
+- **Test requests** (`server.handle(http.test_request(...))`) check a route's or group's `max_body` in `req.text()`, so a test can see the 413; `server.max_body` and the head limits apply only to requests from a connection.
 
 ### Error mapping
 
@@ -838,7 +860,7 @@ What is recorded:
 | `http_response_size_bytes` | summary | `method`, `route` | `_sum` and `_count` of body bytes sent (none for `HEAD` and 304) |
 | `http_requests_in_flight`, `http_connections_open` | gauge | | |
 | `http_connections_total` | counter | | Accepted since recording began |
-| `http_request_errors_total` | counter | `kind` | `panic` (a handler panicked: a 500), `timeout` (a client too slow to send its request: 408), `parse` (400, 505), `too_large` (413, 431) |
+| `http_request_errors_total` | counter | `kind` | `panic` (a handler panicked: a 500), `timeout` (a client too slow to send its request: 408), `parse` (400, 505), `too_large` (a body past its limit: 413, which is also counted as a request; a head too large: 414, 431) |
 | `process_start_time_seconds`, `process_resident_memory_bytes`, `process_cpu_seconds_total` | gauge, gauge, counter | | From `/proc` |
 | `runtime_heap_bytes`, `runtime_gc_collections_total` | gauge, counter | | From the collector |
 | `runtime_tasks`, `runtime_worker_threads` | gauge | | |

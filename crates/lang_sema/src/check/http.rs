@@ -140,6 +140,8 @@ pub(super) struct Route {
     /// What the documentation says about it (docs/12): `tags=`, `deprecated=`, `errors=`, and
     /// the handler's docstring split into a summary line and the rest.
     pub doc: RouteDoc,
+    /// `max_body=`: the largest request body the route reads, in bytes.
+    pub max_body: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -374,6 +376,7 @@ impl<'m> Checker<'_, 'm> {
         let mut path = None;
         let mut status = None;
         let mut doc = RouteDoc::default();
+        let mut max_body = None;
         for arg in &annotation.args {
             match (&arg.keyword, &arg.value) {
                 (None, ast::AnnotationValue::Str(text)) if path.is_none() => path = Some(text.clone()),
@@ -438,6 +441,18 @@ impl<'m> Checker<'_, 'm> {
                     });
                     doc.security = names;
                 }
+                (Some(k), value) if k.name == "max_body" && !ws => match value {
+                    ast::AnnotationValue::Int(bytes) if (1..1 << 38).contains(bytes) => max_body = Some(*bytes),
+                    _ => {
+                        self.route_error(
+                            "`max_body=` takes the largest body to accept, in bytes",
+                            arg.span,
+                            "not a positive number of bytes",
+                            Some("for example `max_body=10485760` for 10 MiB"),
+                        );
+                        return None;
+                    }
+                },
                 (Some(k), value) if k.name == "deprecated" => {
                     let ast::AnnotationValue::Bool(flag) = value else {
                         self.route_error(
@@ -479,7 +494,7 @@ impl<'m> Checker<'_, 'm> {
                         if ws {
                             "`@http.ws` takes a path and, optionally, `tags=` and `deprecated=`"
                         } else {
-                            "a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=` and `security=`"
+                            "a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=`, `security=` and `max_body=`"
                         },
                         arg.span,
                         "not expected here",
@@ -764,7 +779,22 @@ impl<'m> Checker<'_, 'm> {
             }
         }
         let name = function.name.name.clone();
-        Some(Route { method, path, status, handler, name, params, reply, ok, fallible, ws, protected, span, doc })
+        Some(Route {
+            method,
+            path,
+            status,
+            handler,
+            name,
+            params,
+            reply,
+            ok,
+            fallible,
+            ws,
+            protected,
+            span,
+            doc,
+            max_body,
+        })
     }
 
     /// The `{name}` segments of a route path, after checking its syntax.
@@ -1043,8 +1073,9 @@ impl<'m> Checker<'_, 'm> {
                     text.push_str(&format!("        return __http.reply_json({call}{try_mark}, {status})\n"))
                 }
             }
+            let limit = route.max_body.map(|bytes| format!(", max_body={bytes}")).unwrap_or_default();
             text.push_str(&format!(
-                "    __server.route({:?}, __prefix + {:?}, __route_{index})\n",
+                "    __server.route({:?}, __prefix + {:?}, __route_{index}{limit})\n",
                 route.method, route.path
             ));
         }

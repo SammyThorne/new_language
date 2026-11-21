@@ -1,0 +1,49 @@
+# Request size limits and lazy bodies (docs/14, milestone 11). Run by
+# crates/lang_cli/tests/limits.rs, which sends bodies at and past each limit, with and without
+# `Expect: 100-continue`, pipelined and chunked.
+
+import http
+import io
+
+def echo(req: http.Request) -> Result[http.Response]:
+    text = req.text()?
+    return http.text(f"read {len(text)}")
+
+def raw(req: http.Request) -> Result[http.Response]:
+    data = req.body()
+    return http.text(f"bytes {len(data)}")
+
+def ignore(req: http.Request) -> Result[http.Response]:
+    return http.text("ignored")
+
+def swallow(req: http.Request) -> Result[http.Response]:
+    # A handler that answers 200 whatever happened: past the limit the client still gets a 413.
+    match req.text():
+        case Ok(text):
+            return http.text(f"got {len(text)}")
+        case Err(_):
+            return http.text("swallowed")
+
+@http.post("/note", max_body=10)
+def note(req: http.Request) -> Result[str, http.HttpError]:
+    text = req.text()?
+    return f"note {text}"
+
+def main():
+    server = http.Server()
+    server.max_body = 1000
+    server.max_headers = 20
+    server.max_url = 200
+    server.post("/echo", echo)
+    server.post("/raw", raw)
+    server.post("/ignore", ignore)
+    server.post("/swallow", swallow)
+    server.post("/big", echo, max_body=3000000)
+    group = server.group("/g")
+    group.max_body = 50
+    group.post("/echo", echo)
+    group.post("/wide", echo, max_body=500)
+    server.mount(note)
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()

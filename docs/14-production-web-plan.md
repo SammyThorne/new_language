@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 10 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 11 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1099,6 +1099,16 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - The stress run (300) passes.
 - **Gate:** the counts unchanged, since every benchmark body is under 64 KiB.
 - **Docs:** docs/05.
+
+**Done** (D116). Everything listed, with these differences:
+- A route's limit is carried in `Route.label` (times 2^24) and stored by the call that already tells the runtime which route took the request; a group's is folded into its routes when they are registered.
+- Eagerly read bodies are checked against the route's limit as well, since a route or group may allow less than the server. Only a body that was not all read closes the connection after a 413.
+- `req.body()` returns `bytes`, not a `Result`: past the limit it is empty, and the runtime replaces whatever the handler answered with the 413, as it does when the handler ignores the error from `req.text()`.
+- A connection that closes with body bytes still arriving reads and drops them for up to two seconds first (a lingering close), so the client reads the 413 or the `Connection: close` response instead of a reset.
+- A pending body's read allows 30 seconds for each wait rather than 30 seconds in all.
+- The head limits are `server.max_headers` (100) and `server.max_url` (8 KiB); 414 is counted under `too_large` like 413 and 431.
+- Test requests check a route's or group's `max_body` in `req.text()`.
+- Tests: `crates/lang_cli/tests/limits.rs` runs `tests/http/limits_server.vi` with the server's, a group's, a group route's, a route's past 64 KiB and an annotation's limits, at each limit and one past it, by `Content-Length` and chunked; `req.body()` and a handler that swallows the error both still answer 413; `100 Continue` sent only when the body is read, a 413 before it, and a close when it is never read; pipelined requests after drained `Content-Length` and chunked bodies; a close after a 3 MiB body that is not read; and the header and target limits at and past them. `tests/run/http_max_body.vi` covers test requests, and `tests/ui/route_annotation_errors.vi` a bad `max_body=`. The stress run passes, and the counts are unchanged.
 
 #### Milestone 12: forms and uploads (about 3 days; after 11)
 

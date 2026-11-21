@@ -7,8 +7,9 @@
 //! request; the compiled code reads the request through the `lrt_http_req_*` functions and leaves
 //! its response with `lrt_http_respond`, which the connection then writes.
 //!
-//! What the parser handles: request line and headers (at most 64 KiB), `Content-Length` and
-//! chunked request bodies (at most 8 MiB by default), `Expect: 100-continue`, keep-alive (the
+//! What the parser handles: request line and headers (at most 64 KiB, 100 headers and an 8 KiB
+//! target by default), `Content-Length` and chunked request bodies, `Expect: 100-continue`,
+//! keep-alive (the
 //! HTTP/1.1 default, and HTTP/1.0 with `Connection: keep-alive`), pipelined requests, and `HEAD`
 //! (no body is written). Responses get `Date`, `Server`, `Content-Length` and `Connection`
 //! headers. A connection idle for 60 seconds, or slower than 30 seconds to send a request, is
@@ -44,6 +45,16 @@ static DRAIN_SECONDS: AtomicI64 = AtomicI64::new(0);
 static DRAINING: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicI64 = AtomicI64::new(0);
 static MAX_BODY: AtomicI64 = AtomicI64::new(8 * 1024 * 1024);
+/// Bodies up to this size (and `MAX_BODY`) are read with the head; larger ones, and those
+/// awaited with `Expect: 100-continue`, when the handler asks, against the route's limit.
+const EAGER_BODY: usize = 64 * 1024;
+/// How much of a body the handler did not read is read and dropped to keep the connection.
+const DRAIN_LIMIT: usize = 1024 * 1024;
+/// How long a connection that is closing with a body still arriving goes on reading it, so
+/// that the client sees the response rather than a reset.
+const LINGER: Duration = Duration::from_secs(2);
+static MAX_HEADERS: AtomicI64 = AtomicI64::new(100);
+static MAX_TARGET: AtomicI64 = AtomicI64::new(8192);
 static LISTENERS: Mutex<Vec<Option<Listener>>> = Mutex::new(Vec::new());
 
 /// A listening socket, and the TLS configuration for its connections if it serves HTTPS.
@@ -150,6 +161,14 @@ pub extern "C-unwind" fn lrt_http_port(listener: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_http_set_max_body(bytes: i64) {
     MAX_BODY.store(bytes.max(0), Ordering::Relaxed);
+}
+
+/// The most headers a request may have (else 431), and the longest request target, path and
+/// query string (else 414): `server.max_headers` and `server.max_url`.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_http_set_request_limits(headers: i64, target: i64) {
+    MAX_HEADERS.store(headers.max(1), Ordering::Relaxed);
+    MAX_TARGET.store(target.max(1), Ordering::Relaxed);
 }
 
 /// Ask a running `lrt_http_serve` to stop, as SIGTERM does.
@@ -486,6 +505,22 @@ impl Socket {
         Ok(())
     }
 
+    /// Before closing with a request body still arriving: stop sending, and read and drop
+    /// what comes for up to [`LINGER`], so that the client reads the response instead of
+    /// meeting a reset for the unread data.
+    #[cold]
+    #[inline(never)]
+    fn linger(&self) {
+        let _ = self.stream.shutdown(Shutdown::Write);
+        let deadline = Instant::now() + LINGER;
+        let mut scratch = vec![0u8; 16 * 1024];
+        while let Ok(n) = self.read(&mut scratch, Deadline::At(deadline), false) {
+            if n == 0 {
+                break;
+            }
+        }
+    }
+
     pub(crate) fn shutdown(&self) {
         if let Some(session) = &self.tls {
             // Say goodbye properly if the socket will take it now; never wait for it.
@@ -634,6 +669,41 @@ enum Body {
     InBuffer(Span),
     /// A chunked body, decoded.
     Owned(Vec<u8>),
+    /// Not read yet: see [`Pending`].
+    Pending(Box<Pending>),
+}
+
+/// A body not read with the head (docs/14, 4.10): larger than [`EAGER_BODY`], or awaited with
+/// `Expect: 100-continue`. It is read against the route's limit when the handler asks
+/// ([`Request::load_body`]), or drained after the response.
+struct Pending {
+    /// Where the rest starts in the buffer: the body's first byte, or a chunked body's next
+    /// size line.
+    at: usize,
+    /// `Content-Length`, or `None` for a chunked body.
+    length: Option<usize>,
+    /// A chunked body's bytes decoded so far.
+    decoded: Vec<u8>,
+    /// `100 Continue` is owed before the client sends the body.
+    continue_owed: bool,
+}
+
+impl Pending {
+    /// Whether the rest is worth reading and dropping to keep the connection: the client is
+    /// sending it, and it is not more than [`DRAIN_LIMIT`] (as far as is known).
+    fn drainable(&self, buffered: usize) -> bool {
+        !self.continue_owed
+            && self.length.is_none_or(|length| length - buffered.saturating_sub(self.at).min(length) <= DRAIN_LIMIT)
+    }
+}
+
+/// Where a chunked body stands after reading as much as a limit allows.
+enum Chunked {
+    /// All of it, and where the request ends.
+    Done(Vec<u8>, usize),
+    /// The next chunk would pass the limit: what was decoded, and where that chunk's size line
+    /// starts.
+    Over(Vec<u8>, usize),
 }
 
 /// A parsed request: offsets into its connection's buffer, which holds its head and body
@@ -672,6 +742,11 @@ pub struct Request {
     /// The status and body size of the response, for the metrics.
     status: i64,
     bytes: u64,
+    /// The route's `max_body`, or 0 for the server's.
+    limit: u64,
+    /// Why a pending body could not be read (413, 408 or 400), which the client is told
+    /// whatever the handler answers; 0 if nothing went wrong.
+    refused: u16,
 }
 
 impl Request {
@@ -736,10 +811,116 @@ impl Request {
             .map(|h| self.text(h.value))
     }
 
+    /// The body: empty until a pending one is loaded.
     pub(crate) fn body(&self) -> &[u8] {
         match &self.body {
             Body::InBuffer(span) => self.bytes(*span),
             Body::Owned(bytes) => bytes,
+            Body::Pending(_) => &[],
+        }
+    }
+
+    /// Read a pending body against the route's limit, else the server's, sending
+    /// `100 Continue` first if it is owed. On failure the request is marked refused, with the
+    /// status to answer and why.
+    pub(crate) fn load_body(&mut self) -> Result<(), (u16, String)> {
+        if self.refused != 0 {
+            return Err((self.refused, refusal(self.refused, self.max_body())));
+        }
+        if !matches!(self.body, Body::Pending(_)) {
+            // Read with the head, under the server's limit: a route's may be lower.
+            if self.limit > 0 && self.body().len() as u64 > self.limit {
+                self.refused = 413;
+                return Err((413, refusal(413, self.max_body())));
+            }
+            return Ok(());
+        }
+        let result = self.read_pending();
+        if let Err(status) = result {
+            // The rest of the body may still be on its way: the connection closes.
+            self.refused = status;
+            self.keep_alive = false;
+            return Err((status, refusal(status, self.max_body())));
+        }
+        Ok(())
+    }
+
+    fn max_body(&self) -> usize {
+        if self.limit > 0 { self.limit as usize } else { MAX_BODY.load(Ordering::Relaxed) as usize }
+    }
+
+    #[inline(never)]
+    fn read_pending(&mut self) -> Result<(), u16> {
+        let limit = self.max_body();
+        let Body::Pending(pending) = &mut self.body else { return Ok(()) };
+        // SAFETY: the connection outlives its requests.
+        let connection = unsafe { &mut *self.connection };
+        // Refused before the client sends it, when the length is known.
+        if pending.length.is_some_and(|n| n > limit) {
+            return Err(413);
+        }
+        if pending.continue_owed {
+            if !connection.flush() || connection.socket.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").is_err() {
+                return Err(400);
+            }
+            pending.continue_owed = false;
+        }
+        let status = |error: ReadError| match error {
+            ReadError::Status(status, _) => status,
+            ReadError::Closed => 400,
+        };
+        let (body, end) = match pending.length {
+            Some(length) => {
+                // Thirty seconds for each wait, so a large upload may take longer in all.
+                while connection.buffer.len() < pending.at + length {
+                    connection.fill(false, &mut None).map_err(status)?;
+                }
+                (Body::InBuffer(Span::new(pending.at, pending.at + length)), pending.at + length)
+            }
+            None => {
+                let decoded = std::mem::take(&mut pending.decoded);
+                match connection.read_chunked(pending.at, decoded, limit, &mut None).map_err(status)? {
+                    Chunked::Done(body, end) => (Body::Owned(body), end),
+                    Chunked::Over(..) => return Err(413),
+                }
+            }
+        };
+        self.body = body;
+        self.end = end;
+        Ok(())
+    }
+
+    /// Read and drop a body the handler did not read, to keep the connection: true if it all
+    /// arrived within [`DRAIN_LIMIT`], when the request's end is now known.
+    #[cold]
+    #[inline(never)]
+    fn drain(&mut self) -> bool {
+        let Body::Pending(pending) = &mut self.body else { return true };
+        // SAFETY: the connection outlives its requests.
+        let connection = unsafe { &mut *self.connection };
+        if !pending.drainable(connection.buffer.len()) {
+            return false;
+        }
+        match pending.length {
+            Some(length) => {
+                while connection.buffer.len() < pending.at + length {
+                    if connection.fill(false, &mut None).is_err() {
+                        return false;
+                    }
+                }
+                self.end = pending.at + length;
+                true
+            }
+            None => {
+                let limit = pending.decoded.len() + DRAIN_LIMIT;
+                match connection.read_chunked(pending.at, std::mem::take(&mut pending.decoded), limit, &mut None) {
+                    Ok(Chunked::Done(_, end)) => {
+                        self.end = end;
+                        true
+                    }
+                    _ => false,
+                }
+            }
         }
     }
 
@@ -932,6 +1113,9 @@ impl Connection {
         if method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) || !target.starts_with('/') {
             return Err(ReadError::Status(400, "Bad Request"));
         }
+        if target.len() > MAX_TARGET.load(Ordering::Relaxed) as usize {
+            return Err(ReadError::Status(414, "URI Too Long"));
+        }
         let http10 = match version {
             "HTTP/1.1" => false,
             "HTTP/1.0" => true,
@@ -941,7 +1125,11 @@ impl Connection {
         let mut more_headers = Vec::new();
         let mut header_count = 0;
         let (mut connection, mut transfer_encoding, mut content_length, mut expect) = (None, None, None, None);
+        let max_headers = MAX_HEADERS.load(Ordering::Relaxed) as usize;
         for line in header_text.split("\r\n").filter(|_| !header_text.is_empty()) {
+            if header_count == max_headers {
+                return Err(ReadError::Status(431, "Request Header Fields Too Large"));
+            }
             let Some((name, value)) = line.split_once(':') else {
                 return Err(ReadError::Status(400, "Bad Request"));
             };
@@ -980,10 +1168,6 @@ impl Connection {
             Some(text) if !chunked => Some(text.parse::<usize>().map_err(|_| ReadError::Status(400, "Bad Request"))?),
             _ => None,
         };
-        let max_body = MAX_BODY.load(Ordering::Relaxed) as usize;
-        if length.is_some_and(|n| n > max_body) {
-            return Err(ReadError::Status(413, "Content Too Large"));
-        }
         let expects_continue = expect.is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
         let method = match METHODS.iter().find(|m| **m == method) {
             Some(known) => Method::Known(known),
@@ -997,22 +1181,29 @@ impl Connection {
         };
         let query = if query.is_empty() { Span::default() } else { span_of(query) };
         let body_start = header_end + 4;
-        if expects_continue && (chunked || length.is_some_and(|n| n > 0)) {
-            if !self.flush() {
-                return Err(ReadError::Closed);
+        // Small bodies are read now; others are left for the handler, which knows the route's
+        // limit (docs/14, 4.10). Reading may grow (and so move) the buffer; spans are offsets.
+        let eager = EAGER_BODY.min(MAX_BODY.load(Ordering::Relaxed) as usize);
+        let pending = |at, length, decoded, continue_owed| {
+            Body::Pending(Box::new(Pending { at, length, decoded, continue_owed }))
+        };
+        let (body, end) = if expects_continue && (chunked || length.is_some_and(|n| n > 0)) {
+            (pending(body_start, length, Vec::new(), true), body_start)
+        } else if chunked {
+            match self.read_chunked(body_start, Vec::new(), eager, &mut deadline)? {
+                Chunked::Done(body, end) => (Body::Owned(body), end),
+                Chunked::Over(decoded, at) => (pending(at, None, decoded, false), at),
             }
-            let _ = self.socket.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
-        }
-        // Reading the body may grow (and so move) the buffer; the spans above are offsets.
-        let (body, end) = if chunked {
-            let (body, end) = self.read_chunked(body_start, max_body, &mut deadline)?;
-            (Body::Owned(body), end)
         } else {
             let length = length.unwrap_or(0);
-            while self.buffer.len() < body_start + length {
-                self.fill(false, &mut deadline)?;
+            if length > eager {
+                (pending(body_start, Some(length), Vec::new(), false), body_start)
+            } else {
+                while self.buffer.len() < body_start + length {
+                    self.fill(false, &mut deadline)?;
+                }
+                (Body::InBuffer(Span::new(body_start, body_start + length)), body_start + length)
             }
-            (Body::InBuffer(Span::new(body_start, body_start + length)), body_start + length)
         };
         Ok(Request {
             head: matches!(method, Method::Known("HEAD")),
@@ -1035,6 +1226,8 @@ impl Connection {
             route_flags: 0,
             status: 0,
             bytes: 0,
+            limit: 0,
+            refused: 0,
         })
     }
 
@@ -1048,15 +1241,17 @@ impl Connection {
         }
     }
 
-    /// A chunked body starting at `at`: the decoded bytes, and where the request ends.
+    /// A chunked body from the size line at `at`, after the `body` decoded so far: all of it,
+    /// or as much as `max_body` allows.
     fn read_chunked(
         &mut self,
         mut at: usize,
+        mut body: Vec<u8>,
         max_body: usize,
         deadline: &mut Option<u64>,
-    ) -> Result<(Vec<u8>, usize), ReadError> {
-        let mut body = Vec::new();
+    ) -> Result<Chunked, ReadError> {
         loop {
+            let line_start = at;
             let line_end = self.line_end(at, deadline)?;
             let size_text =
                 std::str::from_utf8(&self.buffer[at..line_end]).map_err(|_| ReadError::Status(400, "Bad Request"))?;
@@ -1070,12 +1265,12 @@ impl Connection {
                     let empty = end == at;
                     at = end + 2;
                     if empty {
-                        return Ok((body, at));
+                        return Ok(Chunked::Done(body, at));
                     }
                 }
             }
             if body.len() + size > max_body {
-                return Err(ReadError::Status(413, "Content Too Large"));
+                return Ok(Chunked::Over(body, line_start));
             }
             while self.buffer.len() < at + size + 2 {
                 self.fill(false, deadline)?;
@@ -1217,6 +1412,7 @@ fn reason(status: i64) -> &'static str {
         408 => "Request Timeout",
         409 => "Conflict",
         413 => "Content Too Large",
+        414 => "URI Too Long",
         415 => "Unsupported Media Type",
         422 => "Unprocessable Content",
         429 => "Too Many Requests",
@@ -1318,7 +1514,7 @@ fn serve_connection(
                 if metrics::on() {
                     metrics::request_failed(match status {
                         408 => metrics::ErrorKind::Timeout,
-                        413 | 431 => metrics::ErrorKind::TooLarge,
+                        413 | 414 | 431 => metrics::ErrorKind::TooLarge,
                         _ => metrics::ErrorKind::Parse,
                     });
                 }
@@ -1341,6 +1537,9 @@ fn serve_connection(
         // A panicking handler ends only this request, with a 500; the panic was reported
         // where it happened. Mutexes it held are released.
         let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(code, env, handle)));
+        if request.refused != 0 {
+            refuse(&mut request);
+        }
         if let Some(started) = started {
             record(&request, started, handled.is_err());
         }
@@ -1371,11 +1570,20 @@ fn serve_connection(
                 break;
             }
         }
+        // A body the handler did not read: dropped if it is small enough, else the connection
+        // closes, after reading what arrives for a moment so the client sees the response.
+        let unread = matches!(request.body, Body::Pending(_));
+        if unread && request.keep_alive && !request.drain() {
+            request.keep_alive = false;
+        }
+        let linger = !request.keep_alive && matches!(request.body, Body::Pending(_));
         connection.start = request.end;
         let keep_alive = request.keep_alive;
         drop(request);
         if !keep_alive {
-            connection.flush();
+            if connection.flush() && linger {
+                connection.socket.linger();
+            }
             break;
         }
         if connection.out.len() >= FLUSH_AT && !connection.flush() {
@@ -1383,6 +1591,40 @@ fn serve_connection(
         }
     }
     connection.socket.shutdown();
+}
+
+/// The message for a body that could not be read.
+fn refusal(status: u16, limit: usize) -> String {
+    match status {
+        413 => format!("the request body is larger than {limit} bytes"),
+        408 => "the request body did not arrive in time".to_string(),
+        _ => "the request body did not arrive in full".to_string(),
+    }
+}
+
+/// Answer a request whose body could not be read with that status, whatever the handler
+/// answered (it may have ignored the error). The connection closes if the body was not all
+/// read.
+#[cold]
+#[inline(never)]
+fn refuse(request: &mut Request) {
+    if metrics::on() && request.refused == 413 {
+        metrics::request_failed(metrics::ErrorKind::TooLarge);
+    }
+    let status = i64::from(request.refused);
+    if request.responded && request.status == status {
+        return;
+    }
+    // SAFETY: the connection outlives its requests.
+    let out = unsafe { &mut (*request.connection).out };
+    out.truncate(request.out_start);
+    request.stream = None;
+    request.file = None;
+    let body = format!("{}\n", refusal(request.refused, request.max_body()));
+    write_response(out, status, "text/plain; charset=utf-8", "", body.as_bytes(), request.keep_alive, request.head);
+    request.responded = true;
+    request.status = status;
+    request.bytes = if request.head { 0 } else { body.len() as u64 };
 }
 
 /// Record a request in the metrics: its route, method, status, time and response size.
@@ -1496,6 +1738,8 @@ pub unsafe extern "C-unwind" fn lrt_http_set_route(handle: i64, route: i64) {
     let request = unsafe { request(handle) };
     request.route = (route & 0xffff).min(i64::from(metrics::UNMATCHED)) as u16;
     request.route_flags = ((route >> 16) & 0xff) as u8;
+    // The route's `max_body`, from `Route.label`'s high bits.
+    request.limit = (route >> 24).max(0) as u64;
 }
 
 /// What `lrt_http_set_route` was given, or the unmatched slot.
@@ -1603,7 +1847,25 @@ pub unsafe extern "C-unwind" fn lrt_http_req_header(handle: i64, ptr: *const u8,
 /// `handle` is a live request.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_http_req_body(handle: i64) -> Str {
-    optional(std::str::from_utf8(unsafe { request(handle) }.body()).ok())
+    let request = unsafe { request(handle) };
+    let _ = request.load_body();
+    optional(std::str::from_utf8(request.body()).ok())
+}
+
+/// Read the body now if it was left pending: 0, or the status to answer (413, 408 or 400)
+/// with the reason as the last error. The client gets that status whatever the handler does.
+///
+/// # Safety
+/// `handle` is a live request.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_req_read_body(handle: i64) -> i64 {
+    match unsafe { request(handle) }.load_body() {
+        Ok(()) => 0,
+        Err((status, message)) => {
+            set_error(message);
+            i64::from(status)
+        }
+    }
 }
 
 /// The body's bytes, whether or not they are text (the data of a `bytes` value).
@@ -1612,7 +1874,10 @@ pub unsafe extern "C-unwind" fn lrt_http_req_body(handle: i64) -> Str {
 /// `handle` is a live request.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_http_req_body_bytes(handle: i64) -> Str {
-    Str::from_bytes(unsafe { request(handle) }.body())
+    let request = unsafe { request(handle) };
+    // Past the limit, empty: the client is answered 413 whatever the handler does.
+    let _ = request.load_body();
+    Str::from_bytes(request.body())
 }
 
 /// The client's IP address: the peer's, or, when the peer is a trusted proxy (see
@@ -1907,6 +2172,12 @@ pub unsafe extern "C-unwind" fn lrt_http_respond(
     let request = unsafe { request(handle) };
     // SAFETY: the connection outlives the handler call.
     let out = unsafe { &mut (*request.connection).out };
+    if let Body::Pending(pending) = &request.body
+        && !pending.drainable(unsafe { (*request.connection).buffer.len() })
+    {
+        // Too much left to drain: say the connection closes.
+        request.keep_alive = false;
+    }
     out.truncate(request.out_start);
     request.stream = None;
     request.responded = true;

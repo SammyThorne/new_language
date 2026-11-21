@@ -41,6 +41,18 @@ impl Api:
     def security_name_with_a_space(self) -> str:
         return "i"
 
+    @http.post("/j", max_body=0)
+    def no_body_at_all(self) -> str:
+        return "j"
+
+    @http.post("/k", max_body="10MB")
+    def max_body_as_text(self) -> str:
+        return "k"
+
+    @http.post("/ok", max_body=1048576)
+    def a_megabyte(self) -> str:
+        return "ok"
+
     @http.get("/ok", tags=["todos", "admin"], deprecated=True, errors=[409, 404, 404], security=["token", "token"])
     def fine(self) -> str:
         """Everything here is accepted."""

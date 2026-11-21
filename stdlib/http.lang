@@ -39,6 +39,12 @@ def shutdown_raw()
 @extern("lrt_http_set_max_body")
 def set_max_body_raw(limit: int)
 
+@extern("lrt_http_set_request_limits")
+def set_request_limits_raw(headers: int, target: int)
+
+@extern("lrt_http_req_read_body")
+def req_read_body(handle: int) -> int
+
 @extern("lrt_http_req_method")
 def req_method(handle: int) -> str
 
@@ -377,14 +383,21 @@ impl Request:
                 return None
 
     def text(self) -> Result[str, HttpError]:
-        """The body as text; a 400 error if it is not UTF-8. Each call reads it from the
+        """The body as text; a 400 error if it is not UTF-8, and a 413 if it is larger than the
+        route's `max_body` (else the group's, else the server's). Each call reads it from the
         connection's buffer again, so keep the result rather than calling it twice."""
         if self.handle < 0:
             match self.test_parts():
                 case Some(parts):
+                    limit = self.route_label() // ROUTE_LIMIT
+                    if limit > 0 and len(parts.body.encode()) > limit:
+                        return Err(HttpError(413, f"the request body is larger than {limit} bytes"))
                     return parts.body
                 case None:
                     return ""
+        problem = req_read_body(self.handle)
+        if problem != 0:
+            return Err(HttpError(problem, last_error()))
         match req_body(self.handle):
             case Some(text):
                 return text
@@ -401,7 +414,9 @@ impl Request:
                 return Err(HttpError(400, f"invalid JSON body: {error.message()}"))
 
     def body(self) -> bytes:
-        """The body as bytes, whether or not it is text: for uploads and binary formats."""
+        """The body as bytes, whether or not it is text: for uploads and binary formats. Past
+        the route's `max_body` it is empty, and the client is answered 413 whatever the handler
+        returns."""
         if self.handle < 0:
             match self.test_parts():
                 case Some(parts):
@@ -779,8 +794,12 @@ const UNMATCHED = 1025
 # Route flags, times 65536 in `Route.label`: left out of the metrics, or of the access log.
 const UNMETERED = 65536
 const QUIET = 131072
+# A route's `max_body` is kept in `Route.label` times this, for the runtime to read in the
+# one call that says which route took a request.
+const ROUTE_LIMIT = 16777216
+const MAX_ROUTE_LIMIT = 274877906944
 
-def new_route(method: str, pattern: str, handler: Handler) -> Route:
+def new_route(method: str, pattern: str, handler: Handler, max_body: int = 0) -> Route:
     kinds: list[int] = []
     names: list[str] = []
     for part in split_path(pattern):
@@ -794,7 +813,9 @@ def new_route(method: str, pattern: str, handler: Handler) -> Route:
             kinds.append(LITERAL)
             names.append(part)
     has_params = PARAM in kinds or REST in kinds
-    return Route(method, pattern, handler, kinds, names, has_params, None, route_slot_raw(method, pattern))
+    if max_body < 0 or max_body >= MAX_ROUTE_LIMIT:
+        panic(f"the route {method} {pattern} has max_body={max_body}, which must be from 0 (the server's) to 256 GiB")
+    return Route(method, pattern, handler, kinds, names, has_params, None, route_slot_raw(method, pattern) + max_body * ROUTE_LIMIT)
 
 def split_path(path: str) -> list[str]:
     return [part for part in path.split("/") if part != ""]
@@ -1387,7 +1408,13 @@ pub struct Server:
     Routes, middleware and settings. Register routes, then call `listen`. Request handlers run
     concurrently, one task per connection, so handlers and mounted values must be shareable.
     """
+    # The largest request body a route reads, unless the route or its group says otherwise;
+    # larger ones get a 413. Bodies over 64 KiB are read only when the handler asks for them.
     max_body: int = 8388608
+    # The most headers a request may have (else 431), and the longest path and query string
+    # (else 414).
+    max_headers: int = 100
+    max_url: int = 8192
     max_message: int = 16777216
     ping_interval: int = 30
     trusted_proxies: list[str] = []
@@ -1418,26 +1445,27 @@ pub struct Server:
     priv security_schemes: dict[str, SecurityScheme] = {}
 
 impl Server:
-    def route(self, method: str, path: str, handler: Handler):
-        """Register a handler for a method and a path such as `/todos/{id}` or `/files/{rest...}`."""
-        self.routes.append(new_route(method.upper(), path, handler))
+    def route(self, method: str, path: str, handler: Handler, max_body: int = 0):
+        """Register a handler for a method and a path such as `/todos/{id}` or `/files/{rest...}`.
+        `max_body` is the largest request body it reads, in bytes, in place of the server's."""
+        self.routes.append(new_route(method.upper(), path, handler, max_body))
         self.chain = None
         self.docs_json = ""
 
     def get(self, path: str, handler: Handler):
         self.route("GET", path, handler)
 
-    def post(self, path: str, handler: Handler):
-        self.route("POST", path, handler)
+    def post(self, path: str, handler: Handler, max_body: int = 0):
+        self.route("POST", path, handler, max_body)
 
-    def put(self, path: str, handler: Handler):
-        self.route("PUT", path, handler)
+    def put(self, path: str, handler: Handler, max_body: int = 0):
+        self.route("PUT", path, handler, max_body)
 
-    def patch(self, path: str, handler: Handler):
-        self.route("PATCH", path, handler)
+    def patch(self, path: str, handler: Handler, max_body: int = 0):
+        self.route("PATCH", path, handler, max_body)
 
-    def delete(self, path: str, handler: Handler):
-        self.route("DELETE", path, handler)
+    def delete(self, path: str, handler: Handler, max_body: int = 0):
+        self.route("DELETE", path, handler, max_body)
 
     def head(self, path: str, handler: Handler):
         self.route("HEAD", path, handler)
@@ -1613,6 +1641,7 @@ impl Server:
         if problem != "":
             panic(f"`trusted_proxies` holds {problem!r}, which is not an IP address or a network such as \"10.0.0.0/8\"")
         set_max_body_raw(self.max_body)
+        set_request_limits_raw(self.max_headers, self.max_url)
         set_drain_raw(self.drain_delay)
         ws_set_limits(self.max_message, self.ping_interval)
         return port_raw(listener)
@@ -1914,13 +1943,16 @@ pub struct Group:
     priv server: Server
     priv prefix: str
     priv middleware: list[Middleware] = []
+    # The largest request body its routes read, unless a route says otherwise; 0 for the
+    # server's `max_body`.
+    max_body: int = 0
 
 impl Group:
-    def route(self, method: str, path: str, handler: Handler):
+    def route(self, method: str, path: str, handler: Handler, max_body: int = 0):
         wrapped = handler
         for i in range(len(self.middleware) - 1, -1, -1):
             wrapped = wrap(self.middleware[i], wrapped)
-        self.server.route(method, self.prefix + path, wrapped)
+        self.server.route(method, self.prefix + path, wrapped, max_body if max_body > 0 else self.max_body)
         if len(self.middleware) > 0:
             server = self.server
             preflight: Handler = lambda req: not_routed(req, [r for r in server.routes if fits(r, split_path(req.path))])
@@ -1931,17 +1963,17 @@ impl Group:
     def get(self, path: str, handler: Handler):
         self.route("GET", path, handler)
 
-    def post(self, path: str, handler: Handler):
-        self.route("POST", path, handler)
+    def post(self, path: str, handler: Handler, max_body: int = 0):
+        self.route("POST", path, handler, max_body)
 
-    def put(self, path: str, handler: Handler):
-        self.route("PUT", path, handler)
+    def put(self, path: str, handler: Handler, max_body: int = 0):
+        self.route("PUT", path, handler, max_body)
 
-    def patch(self, path: str, handler: Handler):
-        self.route("PATCH", path, handler)
+    def patch(self, path: str, handler: Handler, max_body: int = 0):
+        self.route("PATCH", path, handler, max_body)
 
-    def delete(self, path: str, handler: Handler):
-        self.route("DELETE", path, handler)
+    def delete(self, path: str, handler: Handler, max_body: int = 0):
+        self.route("DELETE", path, handler, max_body)
 
     def ws(self, path: str, handler: WsHandler):
         self.route("GET", path, lambda req: upgrade(req, handler))
@@ -1960,6 +1992,7 @@ impl Group:
 
     def group(self, prefix: str) -> Group:
         nested = Group(self.server, self.prefix + prefix)
+        nested.max_body = self.max_body
         for middleware in self.middleware:
             nested.middleware.append(middleware)
         return nested

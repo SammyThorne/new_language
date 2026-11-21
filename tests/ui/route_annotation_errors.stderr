@@ -46,7 +46,7 @@ error[E0340]: `@http.ws` takes a path and, optionally, `tags=` and `deprecated=`
    |
    = help: for example `@http.ws("/chat")`
 
-error[E0340]: a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=` and `security=`
+error[E0340]: a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=`, `security=` and `max_body=`
   --> tests/ui/route_annotation_errors.vi:32:21
    |
 32 |     @http.get("/g", summary="no such keyword")
@@ -70,4 +70,20 @@ error[E0340]: `security=` takes a list of security scheme names
    |
    = help: for example `security=["token"]`, with `token` given to `server.docs(security=...)`
 
-error: could not compile `tests/ui/route_annotation_errors.vi` due to 9 errors
+error[E0340]: `max_body=` takes the largest body to accept, in bytes
+  --> tests/ui/route_annotation_errors.vi:44:22
+   |
+44 |     @http.post("/j", max_body=0)
+   |                      ^^^^^^^^^^ not a positive number of bytes
+   |
+   = help: for example `max_body=10485760` for 10 MiB
+
+error[E0340]: `max_body=` takes the largest body to accept, in bytes
+  --> tests/ui/route_annotation_errors.vi:48:22
+   |
+48 |     @http.post("/k", max_body="10MB")
+   |                      ^^^^^^^^^^^^^^^ not a positive number of bytes
+   |
+   = help: for example `max_body=10485760` for 10 MiB
+
+error: could not compile `tests/ui/route_annotation_errors.vi` due to 11 errors

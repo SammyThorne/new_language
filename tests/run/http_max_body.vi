@@ -1,0 +1,29 @@
+# Request size limits on test requests (docs/14, milestone 11): a route's `max_body`, a
+# group's, and a route without one, read through `req.text()`.
+# expect: route: 200 read 10 | 413 {"error":"the request body is larger than 10 bytes"}
+# expect: group: 200 read 20 | 413 {"error":"the request body is larger than 20 bytes"}
+# expect: route in group: 200 read 30 | 413
+# expect: no limit of its own: 200 read 5000
+
+import http
+
+def echo(req: http.Request) -> Result[http.Response]:
+    text = req.text()?
+    return http.text(f"read {len(text)}")
+
+def send(server: http.Server, path: str, size: int) -> str:
+    response = server.handle(http.test_request("POST", path, body="a" * size))
+    return f"{response.status} {response.body.strip()}"
+
+def main():
+    server = http.Server()
+    server.post("/note", echo, max_body=10)
+    server.post("/free", echo)
+    group = server.group("/g")
+    group.max_body = 20
+    group.post("/echo", echo)
+    group.post("/wide", echo, max_body=30)
+    print(f"route: {send(server, '/note', 10)} | {send(server, '/note', 11)}")
+    print(f"group: {send(server, '/g/echo', 20)} | {send(server, '/g/echo', 21)}")
+    print(f"route in group: {send(server, '/g/wide', 30)} | {send(server, '/g/wide', 31)[0:3]}")
+    print(f"no limit of its own: {send(server, '/free', 5000)}")

@@ -1208,6 +1208,17 @@ The `trace` module of docs/14, section 4.9: OTLP export, W3C trace context, and 
 - **`trace.init` reads the standard variables** (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER_ARG`), so the service runs under the same configuration as others in a deployment; `http.request_log(trace=True)` calls it, for services with no code of their own about tracing. Only one configuration per process: a second call keeps the first.
 - **Query spans name the operation only.** A PostgreSQL span is named by the statement's first word and never records the statement, whose literals might be personal data.
 
+### D116. Lazy bodies and per-route limits (production web plan, milestone 11)
+
+The first part of docs/14, section 4.10:
+
+- **Eager below 64 KiB.** A body of up to 64 KiB, and no more than `server.max_body`, is read with the head as before, so the fast path, pipelining and the benchmark counts are unchanged. Anything larger, by `Content-Length` or a chunked body that grows past it, and any body awaited with `Expect: 100-continue`, is left pending: the request records where the rest starts (and a chunked body's bytes decoded so far) in a boxed `Pending`, so the request on the connection's stack grows only by a pointer-sized variant, a limit and a status.
+- **The limit travels with the route.** Routing happens in the program, so the route's limit reaches the runtime through the call that already says which route took the request: `Route.label` carries it above the slot and flags (times 2^24, up to 256 GiB), and `lrt_http_set_route` stores it. A group's limit is folded in when its routes are registered. No lookup is added per request.
+- **Reading is on demand.** `req.text()` first calls `lrt_http_req_read_body`, which reads a pending body against the limit (sending `100 Continue` first if it is owed) and returns 0 or the status to answer, with the reason as the last error. Eagerly read bodies are checked too, since a route may allow less than the server. `req.body()` returns `bytes`, not a `Result`, so past the limit it returns empty bytes; the request is marked refused, and the runtime replaces whatever the handler answered with the 413. So the refusal cannot be ignored by accident.
+- **Draining, closing and lingering.** After the response, a pending body with at most 1 MiB left is read and dropped and the connection kept; otherwise the response, decided when it is written, says `Connection: close`. A connection closing with body bytes still arriving shuts its sending side and reads for up to two seconds before closing, as nginx's lingering close does: closing a socket with unread data makes the kernel send a reset, which can destroy the response before the client reads it.
+- **Progress, not total, times a late body.** Each wait for more of a pending `Content-Length` body has 30 seconds, rather than the whole request 30 seconds, so a large upload on a slow link is not cut off.
+- **Head limits** are counted while the head is parsed: the 101st header gives 431, a target past 8 KiB 414 (`server.max_headers`, `server.max_url`). The 64 KiB cap on the head stays.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |
