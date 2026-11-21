@@ -1,0 +1,15 @@
+# Mistakes with config: making a Secret by hand instead of with `config.secret`, reading its value
+# without `reveal()`, comparing it with a string, and loading settings into a type that cannot
+# be decoded from JSON.
+import config
+
+struct NotJson:
+    port: int
+
+def main():
+    made = config.Secret("hunter2")
+    good = config.secret("hunter2")
+    print(good.value)
+    print(good == "hunter2")
+    print(config.load[NotJson]())
+    print(made)

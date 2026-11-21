@@ -1,0 +1,31 @@
+error[E0335]: `Secret` cannot be created outside module `config`
+  --> tests/ui/config_misuse.vi:10:12
+   |
+10 |     made = config.Secret("hunter2")
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^ its field `value` is private
+   |
+   = help: use a function from `config` that creates one
+
+error[E0335]: field `value` of `Secret` is private to module `config`
+  --> tests/ui/config_misuse.vi:12:16
+   |
+12 |     print(good.value)
+   |                ^^^^^ private field
+
+error[E0321]: cannot use `==` on `Secret` and `str`
+  --> tests/ui/config_misuse.vi:13:11
+   |
+13 |     print(good == "hunter2")
+   |           ^^^^^^^^^^^^^^^^^ `Secret` == `str`
+   |
+   = help: strings only combine with strings; use an f-string or `str(...)` to build text
+
+error[E0331]: `NotJson` does not implement `FromJson`, which `load` requires of `T`
+  --> tests/ui/config_misuse.vi:14:11
+   |
+14 |     print(config.load[NotJson]())
+   |           ^^^^^^^^^^^^^^^^^^^^^^ `T` is `NotJson` here
+   |
+   = help: add `@derive(Json)` to `NotJson`
+
+error: could not compile `tests/ui/config_misuse.vi` due to 4 errors

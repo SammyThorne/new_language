@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 6 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 7 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -996,6 +996,15 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - The one error listing every problem.
   - `Secret` in `str()`, f-strings and logs.
 - **Docs:** docs/05, a site section, and a `.env.example` in the examples that need one. `.gitignore` gains `.env` in example directories.
+
+**Done** (D112). Everything listed, with these differences:
+- Decision 8 kept its default: `load[T: FromJson]` decodes with the derived JSON code in a lenient mode, a flag the reader takes when it starts. Recovery happens only at the top level, so a nested value's problem is reported against its variable with its path (`LIMITS at burst must be an integer, got "x"`).
+- `load_env`'s `path` defaults to `None` rather than `".env"`, which is how a missing default file is fine while a missing explicit one is an error.
+- Double-quoted values also read `\r` and `\t`, and keep any other backslash. A list may be JSON as well as comma-separated, and a struct or `dict` field is read as JSON.
+- `Secret` is `***` in JSON too, so an encoded settings struct does not leak it; `config.secret(value)` makes one in code. `ConfigError` has the list of problems as well as the joined message.
+- `os.environ()` is added, which `load` needs.
+- The `google_login` example reads a `.env` with `load_env` and has a `.env.example`; `.gitignore` has `examples/*/.env`.
+- Tests: `tests/run/config_env.vi` (named so that it does not hide the module) with fixtures in `tests/fixtures/config/`: every quoting case, comments, `export`, multi-line values, a CRLF file with a byte order mark, line-numbered errors, precedence in both directions, seven problems in one error, comma and JSON lists, boolean spellings, `Duration`, `Uuid`, `dict` and optional fields, and `Secret` in `str()`, f-strings, a derived `Display` and JSON. Runtime unit tests for the `.env` grammar and for lenient reads; the `ui` golden `config_misuse`. A log line is an f-string, so the f-string case covers logs.
 
 #### Milestone 8: metrics, health and readiness (about 3 days; after 7)
 

@@ -345,6 +345,22 @@ pub unsafe extern "C-unwind" fn lrt_os_getenv(name: *const u8, len: i64) -> Str 
     }
 }
 
+/// Every environment variable as `NAME=value`, each followed by a NUL (which neither can
+/// hold). Variables whose name or value is not UTF-8 are left out.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_os_environ() -> Str {
+    let mut out = String::new();
+    for (name, value) in std::env::vars_os() {
+        if let (Some(name), Some(value)) = (name.to_str(), value.to_str()) {
+            out.push_str(name);
+            out.push('=');
+            out.push_str(value);
+            out.push('\0');
+        }
+    }
+    Str::from_bytes(out.as_bytes())
+}
+
 /// Set an environment variable. Returns 0, or -1 if the name is empty or holds `=` or NUL, or
 /// the value holds NUL, which the environment cannot store.
 ///

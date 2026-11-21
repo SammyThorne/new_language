@@ -310,10 +310,11 @@ impl<'ctx> Codegen<'ctx, '_> {
         self.str_eq(a, al, b, bl)
     }
 
-    fn push_key(&mut self, reader: PointerValue<'ctx>, key: &str) {
+    /// Enter the value of `key`; returns the depth of the path before it (0 at the top level).
+    fn push_key(&mut self, reader: PointerValue<'ctx>, key: &str) -> IntValue<'ctx> {
         let text = self.str_const(key);
         let [ptr, len] = self.str_parts(text.into());
-        self.call_rt("lrt_json_push_key", &[reader.into(), ptr, len]);
+        self.call_rt("lrt_json_push_key", &[reader.into(), ptr, len]).unwrap().into_int_value()
     }
 
     pub(crate) fn json_decode_body(&mut self, function: FunctionValue<'ctx>, ty: Ty) {
@@ -669,9 +670,21 @@ impl<'ctx> Codegen<'ctx, '_> {
             let (this_field, next) = (self.block("field"), self.block("next_field"));
             self.b.build_conditional_branch(matches, this_field, next).must();
             self.b.position_at_end(this_field);
-            self.push_key(reader, name);
+            let depth = self.push_key(reader, name);
             let ok = self.decode_json(reader, *field_ty, slots[index]);
-            self.or_fail(ok, fail);
+            // A lenient decode (`config`) records a top-level field that fails and goes on.
+            let (decoded, failed) = (self.block("decoded"), self.block("field_failed"));
+            self.b.build_conditional_branch(ok, decoded, failed).must();
+            self.b.position_at_end(failed);
+            let recovered = self.call_rt("lrt_json_recover", &[r, depth.into()]).unwrap();
+            let recovered = self.nonzero(recovered);
+            let zeroed = self.block("recovered");
+            self.b.build_conditional_branch(recovered, zeroed, fail).must();
+            self.b.position_at_end(zeroed);
+            let zero = self.value_type(*field_ty).const_zero();
+            self.b.build_store(slots[index], zero).must();
+            self.b.build_unconditional_branch(decoded).must();
+            self.b.position_at_end(decoded);
             self.call_rt("lrt_json_pop", &[r]);
             self.b.build_store(seen[index], self.bool(true)).must();
             self.b.build_unconditional_branch(header).must();
@@ -722,7 +735,19 @@ impl<'ctx> Codegen<'ctx, '_> {
                     self.b.build_store(slots[index], none).must();
                     self.b.build_unconditional_branch(done).must();
                 }
-                (None, _) => self.fail_message(reader, &format!("missing key \"{name}\""), fail),
+                (None, _) => {
+                    // An error, unless a lenient decode records it and goes on (`config`).
+                    let text = self.str_const(name);
+                    let [ptr, len] = self.str_parts(text.into());
+                    let recorded = self.call_rt("lrt_json_missing", &[r, ptr, len]).unwrap();
+                    let recorded = self.nonzero(recorded);
+                    let zeroed = self.block("missing_recorded");
+                    self.b.build_conditional_branch(recorded, zeroed, fail).must();
+                    self.b.position_at_end(zeroed);
+                    let zero = self.value_type(*field_ty).const_zero();
+                    self.b.build_store(slots[index], zero).must();
+                    self.b.build_unconditional_branch(done).must();
+                }
             }
             self.b.position_at_end(present);
             self.b.build_unconditional_branch(done).must();

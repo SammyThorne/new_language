@@ -11,6 +11,7 @@ The standard library is what makes Viper a backend language and not a general-pu
 | `time` | Clocks, durations, `sleep` | M6 | Viper wrappers over runtime |
 | `datetime` | Instants, dates, durations, time zones, RFC 3339 | docs/14, milestone 5 | Viper, over runtime parsing, formatting and TZif reading |
 | `uuid` | Random and time-ordered UUIDs, parsing | docs/14, milestone 6 | Viper, over runtime generation and parsing |
+| `config` | Typed settings from environment variables and `.env` files; secrets that never print | docs/14, milestone 7 | Viper, over a runtime `.env` parser and a lenient mode of the JSON decoder |
 | `sync` | `Channel`, `Mutex`, `Atomic`, `spawn` support | M6 | Runtime |
 | `json` | Dynamic values, typed encode and decode | M7 | Runtime scanner and writer; compiler-derived per-type code |
 | `net` | TCP listener and stream | M8 | Runtime |
@@ -45,7 +46,7 @@ def main():
 | Module | Functions and types |
 |---|---|
 | `io` | `read_file(path) -> Result[str, IoError]`, `read_lines`, `write_file(path, text)`, `append_file`, `exists`, `remove`, `list_dir`, `read_line() -> str?` (standard input), `eprint(text)` (standard error), `open(path, mode="r") -> Result[File, IoError]`; `File` has `read`, `read_line`, `lines`, `write`, `close`, and closes itself at the end of a `with` block; `IoError` implements `Error` |
-| `os` | `args() -> list[str]`, `getenv(name) -> str?`, `setenv(name, value)` (at startup, before starting tasks: the environment is not safe to change while other threads read it), `exit(code)`, `cwd()` |
+| `os` | `args() -> list[str]`, `getenv(name) -> str?`, `environ() -> dict[str, str]` (every variable whose name and value are UTF-8), `setenv(name, value)` (at startup, before starting tasks: the environment is not safe to change while other threads read it), `exit(code)`, `cwd()` |
 
 `input(prompt)` is also built in, returning `str?` (`None` at the end of input).
 
@@ -717,6 +718,66 @@ def get(self, id: uuid.Uuid) -> Order:      # a malformed ID is a 400
 - **Errors** say which character was wrong: ``expected a hex digit at position 36, found `z` ``. Braces, `urn:uuid:` and the 32-digit form without hyphens are not accepted.
 - **Where they appear.** `http.request_log()` makes its request IDs with `v7`, so they sort by when requests arrived. OpenAPI documents a `Uuid` as `{"type": "string", "format": "uuid"}`. `datetime.set_clock_for_tests` fixes the time `v7` uses.
 - **Random bytes** are read from the operating system 4 KiB at a time per thread, so a UUID costs a system call only once in about 400.
+
+## Configuration (docs/14, milestone 7)
+
+```python
+import config
+import datetime
+
+@derive(Json, Display)
+struct Settings:
+    database_url: config.Secret                                  # DATABASE_URL, required
+    port: int = 8080                                             # PORT=9000
+    debug: bool = False                                          # DEBUG=yes
+    allowed_origins: list[str] = []                              # ALLOWED_ORIGINS=https://a.example, https://b.example
+    request_timeout: datetime.Duration = datetime.seconds(30)    # REQUEST_TIMEOUT=45s
+
+def main():
+    settings = config.load[Settings]().unwrap_or_else(lambda e: panic(e.message()))
+    log.info(f"starting with {settings}")         # ... database_url=***, port=9000, ...
+    db = postgres.connect(settings.database_url.reveal()).unwrap()
+```
+
+A deployment that gets two variables wrong learns about both at once:
+
+```text
+config: DATABASE_URL is required; PORT must be an integer, got "80a"
+```
+
+| Item | Shape |
+|---|---|
+| `config.load[T](prefix="", env_file=".env") -> Result[T, ConfigError]` | `T` is a struct deriving `Json`. Field `port` is read from `PREFIX + PORT`. The variables are the environment's, and those of `env_file` that the environment does not set, if the file exists (`""` reads none). The environment is not changed |
+| `config.load_env(path=None, override=False) -> Result[None, ConfigError]` | Sets the variables of a `.env` file that are not set already, or all of them with `override`. Without `path`, `.env` is read if it exists; a `path` that does not exist is an error. A malformed file sets nothing |
+| `config.Secret`, `config.secret(value)` | A string that prints as `***`: in `str()`, f-strings, a derived `Display` (and so in `log.info(f"{settings}")`) and JSON. `reveal()` returns it, `is_empty()` checks it. Read from a variable like a `str`; made in code with `config.secret` |
+| `config.ConfigError` | `reason` (all the problems, joined) and `problems` (one string each). Returned from a handler, a 500 |
+
+How a variable's text becomes a field:
+
+| Field type | Text |
+|---|---|
+| `str` | As it is |
+| `int`, `float` | Trimmed, then parsed: `8080`, `0.25`. Not `inf` or `nan` |
+| `bool` | `true`, `1`, `yes` or `false`, `0`, `no`, in any case |
+| A type with a string form (`datetime.Duration`, `datetime.Date`, `uuid.Uuid`, `config.Secret`, users' `JsonString` types) | Its own parser: `45s`, `2026-11-20` |
+| `list[...]` | Comma-separated, each item trimmed and empty ones dropped (`a, b, c`), or JSON when it starts with `[` (`["a", "b,c"]`, `[1, 2]`) |
+| A struct or `dict` | JSON: `{"burst": 10}` |
+| `T?`, or any field with a default | May be left unset |
+
+Inside JSON written in a variable, numbers and booleans may also be strings, as at the top level. A problem inside a nested value names the variable and the path: `LIMITS at burst must be an integer, got "x"`.
+
+**The `.env` file**, exactly:
+
+- One `KEY=value` per line, with an optional `export ` before the key. A key is a letter or `_`, then letters, digits and `_`. Spaces may surround the `=`.
+- Blank lines and lines starting with `#` are ignored.
+- An unquoted value runs to the end of the line, or to a `#` after a space or tab (so `http://x/#top` keeps its `#`), and is trimmed. `KEY=` is the empty string.
+- A value in single quotes is taken as written. A value in double quotes reads `\n`, `\r`, `\t`, `\"` and `\\` as escapes and keeps any other backslash. Either may span lines, as a PEM key does. Only spaces and a `#` comment may follow the closing quote.
+- There is no `${VAR}` interpolation (docs/14, decision 7). A UTF-8 byte order mark is ignored, `\r\n` ends a line as `\n` does, and the last line for a key wins.
+- Anything else is an error naming its line: ``config: .env, line 4: expected `=` after `BROKEN`, found `v` ``. A line is never skipped.
+
+- **Precedence.** The real environment wins over the file, so a deployment overrides what is checked in; `load_env(override=True)` reverses that for `load_env`.
+- **Keep `.env` out of version control.** Commit a `.env.example` with every variable and no real secrets, as the examples in `examples/` do.
+- **How it works.** `load` builds a JSON object of the variables (lower-cased, prefix removed) and decodes it with the derived `FromJson` code in a lenient mode (D112). The mode turns a string into the number, boolean, list or object expected, and, at the top level only, records a field that fails or is missing and goes on with the next, so one decode finds every problem.
 
 ## Tasks and synchronisation
 

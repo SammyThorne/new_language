@@ -1,0 +1,186 @@
+"""
+Settings from environment variables and `.env` files.
+
+    import config
+
+    @derive(Json, Display)
+    struct Settings:
+        database_url: config.Secret          # DATABASE_URL, required; prints as ***
+        port: int = 8080                     # PORT, "8080" read as an int
+        debug: bool = False                  # DEBUG: true/false, 1/0, yes/no
+        allowed_origins: list[str] = []      # ALLOWED_ORIGINS="https://a.example, https://b.example"
+        request_timeout: datetime.Duration = datetime.seconds(30)   # REQUEST_TIMEOUT=45s
+
+    def main():
+        settings = config.load[Settings]().unwrap_or_else(lambda e: panic(e.message()))
+        log.info(f"starting with {settings}")       # database_url=***
+        db = postgres.connect(settings.database_url.reveal())?
+
+`load[T]` reads each field from the environment variable named after it in capitals (with a
+prefix, if given), from a `.env` file in the current directory when there is one, and parses
+the text as the field's type. The real environment wins over the file, so a deployment can
+override what the file says. Every problem is reported at once:
+
+    config: DATABASE_URL is required; PORT must be an integer, got "80a"
+
+`load_env()` instead copies a `.env` file into the environment, for code that calls
+`os.getenv`. The file's syntax is documented in docs/05 ("Configuration"); there is no
+`${VAR}` interpolation.
+"""
+
+import io
+import json as jsonlib
+import os
+
+@extern("lrt_io_error")
+def last_error() -> str
+
+@extern("lrt_config_parse_env")
+def parse_env_raw(text: str) -> int
+
+@extern("lrt_config_env_pair")
+def env_pair_raw(i: int, part: int) -> str
+
+@extern("lrt_json_set_lenient")
+def set_lenient_raw(on: int)
+
+@extern("lrt_json_problem_count")
+def problem_count_raw() -> int
+
+@extern("lrt_json_problem")
+def problem_raw(i: int, part: int) -> str
+
+pub struct ConfigError:
+    """Settings that could not be read: a `.env` file that is malformed or missing, or variables
+    that are missing or do not parse. `problems` has one line per problem; `message()` joins
+    them."""
+    reason: str
+    problems: list[str] = []
+
+impl Error for ConfigError:
+    def message(self) -> str:
+        return self.reason
+
+    def status(self) -> int:
+        """Returned from a handler, it is a 500: the server is set up wrongly."""
+        return 500
+
+impl Display for ConfigError:
+    def to_str(self) -> str:
+        return self.reason
+
+# ---- secrets ------------------------------------------------------------------------------
+
+@frozen
+pub struct Secret:
+    """A string that is never shown: `str()`, f-strings, a derived `Display` of a struct that
+    holds it, and JSON all give `***`. `reveal()` returns the value, for the one place that
+    needs it."""
+    priv value: str
+
+impl Secret:
+    def reveal(self) -> str:
+        """The secret itself."""
+        return self.value
+
+    def is_empty(self) -> bool:
+        return self.value == ""
+
+impl Display for Secret:
+    def to_str(self) -> str:
+        return "***"
+
+impl JsonString for Secret:
+    def to_json_string(self) -> str:
+        return "***"
+
+    def from_json_string(text: str) -> Result[Secret, str]:
+        return Secret(text)
+
+pub def secret(value: str) -> Secret:
+    """A `Secret` holding `value`, for settings made in code and in tests."""
+    return Secret(value)
+
+# ---- .env files ---------------------------------------------------------------------------
+
+def read_env_file(path: str) -> Result[dict[str, str], ConfigError]:
+    match io.read_file(path):
+        case Ok(text):
+            count = parse_env_raw(text)
+            if count < 0:
+                return Err(ConfigError(f"config: {path}, {last_error()}"))
+            pairs: dict[str, str] = {}
+            for i in range(count):
+                pairs[env_pair_raw(i, 0)] = env_pair_raw(i, 1)
+            return pairs
+        case Err(e):
+            return Err(ConfigError(f"config: cannot read {path}: {e.message()}"))
+
+pub def load_env(path: str? = None, override: bool = False) -> Result[None, ConfigError]:
+    """Set the variables in a `.env` file that are not set already (all of them, with
+    `override=True`). Without a `path`, `.env` in the current directory is read if it exists;
+    a `path` that does not exist is an error. A malformed line is an error naming its line,
+    and nothing is set."""
+    file = path.unwrap_or(".env")
+    if not io.exists(file):
+        match path:
+            case Some(_):
+                return Err(ConfigError(f"config: cannot read {file}: it does not exist"))
+            case None:
+                return Ok(None)
+    pairs = read_env_file(file)?
+    for name, value in pairs.items():
+        if override or os.getenv(name) is None:
+            os.setenv(name, value)
+    return Ok(None)
+
+# ---- typed settings -----------------------------------------------------------------------
+
+pub def load[T: FromJson](prefix: str = "", env_file: str = ".env") -> Result[T, ConfigError]:
+    """Settings of type `T`, a struct deriving `Json`: field `port` is read from the variable
+    `PORT` (or `prefix + "PORT"`). Numbers, booleans (`true`/`false`, `1`/`0`, `yes`/`no`, in
+    any case) and types with a string form (`datetime.Duration`, `uuid.Uuid`, `Secret`) are
+    parsed from the text; a list is written comma-separated (`a, b, c`) or as JSON, and a
+    nested struct or dict as JSON. Fields with defaults, and optional ones, may be left
+    unset. The variables come from the environment and, where it does not set them, from
+    `env_file` if that exists (`""` reads no file); the environment is not changed. The error
+    lists every problem."""
+    variables: dict[str, str] = {}
+    if env_file != "" and io.exists(env_file):
+        variables = read_env_file(env_file)?
+    for name, value in os.environ().items():
+        variables[name] = value
+    fields: dict[str, str] = {}
+    for name in sorted(list(variables.keys())):
+        if name.starts_with(prefix) and len(name) > len(prefix):
+            fields[name[len(prefix):].lower()] = variables[name]
+    set_lenient_raw(1)
+    match jsonlib.decode[T](jsonlib.encode(fields)):
+        case Ok(settings):
+            return settings
+        case Err(error):
+            problems: list[str] = []
+            for i in range(problem_count_raw()):
+                problems.append(describe(prefix, problem_raw(i, 0), problem_raw(i, 1)))
+            if len(problems) == 0:
+                problems.append(describe(prefix, error.path, error.message()))
+            problems = sorted(problems)
+            return Err(ConfigError("config: " + "; ".join(problems), problems))
+
+def describe(prefix: str, path: str, message: str) -> str:
+    # `port` and `must be an integer, got "80a"` -> `PORT must be an integer, got "80a"`.
+    if path == "":
+        return message
+    end = len(path)
+    for i in range(len(path)):
+        c = path[i:i + 1]
+        if c == "." or c == "[":
+            end = i
+            break
+    name = prefix + path[0:end].upper()
+    rest = path[end:].remove_prefix(".")
+    if rest != "":
+        name = f"{name} at {rest}"
+    if message.starts_with("must ") or message.starts_with("is "):
+        return f"{name} {message}"
+    return f"{name}: {message}"

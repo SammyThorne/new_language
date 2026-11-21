@@ -1,0 +1,157 @@
+# The config module (docs/14, milestone 7): `.env` files in every quoting form, line-numbered
+# errors, the environment winning over the file, typed settings with lenient text (numbers,
+# yes/no, comma lists, JSON), one error listing every problem, and secrets that never print.
+# env: CFG_PORT=9000
+# env: CFG_TIMEOUT=45s
+# env: CFG_REQUEST_ID=0193A1B2-C3D4-7E5F-8A6B-7C8D9E0F1A2B
+# env: CFG_LIMITS={"burst": 10, "per_minute": 600}
+# env: PRESET=from the environment
+# expect: PLAIN="hello world"
+# expect: SPACED="trimmed both ends"
+# expect: EMPTY=""
+# expect: ONLY_COMMENT=""
+# expect: TRAILING="value"
+# expect: HASH_IN_VALUE="http://example.com/#anchor"
+# expect: EXPORTED="yes"
+# expect: SINGLE="kept \\n as # written"
+# expect: DOUBLE="tab\there \"quoted\" back\\slash \\q"
+# expect: DOUBLE_COMMENT="x"
+# expect: MULTI="first\nsecond"
+# expect: KEY="-----BEGIN KEY-----\nabc\n-----END KEY-----"
+# expect: EQUALS="a=b=c"
+# expect: REPEATED="last"
+# expect: CRLF_A="one"
+# expect: CRLF_B="two\nlines"
+# expect: kept: from the environment
+# expect: overridden: from the file
+# expect: missing default: Ok(None)
+# expect: config: cannot read tests/fixtures/config/nope.env: it does not exist
+# expect: config: tests/fixtures/config/bad_line.env, line 4: expected `=` after `BROKEN`, found `v`
+# expect: config: tests/fixtures/config/bad_quote.env, line 2: the double-quoted value of `B` has no closing quote
+# expect: bad file sets nothing: True
+# expect: Settings(database_url=***, port=9000, debug=True, origins=['https://a.example', 'https://b.example'], timeout=45s, request_id=0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b, limits={'burst': 10, 'per_minute': 600}, name=None, retries=3)
+# expect: secret: *** *** "***"
+# expect: revealed: postgres://app:hunter2@localhost/app
+# expect: json: {"database_url":"***","port":9000}
+# expect: environment untouched: True
+# expect: config: CFG2_DATABASE_URL is required; CFG2_DEBUG must be true or false, got "maybe"; CFG2_LIMITS must be a JSON object, got "lots"; CFG2_ORIGINS at [0]: expected a string, found a number; CFG2_PORT must be an integer, got "80a"; CFG2_REQUEST_ID: a UUID is 36 characters (8-4-4-4-12 hex digits with hyphens), not 4; CFG2_TIMEOUT: invalid duration "soon": expected a number
+# expect: 7 problems, status 500
+# expect: json list: ['a', 'b,c']
+# expect: bools: True False True False
+# expect: environ: True True
+
+import config
+import datetime
+import json
+import os
+import uuid
+
+@derive(Json, Display)
+struct Settings:
+    database_url: config.Secret
+    port: int = 8080
+    debug: bool = False
+    origins: list[str] = []
+    timeout: datetime.Duration = datetime.seconds(30)
+    request_id: uuid.Uuid? = None
+    limits: dict[str, int] = {}
+    name: str? = None
+    retries: int = 3
+
+@derive(Json)
+struct Public:
+    database_url: config.Secret
+    port: int
+
+@derive(Json, Display)
+struct Lists:
+    items: list[str]
+
+@derive(Json, Display)
+struct Flags:
+    a: bool
+    b: bool
+    c: bool
+    d: bool
+
+def show(name: str):
+    value = os.getenv(name).unwrap_or("?")
+    print(f"{name}={json.encode(value)}")
+
+def files():
+    config.load_env("tests/fixtures/config/quoting.env").unwrap()
+    for name in ["PLAIN", "SPACED", "EMPTY", "ONLY_COMMENT", "TRAILING", "HASH_IN_VALUE", "EXPORTED", "SINGLE", "DOUBLE", "DOUBLE_COMMENT", "MULTI", "KEY", "EQUALS", "REPEATED"]:
+        show(name)
+    config.load_env("tests/fixtures/config/crlf.env").unwrap()
+    show("CRLF_A")
+    show("CRLF_B")
+
+def precedence():
+    # PRESET is set by the environment and by the file: the environment's value is kept unless
+    # `override`.
+    config.load_env("tests/fixtures/config/quoting.env").unwrap()
+    preset = os.getenv("PRESET").unwrap()
+    print(f"kept: {preset}")
+    config.load_env("tests/fixtures/config/quoting.env", override=True).unwrap()
+    preset = os.getenv("PRESET").unwrap()
+    print(f"overridden: {preset}")
+
+def errors():
+    # No `.env` in the current directory: nothing to do.
+    print(f"missing default: {config.load_env()}")
+    for path in ["tests/fixtures/config/nope.env", "tests/fixtures/config/bad_line.env", "tests/fixtures/config/bad_quote.env"]:
+        match config.load_env(path):
+            case Ok(_):
+                print("loaded?")
+            case Err(e):
+                print(e.message())
+    unset = os.getenv("OK") is None
+    print(f"bad file sets nothing: {unset}")
+
+def settings():
+    loaded = config.load[Settings](prefix="CFG_", env_file="tests/fixtures/config/app.env").unwrap()
+    print(f"{loaded}")
+    secret = loaded.database_url
+    print(f"secret: {secret} {str(secret)} {json.encode(secret)}")
+    print(f"revealed: {loaded.database_url.reveal()}")
+    print(f"json: {json.encode(Public(loaded.database_url, loaded.port))}")
+    # The file was read, not loaded into the environment.
+    untouched = os.getenv("CFG_DATABASE_URL") is None
+    print(f"environment untouched: {untouched}")
+
+def problems():
+    os.setenv("CFG2_PORT", "80a")
+    os.setenv("CFG2_DEBUG", "maybe")
+    os.setenv("CFG2_ORIGINS", "[1, 2]")
+    os.setenv("CFG2_TIMEOUT", "soon")
+    os.setenv("CFG2_REQUEST_ID", "nope")
+    os.setenv("CFG2_LIMITS", "lots")
+    match config.load[Settings](prefix="CFG2_", env_file=""):
+        case Ok(_):
+            print("loaded?")
+        case Err(e):
+            print(e.message())
+            print(f"{len(e.problems)} problems, status {e.status()}")
+
+def lenient():
+    os.setenv("L_ITEMS", "[\"a\", \"b,c\"]")
+    lists = config.load[Lists](prefix="L_", env_file="").unwrap()
+    print(f"json list: {lists.items}")
+    os.setenv("F_A", "YES")
+    os.setenv("F_B", "no")
+    os.setenv("F_C", "1")
+    os.setenv("F_D", "False")
+    f = config.load[Flags](prefix="F_", env_file="").unwrap()
+    print(f"bools: {f.a} {f.b} {f.c} {f.d}")
+
+def main():
+    files()
+    precedence()
+    errors()
+    settings()
+    problems()
+    lenient()
+    environ = os.environ()
+    port = environ["CFG_PORT"] == "9000"
+    plain = environ["PLAIN"] == "hello world"
+    print(f"environ: {port} {plain}")

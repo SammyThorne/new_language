@@ -14,6 +14,8 @@ A small notes app whose pages and API need a Google account: a home page, a prot
    viper run main.vi
    ```
 
+   Or copy `.env.example` to `.env` and fill it in: `main.vi` reads it with `config.load_env()`, and variables already set in the environment win. `.gitignore` keeps `.env` out of the repository.
+
 5. Open <http://localhost:8080> and sign in. Without `SESSION_SECRET` the app still runs on `localhost`, with a key made for the run and a warning, so sign-ins end when it stops.
 
 Instead of the file, the app also takes `GOOGLE_CLIENT_SECRETS` (the file's path), or `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.

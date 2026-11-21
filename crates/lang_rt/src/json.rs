@@ -11,9 +11,24 @@
 //! more than `INLINE_PATH` deep. Strings without escapes are copied once, straight from the
 //! input into collected memory; object keys that are only compared with field names are not
 //! copied at all (`lrt_json_object_key_view`).
+//!
+//! The `config` module decodes in a lenient mode (`lrt_json_set_lenient`), over an object whose
+//! values are the text of environment variables: a string is accepted where a number, a
+//! boolean, an array or an object is expected and read from its text, and a field of the
+//! top-level object that fails is recorded and skipped, so that one decode reports every
+//! problem (`lrt_json_recover`, `lrt_json_missing`, `lrt_json_problem`).
+
+use std::cell::{Cell, RefCell};
 
 use crate::Str;
 use crate::builder::{Builder, lrt_builder_push};
+
+thread_local! {
+    /// Whether the next reader set up on this thread is lenient.
+    static LENIENT: Cell<bool> = const { Cell::new(false) };
+    /// The problems the last lenient decode on this thread found: (path, message).
+    static PROBLEMS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+}
 
 /// Nesting deeper than this is an error, so that hostile input cannot exhaust the stack.
 const MAX_DEPTH: usize = 512;
@@ -47,6 +62,16 @@ pub struct Reader {
     deeper_path: Vec<PathPart>,
     /// The message and the path of the first error.
     error: Option<Box<(String, String)>>,
+    /// Lenient mode, for `config` (see the module documentation).
+    lenient: bool,
+    /// In lenient mode, the errors in top-level fields that were recovered from.
+    problems: Vec<(String, String)>,
+    /// Inputs made by splicing a string's text into the input, all kept until the reader is
+    /// freed: keys returned as views may point into any of them.
+    buffers: Vec<Box<[u8]>>,
+    /// Where the value of the top-level field being read starts, and the depth there.
+    top_start: usize,
+    top_depth: usize,
 }
 
 const _: () = assert!(std::mem::size_of::<Reader>() <= READER_BYTES);
@@ -63,10 +88,19 @@ impl Reader {
             path: [PathPart { ptr: std::ptr::null(), len: 0 }; INLINE_PATH],
             deeper_path: Vec::new(),
             error: None,
+            lenient: false,
+            problems: Vec::new(),
+            buffers: Vec::new(),
+            top_start: 0,
+            top_depth: 0,
         }
     }
 
     fn push_path(&mut self, part: PathPart) {
+        if self.path_len == 0 {
+            self.top_start = skip_ws(self.input, self.pos);
+            self.top_depth = self.depth;
+        }
         if self.path_len < INLINE_PATH {
             self.path[self.path_len] = part;
         } else {
@@ -181,7 +215,82 @@ impl Reader {
         Some(key)
     }
 
+    /// Replace the input between `start` and `end` with `replacement`.
+    fn splice(&mut self, start: usize, end: usize, replacement: &[u8]) {
+        let mut buffer = Vec::with_capacity(self.input.len() - (end - start) + replacement.len());
+        buffer.extend_from_slice(&self.input[..start]);
+        buffer.extend_from_slice(replacement);
+        buffer.extend_from_slice(&self.input[end..]);
+        let buffer = buffer.into_boxed_slice();
+        // SAFETY: the box is kept in `buffers`, which only grows, until the reader is dropped;
+        // moving the box does not move its bytes.
+        self.input = unsafe { std::slice::from_raw_parts(buffer.as_ptr(), buffer.len()) };
+        self.buffers.push(buffer);
+    }
+
+    /// In lenient mode, a string where a number or boolean is expected: its trimmed text, with
+    /// the string consumed. `None` when the next value is not a string (or not lenient).
+    fn lenient_text(&mut self) -> Option<String> {
+        if !self.lenient || self.failed() {
+            return None;
+        }
+        self.skip_ws();
+        if self.peek() != Some(b'"') {
+            return None;
+        }
+        let text = self.string()?;
+        Some(String::from_utf8_lossy(text.bytes()).trim().to_string())
+    }
+
+    /// In lenient mode, a string where an array or object (`open`) is expected becomes one: its
+    /// text is spliced in if it is JSON of that kind, and for an array, otherwise it is split
+    /// on commas into strings. Records an error if it is neither.
+    fn lenient_open(&mut self, open: u8) {
+        if !self.lenient || self.failed() {
+            return;
+        }
+        self.skip_ws();
+        if self.peek() != Some(b'"') {
+            return;
+        }
+        let start = self.pos;
+        let Ok((text, end)) = scan_string(self.input, start) else { return };
+        let text = String::from_utf8_lossy(text.bytes()).into_owned();
+        let trimmed = text.trim();
+        let replacement = if trimmed.as_bytes().first() == Some(&open) {
+            match skip(trimmed.as_bytes(), 0, self.depth) {
+                Ok(n) if skip_ws(trimmed.as_bytes(), n) == trimmed.len() => trimmed.as_bytes().to_vec(),
+                Ok(n) => {
+                    self.fail(format!(
+                        "is not valid JSON: unexpected text at position {}",
+                        skip_ws(trimmed.as_bytes(), n) + 1
+                    ));
+                    return;
+                }
+                Err((message, _)) => {
+                    self.fail(format!("is not valid JSON: {message}"));
+                    return;
+                }
+            }
+        } else if open == b'[' {
+            let mut list = b"[".to_vec();
+            for item in trimmed.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+                if list.len() > 1 {
+                    list.push(b',');
+                }
+                push_json_string(&mut list, item.as_bytes());
+            }
+            list.push(b']');
+            list
+        } else {
+            self.fail(format!("must be a JSON object, got {}", shown(trimmed)));
+            return;
+        };
+        self.splice(start, end, &replacement);
+    }
+
     fn open(&mut self, open: u8, what: &str) -> bool {
+        self.lenient_open(open);
         if self.failed() {
             return false;
         }
@@ -228,6 +337,22 @@ impl Reader {
         }
         self.first[top / 64] &= !(1 << (top % 64));
         1
+    }
+}
+
+/// A value from the environment in an error message: quoted, and cut short if it is long.
+fn shown(text: &str) -> String {
+    let mut chars = text.chars();
+    let start: String = chars.by_ref().take(40).collect();
+    if chars.next().is_some() { format!("{:?}...", start) } else { format!("{start:?}") }
+}
+
+/// The boolean spellings an environment variable may use.
+fn lenient_bool(text: &str) -> Option<bool> {
+    match text.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
     }
 }
 
@@ -468,8 +593,81 @@ unsafe fn reader<'a>(r: *mut Reader) -> &'a mut Reader {
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_reader_init(r: *mut Reader, ptr: *const u8, len: i64) {
     let input: &'static [u8] = if len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(ptr, len as usize) } };
+    let mut fresh = Reader::new(input);
+    fresh.lenient = LENIENT.with(|flag| flag.replace(false));
     // SAFETY: the caller reserved `READER_BYTES` bytes, 8-aligned.
-    unsafe { r.write(Reader::new(input)) };
+    unsafe { r.write(fresh) };
+}
+
+/// Make the next decode on this thread lenient (the `config` module).
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_json_set_lenient(on: i64) {
+    LENIENT.with(|flag| flag.set(on != 0));
+}
+
+/// How many problems the last lenient decode on this thread found.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_json_problem_count() -> i64 {
+    PROBLEMS.with_borrow(|problems| problems.len() as i64)
+}
+
+/// Problem `i` of the last lenient decode: its path (`part` 0) or message (1).
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_json_problem(i: i64, part: i64) -> Str {
+    PROBLEMS.with_borrow(|problems| {
+        let text = usize::try_from(i)
+            .ok()
+            .and_then(|i| problems.get(i))
+            .map_or("", |(path, message)| if part == 0 { path.as_str() } else { message.as_str() });
+        Str::from_bytes(text.as_bytes())
+    })
+}
+
+/// In lenient mode, after the value of the top-level field whose key was pushed at path
+/// `index` 0 failed to decode: keep the error as a problem, skip the value, and return 1 so
+/// that the decoder goes on with the next field. 0 otherwise, and the decode fails as usual.
+///
+/// # Safety
+/// `r` comes from `lrt_json_reader_init`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_json_recover(r: *mut Reader, index: i64) -> i64 {
+    let r = unsafe { reader(r) };
+    if !r.lenient || index != 0 || r.path_len == 0 {
+        return 0;
+    }
+    let Some(error) = r.error.take() else { return 0 };
+    match skip(r.input, r.top_start, r.top_depth) {
+        Ok(end) => {
+            let (message, path) = *error;
+            r.problems.push((path, message));
+            r.pos = end;
+            r.depth = r.top_depth;
+            r.path_len = 1;
+            r.deeper_path.clear();
+            1
+        }
+        Err(_) => {
+            r.error = Some(error);
+            0
+        }
+    }
+}
+
+/// A required field `ptr`, `len` is missing from the object just read. In lenient mode, at the
+/// top level, it is recorded as a problem and 1 is returned; otherwise it is an error.
+///
+/// # Safety
+/// `r` comes from `lrt_json_reader_init`; `ptr` and `len` describe a UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_json_missing(r: *mut Reader, ptr: *const u8, len: i64) -> i64 {
+    let name = unsafe { Str::from_raw(ptr, len) }.to_string();
+    let r = unsafe { reader(r) };
+    if r.lenient && r.path_len == 0 && !r.failed() {
+        r.problems.push((name, "is required".to_string()));
+        return 1;
+    }
+    r.fail(format!("missing key \"{name}\""));
+    0
 }
 
 /// Release what the reader allocated (an error, a deep path). `_input` is the text it read,
@@ -496,6 +694,15 @@ pub unsafe extern "C-unwind" fn lrt_json_finish(r: *mut Reader) -> i64 {
             r.clear_path();
             r.fail("unexpected text after the JSON value");
         }
+    }
+    if r.lenient {
+        let mut problems = std::mem::take(&mut r.problems);
+        if let Some(error) = &r.error {
+            problems.push((error.1.clone(), error.0.clone()));
+        } else if let Some((path, message)) = problems.first() {
+            r.error = Some(Box::new((message.clone(), path.clone())));
+        }
+        PROBLEMS.with_borrow_mut(|stash| *stash = problems);
     }
     i64::from(!r.failed())
 }
@@ -527,10 +734,13 @@ pub unsafe extern "C-unwind" fn lrt_json_error_path(r: *mut Reader) -> Str {
 /// `r` comes from `lrt_json_reader_init`; `ptr` and `len` describe a UTF-8 string that stays
 /// alive until the matching `lrt_json_pop`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn lrt_json_push_key(r: *mut Reader, ptr: *const u8, len: i64) {
+pub unsafe extern "C-unwind" fn lrt_json_push_key(r: *mut Reader, ptr: *const u8, len: i64) -> i64 {
     // A key is never null: an empty one still points somewhere.
     let ptr = if ptr.is_null() { b"".as_ptr() } else { ptr };
-    unsafe { reader(r) }.push_path(PathPart { ptr, len });
+    let r = unsafe { reader(r) };
+    let index = r.path_len as i64;
+    r.push_path(PathPart { ptr, len });
+    index
 }
 
 /// # Safety
@@ -593,6 +803,15 @@ pub unsafe extern "C-unwind" fn lrt_json_read_bool(r: *mut Reader) -> i64 {
     if r.failed() {
         return -1;
     }
+    if let Some(text) = r.lenient_text() {
+        return match lenient_bool(&text) {
+            Some(value) => i64::from(value),
+            None => {
+                r.fail(format!("must be true or false, got {}", shown(&text)));
+                -1
+            }
+        };
+    }
     r.skip_ws();
     if r.literal(b"true") {
         1
@@ -631,6 +850,18 @@ fn number(r: &mut Reader) -> Option<Number> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_read_int(r: *mut Reader, out: *mut i64) -> i64 {
     let r = unsafe { reader(r) };
+    if let Some(text) = r.lenient_text() {
+        return match text.parse::<i64>() {
+            Ok(value) => {
+                unsafe { *out = value };
+                1
+            }
+            Err(_) => {
+                r.fail(format!("must be an integer, got {}", shown(&text)));
+                0
+            }
+        };
+    }
     let start = {
         r.skip_ws();
         r.pos
@@ -661,6 +892,18 @@ pub unsafe extern "C-unwind" fn lrt_json_read_int(r: *mut Reader, out: *mut i64)
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_json_read_float(r: *mut Reader, out: *mut f64) -> i64 {
     let r = unsafe { reader(r) };
+    if let Some(text) = r.lenient_text() {
+        return match text.parse::<f64>() {
+            Ok(value) if value.is_finite() => {
+                unsafe { *out = value };
+                1
+            }
+            _ => {
+                r.fail(format!("must be a number, got {}", shown(&text)));
+                0
+            }
+        };
+    }
     match number(r) {
         Some(Number::Int(value)) => {
             unsafe { *out = value as f64 };
@@ -1031,5 +1274,84 @@ mod tests {
             push_json_string(&mut out, &text);
             assert_eq!(out, simple(&text), "byte {c:#x}");
         }
+    }
+
+    /// A lenient reader over `text`, as `config.load` sets one up.
+    fn lenient(text: &str) -> Reader {
+        let mut r = Reader::new(Box::leak(text.as_bytes().to_vec().into_boxed_slice()));
+        r.lenient = true;
+        r
+    }
+
+    fn message(r: &Reader) -> String {
+        r.error.as_ref().map_or(String::new(), |e| e.0.clone())
+    }
+
+    #[test]
+    fn lenient_scalars_parse_their_text() {
+        for (text, expected) in [("\" YES \"", 1), ("\"no\"", 0), ("\"1\"", 1), ("\"False\"", 0), ("true", 1)] {
+            let mut r = lenient(text);
+            assert_eq!(unsafe { lrt_json_read_bool(&mut r) }, expected, "{text}");
+        }
+        let mut r = lenient("\"maybe\"");
+        assert_eq!(unsafe { lrt_json_read_bool(&mut r) }, -1);
+        assert_eq!(message(&r), "must be true or false, got \"maybe\"");
+
+        let mut out = 0i64;
+        let mut r = lenient("\" 8080 \"");
+        assert_eq!(unsafe { lrt_json_read_int(&mut r, &mut out) }, 1);
+        assert_eq!(out, 8080);
+        let mut r = lenient("\"80a\"");
+        assert_eq!(unsafe { lrt_json_read_int(&mut r, &mut out) }, 0);
+        assert_eq!(message(&r), "must be an integer, got \"80a\"");
+        let mut r = lenient("\"99999999999999999999\"");
+        assert_eq!(unsafe { lrt_json_read_int(&mut r, &mut out) }, 0);
+        assert_eq!(message(&r), "must be an integer, got \"99999999999999999999\"");
+
+        let mut float = 0f64;
+        let mut r = lenient("\"0.25\"");
+        assert_eq!(unsafe { lrt_json_read_float(&mut r, &mut float) }, 1);
+        assert_eq!(float, 0.25);
+        let mut r = lenient("\"inf\"");
+        assert_eq!(unsafe { lrt_json_read_float(&mut r, &mut float) }, 0);
+        assert_eq!(message(&r), "must be a number, got \"inf\"");
+
+        // Strict readers still want JSON.
+        let mut r = lenient("\"1\"");
+        r.lenient = false;
+        assert_eq!(unsafe { lrt_json_read_int(&mut r, &mut out) }, 0);
+
+        // Long values are cut short in the message.
+        let long = format!("\"{}\"", "x".repeat(60));
+        let mut r = lenient(&long);
+        assert_eq!(unsafe { lrt_json_read_bool(&mut r) }, -1);
+        assert_eq!(message(&r), format!("must be true or false, got \"{}\"...", "x".repeat(40)));
+    }
+
+    /// The strings of the array the reader is at.
+    fn strings(r: &mut Reader) -> Result<Vec<String>, String> {
+        let mut items = Vec::new();
+        if unsafe { lrt_json_array_start(r) } != 1 {
+            return Err(message(r));
+        }
+        while unsafe { lrt_json_array_next(r) } == 1 {
+            match r.string() {
+                Some(text) => items.push(String::from_utf8_lossy(text.bytes()).into_owned()),
+                None => return Err(message(r)),
+            }
+        }
+        if r.failed() { Err(message(r)) } else { Ok(items) }
+    }
+
+    #[test]
+    fn lenient_arrays_and_objects() {
+        assert_eq!(strings(&mut lenient("\"a, b ,,c\"")), Ok(vec!["a".into(), "b".into(), "c".into()]));
+        assert_eq!(strings(&mut lenient("\" [\\\"a\\\", \\\"b,c\\\"] \"")), Ok(vec!["a".into(), "b,c".into()]));
+        assert_eq!(strings(&mut lenient("\"\"")), Ok(vec![]));
+        assert_eq!(strings(&mut lenient("\"[1\"")), Err("is not valid JSON: expected `,` or `]`".into()));
+        assert_eq!(strings(&mut lenient("\"[] x\"")), Err("is not valid JSON: unexpected text at position 4".into()));
+        let mut r = lenient("\"lots\"");
+        assert_eq!(unsafe { lrt_json_object_start(&mut r) }, 0);
+        assert_eq!(message(&r), "must be a JSON object, got \"lots\"");
     }
 }

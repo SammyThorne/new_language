@@ -1,12 +1,20 @@
 # Sign in with Google: see README.md for the Google Cloud console steps. Put the client's file
 # here as `client_secret.json` (never commit it), or set `GOOGLE_CLIENT_SECRETS` to its path.
+# Variables may also come from a `.env` file here: copy `.env.example` to `.env`.
 
 import auth
+import config
 import io
 import os
 import app
 
 def main():
+    match config.load_env():
+        case Ok(_):
+            pass
+        case Err(bad_settings):
+            io.eprint(bad_settings.message())
+            os.exit(1)
     credentials = "client_secret.json" if io.exists("client_secret.json") else ""
     match auth.google(credentials):
         case Ok(google):

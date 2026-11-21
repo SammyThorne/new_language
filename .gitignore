@@ -3,6 +3,9 @@
 # OAuth client files from the Google Cloud console hold a secret: never commit them.
 client_secret*.json
 
+# Settings files of the examples hold secrets; each has a committed .env.example instead.
+examples/*/.env
+
 # Framework comparison (bench/compare): downloaded frameworks, build output and quick runs.
 bench/compare/node/node_modules/
 bench/compare/python/.venv/

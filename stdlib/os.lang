@@ -17,6 +17,9 @@ def arg(index: int) -> str
 @extern("lrt_os_getenv")
 def getenv_raw(name: str) -> str?
 
+@extern("lrt_os_environ")
+def environ_raw() -> str
+
 @extern("lrt_os_setenv")
 def setenv_raw(name: str, value: str) -> int
 
@@ -33,6 +36,16 @@ pub def args() -> list[str]:
 pub def getenv(name: str) -> str?:
     """An environment variable, or `None` if it is not set."""
     return getenv_raw(name)
+
+pub def environ() -> dict[str, str]:
+    """Every environment variable, by name. Variables whose name or value is not UTF-8 are
+    left out."""
+    variables: dict[str, str] = {}
+    for entry in environ_raw().split("\0"):
+        if entry != "":
+            name, _, value = entry.partition("=")
+            variables[name] = value
+    return variables
 
 pub def setenv(name: str, value: str):
     """Set an environment variable for this program and the programs it starts. Set variables
