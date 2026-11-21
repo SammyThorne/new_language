@@ -6,7 +6,7 @@ The automatic tests cover the document, the files and their headers (`crates/lan
 
 ```sh
 cargo build --offline -p lang_rt -p lang_cli
-target/debug/weby build tests/http/todo_annotations.wb -o /tmp/todo
+target/debug/viper build tests/http/todo_annotations.vi -o /tmp/todo
 /tmp/todo
 ```
 
@@ -28,7 +28,7 @@ It prints `listening on 127.0.0.1:PORT`. Open `http://127.0.0.1:PORT/docs` in a 
 
 ## Credentials
 
-Build and start `tests/http/secured_docs.wb` the same way and open its `/docs`.
+Build and start `tests/http/secured_docs.vi` the same way and open its `/docs`.
 
 12. **Needs credentials.** `POST /notes` and `GET /report` carry a "needs credentials" badge; opened, `POST /notes` says "Credentials: **token** (bearer token)". The "notes" group shows its description with **writing** in bold.
 13. **Authorize.** Press "Authorize": a field for each of `key`, `login`, `session` and `token`, with the token's description, and a note under `session` that a page cannot set cookies.

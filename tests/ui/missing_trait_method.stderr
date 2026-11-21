@@ -1,5 +1,5 @@
 error[E0328]: `impl Shape for Square` is missing the method `name`
- --> tests/ui/missing_trait_method.wb:8:6
+ --> tests/ui/missing_trait_method.vi:8:6
   |
 1 | trait Shape:
   |       ----- `Shape` is declared here
@@ -7,4 +7,4 @@ error[E0328]: `impl Shape for Square` is missing the method `name`
 8 | impl Shape for Square:
   |      ^^^^^^^^^^^^^^^^ missing `name`
 
-error: could not compile `tests/ui/missing_trait_method.wb` due to 1 error
+error: could not compile `tests/ui/missing_trait_method.vi` due to 1 error

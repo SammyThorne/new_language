@@ -1,11 +1,11 @@
-"""Calls and allocation per request, for each endpoint of the Weby server: system calls, clock
+"""Calls and allocation per request, for each endpoint of the Viper server: system calls, clock
 reads, Rust heap allocations, collector calls and bytes allocated. Unlike rates, these counts are
 exact and repeatable, so they show whether a change did what it was meant to.
 
 Usage: python3 bench/http/counts.py [--server EXECUTABLE] [--seconds 3] [--connections 256] [--browser]
                                      [--record | --check]
 
-The server runs with bench/profile/count.c preloaded and `WEBY_ALLOC_STATS=1`, pinned like
+The server runs with bench/profile/count.c preloaded and `VIPER_ALLOC_STATS=1`, pinned like
 run.py. The shim slows allocation, so the rates it prints are not comparable with run.py's.
 
 `--record` saves the counts in bench/http/counts.json (or counts_browser.json with --browser);
@@ -65,7 +65,7 @@ def main() -> None:
         server = arg("--server", "")
         if not server:
             server = str(out / "server")
-            subprocess.run([COMPILER, "build", "--release", HERE / "server.wb", "-o", server], check=True)
+            subprocess.run([COMPILER, "build", "--release", HERE / "server.vi", "-o", server], check=True)
         subprocess.run([find_go(), "build", "-o", out / "load", HERE / "load.go"], check=True, env=env)
         shim = out / "count.so"
         subprocess.run(["cc", "-O2", "-shared", "-fPIC", HERE.parent / "profile" / "count.c", "-o", shim, "-ldl"], check=True)
@@ -78,7 +78,7 @@ def main() -> None:
         results: dict[str, dict[str, float]] = {}
         for path, extra in ENDPOINTS:
             port += 1
-            os.environ.update({"LD_PRELOAD": str(shim), "WEBY_ALLOC_STATS": "1"})
+            os.environ.update({"LD_PRELOAD": str(shim), "VIPER_ALLOC_STATS": "1"})
             try:
                 process = start([server], port)
             finally:

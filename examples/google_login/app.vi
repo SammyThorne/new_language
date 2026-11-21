@@ -1,5 +1,5 @@
-# The notes app: a home page, a protected notes page and API, and `/me`. `main.wb` serves it
-# with a real Google client; `app_test.wb` tests it without one.
+# The notes app: a home page, a protected notes page and API, and `/me`. `main.vi` serves it
+# with a real Google client; `app_test.vi` tests it without one.
 
 import http
 import auth

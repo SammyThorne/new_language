@@ -1,5 +1,5 @@
 error[E0338]: a value of type `list[list[int]]` cannot be protected by a `Mutex`
- --> tests/ui/mutex_contents.wb:6:20
+ --> tests/ui/mutex_contents.vi:6:20
   |
 6 |     nested = Mutex([[1], [2]])
   |                    ^^^^^^^^^^ a `list[int]` can be changed
@@ -7,7 +7,7 @@ error[E0338]: a value of type `list[list[int]]` cannot be protected by a `Mutex`
   = help: share an immutable `tuple[int, ...]` made with `tuple(items)`, or wrap the list in `Mutex(...)`
 
 error[E0338]: a value of type `Node` cannot be protected by a `Mutex`
- --> tests/ui/mutex_contents.wb:7:19
+ --> tests/ui/mutex_contents.vi:7:19
   |
 7 |     graph = Mutex(Node([]))
   |                   ^^^^^^^^ its field `children` is a `list[Node]`: a `list[Node]` can be changed
@@ -15,11 +15,11 @@ error[E0338]: a value of type `Node` cannot be protected by a `Mutex`
   = help: share an immutable `tuple[Node, ...]` made with `tuple(items)`, or wrap the list in `Mutex(...)`
 
 error[E0102]: a `Mutex[list[int]]` cannot be printed
- --> tests/ui/mutex_contents.wb:8:11
+ --> tests/ui/mutex_contents.vi:8:11
   |
 8 |     print(ok, nested, graph)
   |           ^^ has type `Mutex[list[int]]`
   |
   = help: only values whose types implement `Display` can be printed
 
-error: could not compile `tests/ui/mutex_contents.wb` due to 3 errors
+error: could not compile `tests/ui/mutex_contents.vi` due to 3 errors

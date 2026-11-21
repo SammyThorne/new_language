@@ -1,5 +1,5 @@
 error[E0102]: `print` cannot write to a file
- --> tests/ui/print_keyword_errors.wb:3:16
+ --> tests/ui/print_keyword_errors.vi:3:16
   |
 3 |     print("a", file=1)
   |                ^^^^ not supported
@@ -7,7 +7,7 @@ error[E0102]: `print` cannot write to a file
   = help: write to standard error with `io.eprint(text)`, or to a file with `io.open`
 
 error[E0102]: `print` has no keyword argument `color`
- --> tests/ui/print_keyword_errors.wb:4:16
+ --> tests/ui/print_keyword_errors.vi:4:16
   |
 4 |     print("a", color="red")
   |                ^^^^^ not supported
@@ -15,13 +15,13 @@ error[E0102]: `print` has no keyword argument `color`
   = help: its keyword arguments are `sep`, `end` and `flush`
 
 error[E0102]: `sep` is given twice
- --> tests/ui/print_keyword_errors.wb:5:24
+ --> tests/ui/print_keyword_errors.vi:5:24
   |
 5 |     print("a", sep="", sep="-")
   |                        ^^^ repeated
 
 error[E0300]: expected `str`, found `int`
- --> tests/ui/print_keyword_errors.wb:6:20
+ --> tests/ui/print_keyword_errors.vi:6:20
   |
 6 |     print("a", end=1)
   |                    ^ expected `str`, found `int`
@@ -29,9 +29,9 @@ error[E0300]: expected `str`, found `int`
   = help: convert it with `str(...)`, or use an f-string
 
 error[E0300]: expected `bool`, found `str`
- --> tests/ui/print_keyword_errors.wb:7:22
+ --> tests/ui/print_keyword_errors.vi:7:22
   |
 7 |     print("a", flush="yes")
   |                      ^^^^^ expected `bool`, found `str`
 
-error: could not compile `tests/ui/print_keyword_errors.wb` due to 5 errors
+error: could not compile `tests/ui/print_keyword_errors.vi` due to 5 errors

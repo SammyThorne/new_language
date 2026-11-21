@@ -1,5 +1,5 @@
 error[E0342]: `@auth.required` is on `helper`, which is not a route
- --> tests/ui/auth_route_errors.wb:5:1
+ --> tests/ui/auth_route_errors.vi:5:1
   |
 5 | @auth.required
   | ^^^^^^^^^^^^^^ no `@http` annotation
@@ -7,7 +7,7 @@ error[E0342]: `@auth.required` is on `helper`, which is not a route
   = help: `@auth.required` protects a route; for a call-style handler use `auth.protect(handler)`
 
 error[E0342]: `@auth.required` takes no arguments
- --> tests/ui/auth_route_errors.wb:9:1
+ --> tests/ui/auth_route_errors.vi:9:1
   |
 9 | @auth.required(domain="example.com")
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ arguments given
@@ -15,7 +15,7 @@ error[E0342]: `@auth.required` takes no arguments
   = help: restrict who can sign in with `auth.google(allowed_domains=..., allowed_emails=...)`, or check `user` in the handler
 
 error[E0342]: parameter `user` is the signed-in user, which a WebSocket handler cannot have yet
-  --> tests/ui/auth_route_errors.wb:15:36
+  --> tests/ui/auth_route_errors.vi:15:36
    |
 15 | def chat(ws: http.WebSocket, user: auth.User):
    |                                    ^^^^^^^^^ in a WebSocket handler
@@ -23,11 +23,11 @@ error[E0342]: parameter `user` is the signed-in user, which a WebSocket handler 
    = help: take an `http.Request` parameter as well, and call `auth.user(req)` with it before the handler talks on the socket
 
 error[E0342]: `swap` has two parameters for the signed-in user
-  --> tests/ui/auth_route_errors.wb:19:34
+  --> tests/ui/auth_route_errors.vi:19:34
    |
 19 | def swap(user: auth.User, other: auth.User?) -> str:
    |                                  ^^^^^^^^^^ second one
    |
    = help: one `auth.User` parameter (or `auth.User?`) gets the user
 
-error: could not compile `tests/ui/auth_route_errors.wb` due to 4 errors
+error: could not compile `tests/ui/auth_route_errors.vi` due to 4 errors

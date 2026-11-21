@@ -6,7 +6,7 @@ This document is the starting point for planning the next round of performance w
 
 ## 1. What the project is
 
-Weby is a compiled, Python-shaped language for web backends.
+Viper is a compiled, Python-shaped language for web backends.
 - **Language.** Indentation syntax, structs and traits instead of classes, generics by monomorphisation.
 - **Standard library.** HTTP/1.1 server and client, TLS, WebSockets, JSON, PostgreSQL, regular expressions, tasks and channels.
 - **Compilation.** Source is compiled through LLVM 19 to a native executable linked with a Rust runtime (`liblang_rt.a`) and the Boehm conservative garbage collector (`libgc.so.1`).
@@ -21,7 +21,7 @@ Weby is a compiled, Python-shaped language for web backends.
 
 Latest full runs (phase 5, 2026-11-19), from [bench/README.md](../bench/README.md). The machine varies by about 10% between runs, so compare the ratios.
 
-| Benchmark | Weby | Go | Weby vs Go | Memory Weby / Go | What it stresses |
+| Benchmark | Viper | Go | Viper vs Go | Memory Viper / Go | What it stresses |
 |---|---|---|---|---|---|
 | binary_trees | 0.736 s | 0.938 s | 1.27x faster | 65 / 40 MB | Allocation, collection |
 | dispatch | 0.011 s | 0.032 s | 3.05x faster | 13 / 13 MB | Trait-object calls |
@@ -34,7 +34,7 @@ Latest full runs (phase 5, 2026-11-19), from [bench/README.md](../bench/README.m
 
 HTTP: requests per second, 256 keep-alive connections, closed-loop load generator. Server on 6 logical CPUs (3 cores with SMT); the load generator on the other 6.
 
-| Endpoint | Weby (p50 / p99 ms) | Go (p50 / p99 ms) | Weby vs Go | Per-request CPU on one core, Weby / Go |
+| Endpoint | Viper (p50 / p99 ms) | Go (p50 / p99 ms) | Viper vs Go | Per-request CPU on one core, Viper / Go |
 |---|---|---|---|---|
 | `/plaintext` | 1,010,397 (0.21 / 0.79) | 528,241 (0.36 / 1.77) | 1.91x | 2.6 / 5.4 µs |
 | `/json` | 901,450 (0.23 / 0.98) | 495,903 (0.38 / 1.93) | 1.82x | 2.7 / 5.6 µs |
@@ -44,7 +44,7 @@ HTTP: requests per second, 256 keep-alive connections, closed-loop load generato
 
 **Other measures:**
 
-| Measure | Weby | Go |
+| Measure | Viper | Go |
 |---|---|---|
 | Idle server memory | 4.3 MB | 8.9 MB |
 | Peak memory under load | 20 to 28 MB | 22 to 25 MB |
@@ -66,7 +66,7 @@ Detail: [03-compiler-architecture.md](03-compiler-architecture.md), [04-runtime-
 | `lang_sema` | 12.9k | Module graph, resolution, type checking, typed HIR, derivations (`@derive(Json)` etc.), monomorphisation |
 | `lang_codegen` | 6.2k | HIR to LLVM IR via `inkwell` 0.11 (LLVM 19). Includes the escape analysis (`escape.rs`), the allocation lowering (`alloc.rs`) and the trait-call dispatchers (`traits.rs`) |
 | `lang_rt` | 8.8k | Runtime in Rust: collector glue, strings, lists, dicts, builders, JSON, fibers and scheduler, poller, HTTP server and client, WebSockets, TLS (`rustls`), PostgreSQL |
-| `lang_cli` | 2.0k | The `weby` driver: build, run, test, fmt, check, and the language server |
+| `lang_cli` | 2.0k | The `viper` driver: build, run, test, fmt, check, and the language server |
 | `lang_format`, `lang_diag`, `lang_names` | small | Number formatting, diagnostics, the language's name in one place |
 
 **Pipeline:**
@@ -98,8 +98,8 @@ Detail: [03-compiler-architecture.md](03-compiler-architecture.md), [04-runtime-
 
 - **Collector.** Boehm 8.2.8 from the system, used conservatively, with all interior pointers recognised.
   - Interior pointers make Boehm add 1 byte to every object, and it rounds to 16-byte granules.
-  - Settings: free-space divisor 2; at least 4 MiB allocated between collections (`WEBY_GC_MIN_ALLOC`); multi-threaded mode starts at the first `spawn`.
-  - `WEBY_GC_STRESS` collects before every allocation and is used in tests.
+  - Settings: free-space divisor 2; at least 4 MiB allocated between collections (`VIPER_GC_MIN_ALLOC`); multi-threaded mode starts at the first `spawn`.
+  - `VIPER_GC_STRESS` collects before every allocation and is used in tests.
 - **Fibers** (`fiber.rs`). M:N, one worker thread per core. 1 MiB `mmap`ed stacks, committed on touch, with the fiber record at the top of its own stack.
   - Each worker has a mutex-protected run queue with an atomic length.
   - There is a lock-free global queue (Vyukov) for wakeups from threads that are not workers, and work-stealing of half a queue.
@@ -109,7 +109,7 @@ Detail: [03-compiler-architecture.md](03-compiler-architecture.md), [04-runtime-
 - **HTTP server** (`http.rs`).
   - One fiber per connection. The request is parsed into a Rust struct, and the compiled handler is called with an integer handle.
   - The handler reads the request through `lrt_http_req_*` calls and leaves a response with `lrt_http_respond`, which serialises it into a `Vec<u8>` that the connection writes.
-  - Routing, middleware and the `Request`/`Response` types are written in Weby (`stdlib/http.lang`). Fixed paths are answered from a precomputed table, and parameterised routes are matched without allocating.
+  - Routing, middleware and the `Request`/`Response` types are written in Viper (`stdlib/http.lang`). Fixed paths are answered from a precomputed table, and parameterised routes are matched without allocating.
 - **JSON.** `@derive(Json)` generates encoders and decoders that work directly on bytes, without intermediate trees (`lang_codegen/src/json.rs`, `lang_rt/src/json.rs`, `builder.rs`).
 - **Dicts.** Insertion-ordered, open addressing with linear probing, and an index array of `i64` entry numbers. Hash and equality come through function pointers in the type descriptor, except for `str` keys, which the runtime handles directly.
 
@@ -197,10 +197,10 @@ Ordered roughly by expected value for web workloads. None is started. **The [fin
 - `bench/ws_idle/run.py`, memory per idle WebSocket.
 - `bench/profile/`, the `LD_PRELOAD` sampling profiler: self time and inclusive time to depth 4, symbolised with `llvm-symbolizer`. Use `--main` for main-thread-only samples.
 - `GC_PRINT_STATS=1` for Boehm's statistics.
-- `weby build --release --emit llvm-ir` to read the optimised IR.
+- `viper build --release --emit llvm-ir` to read the optimised IR.
 
 **Missing**, all planned in [09](09-performance-plan.md) but not built:
-- Allocation counters by kind (`WEBY_ALLOC_STATS`).
+- Allocation counters by kind (`VIPER_ALLOC_STATS`).
 - Microbenchmarks that isolate one operation each, with Go twins.
 - A regression check (`bench/run.py --check` against recorded results).
 - Benchmarks with realistic headers, TLS, a database, or open-loop load at a fixed arrival rate.

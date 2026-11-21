@@ -1,14 +1,14 @@
-"""Run each benchmark in bench/ compiled with Weby, in Go, and in CPython, and print a table.
+"""Run each benchmark in bench/ compiled with Viper, in Go, and in CPython, and print a table.
 
 Usage: python3 bench/run.py [--runs N] [--record | --check]
 
-The Weby program is compiled with `--release`; the Go program with `go build`. Go is found on
+The Viper program is compiled with `--release`; the Go program with `go build`. Go is found on
 PATH or in ~/.local/go/bin, and its column is left out if it is not installed. Every version must
 print the same output. Reported time is the best wall-clock time of N runs; memory is the peak
 resident set size.
 
 `--record` saves each program's time, its time relative to Go's, and its peak memory in
-bench/baseline.json. `--check` then runs only the Weby and Go versions and fails if any program's
+bench/baseline.json. `--check` then runs only the Viper and Go versions and fails if any program's
 time relative to Go's has grown by more than 15% (and by more than 5 ms), or its memory by
 more than 10% (docs/10, milestone 5). Comparing with Go's time cancels most of this machine's
 drift of up to 10% between runs; without Go, the plain times are compared.
@@ -25,7 +25,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / "bench"
-COMPILER = ROOT / "target" / "release" / "weby"
+COMPILER = ROOT / "target" / "release" / "viper"
 BASELINE = BENCH / "baseline.json"
 TIME_TOLERANCE = 0.15
 MEMORY_TOLERANCE = 0.10
@@ -106,18 +106,18 @@ def main() -> None:
         pass
     elif go:
         go_version = version([go, "version"])
-        print(f"| Benchmark | Weby | Go {go_version[2:]} | CPython {python} | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |")
+        print(f"| Benchmark | Viper | Go {go_version[2:]} | CPython {python} | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |")
         print("|---|---|---|---|---|---|---|")
     else:
-        print(f"| Benchmark | Weby | CPython {python} | Weby vs CPython | Memory: Weby / CPython |")
+        print(f"| Benchmark | Viper | CPython {python} | Viper vs CPython | Memory: Viper / CPython |")
         print("|---|---|---|---|---|")
 
     with tempfile.TemporaryDirectory() as out:
-        for source in sorted(BENCH.glob("*.wb")):
+        for source in sorted(BENCH.glob("*.vi")):
             executable = Path(out) / source.stem
             subprocess.run([COMPILER, "build", "--release", source, "-o", executable], check=True)
-            weby, weby_mem, weby_out = measure([str(executable)], runs)
-            outputs = {"Weby": weby_out}
+            viper, viper_mem, viper_out = measure([str(executable)], runs)
+            outputs = {"Viper": viper_out}
             cpython, cpython_mem = 0.0, 0
             if not checking:
                 cpython, cpython_mem, outputs["CPython"] = measure([sys.executable, str(source.with_suffix(".py"))], runs)
@@ -130,23 +130,23 @@ def main() -> None:
                 details = "".join(f"--- {name}\n{text}" for name, text in outputs.items())
                 sys.exit(f"{source.name}: outputs differ\n{details}")
 
-            results[source.stem] = {"time": weby, "memory_kb": weby_mem}
+            results[source.stem] = {"time": viper, "memory_kb": viper_mem}
             if go:
-                results[source.stem]["vs_go"] = weby / go_time
+                results[source.stem]["vs_go"] = viper / go_time
             if checking:
                 continue
             mb = lambda kb: f"{kb / 1024:.0f}"  # noqa: E731
             if go:
-                ratio = weby / go_time
+                ratio = viper / go_time
                 vs_go = f"{ratio:.2f}x the time" if ratio >= 1 else f"{1 / ratio:.2f}x faster"
                 print(
-                    f"| {source.stem} | {weby:.3f} s | {go_time:.3f} s | {cpython:.3f} s | {vs_go} "
-                    f"| {cpython / weby:.1f}x faster | {mb(weby_mem)} / {mb(go_mem)} / {mb(cpython_mem)} MB |"
+                    f"| {source.stem} | {viper:.3f} s | {go_time:.3f} s | {cpython:.3f} s | {vs_go} "
+                    f"| {cpython / viper:.1f}x faster | {mb(viper_mem)} / {mb(go_mem)} / {mb(cpython_mem)} MB |"
                 )
             else:
                 print(
-                    f"| {source.stem} | {weby:.3f} s | {cpython:.3f} s | {cpython / weby:.1f}x faster "
-                    f"| {mb(weby_mem)} / {mb(cpython_mem)} MB |"
+                    f"| {source.stem} | {viper:.3f} s | {cpython:.3f} s | {cpython / viper:.1f}x faster "
+                    f"| {mb(viper_mem)} / {mb(cpython_mem)} MB |"
                 )
     if "--record" in sys.argv:
         BASELINE.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")

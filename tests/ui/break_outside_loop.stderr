@@ -1,7 +1,7 @@
 error[E0104]: `break` outside a loop
- --> tests/ui/break_outside_loop.wb:3:5
+ --> tests/ui/break_outside_loop.vi:3:5
   |
 3 |     break
   |     ^^^^^ not inside `for` or `while`
 
-error: could not compile `tests/ui/break_outside_loop.wb` due to 1 error
+error: could not compile `tests/ui/break_outside_loop.vi` due to 1 error

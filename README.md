@@ -1,8 +1,8 @@
-# Weby
+# Viper
 
 A compiled, Python-shaped language for web backends: indentation syntax, structs and traits instead of classes, an LLVM backend, and HTTP, TLS, WebSocket, JSON, PostgreSQL and concurrency support in the standard library.
 
-**New to the language?** Start with **[Weby by example](docs/examples.md)**. It has twenty-five short sections, from "hello" to a JSON web service with tests. Every program in it is compiled and run by the test suite.
+**New to the language?** Start with **[Viper by example](docs/examples.md)**. It has twenty-five short sections, from "hello" to a JSON web service with tests. Every program in it is compiled and run by the test suite.
 
 ## Status
 
@@ -127,7 +127,7 @@ def main():
 
 ## Features
 
-[Weby by example](docs/examples.md) shows each of these in a runnable program.
+[Viper by example](docs/examples.md) shows each of these in a runnable program.
 
 **The language**
 
@@ -184,9 +184,9 @@ Messages show the source line and usually a fix. Constructs from the design that
 
 **Tooling**
 
-- `weby test` runs `@test` functions, each in its own task, with `assert`.
-- `weby fmt` formats code.
-- `weby lsp` is a language server with diagnostics, hover, go to definition and formatting.
+- `viper test` runs `@test` functions, each in its own task, with `assert`.
+- `viper fmt` formats code.
+- `viper lsp` is a language server with diagnostics, hover, go to definition and formatting.
 - Dependencies come from git or a local path, with a lock file.
 - Panics print source locations and a backtrace. Programs carry debug line information for `gdb` and `perf`.
 - Editor support:
@@ -207,7 +207,7 @@ Messages show the source line and usually a fix. Constructs from the design that
 
 On a 6-core laptop, against the same service in Go (`net/http`) and Python. The full report, with methodology, per-core figures and caveats, is **[Web performance: what to expect](docs/web-performance.md)**.
 
-| Measure | Weby | Go | Python |
+| Measure | Viper | Go | Python |
 |---|---|---|---|
 | Small JSON responses, 256 connections | 965 k req/s, p99 0.85 ms | 489 k req/s, p99 2.03 ms | 25 k req/s |
 | 20-record JSON list, 256 connections | 528 k req/s, p99 1.14 ms | 236 k req/s, p99 5.23 ms | 17 k req/s |
@@ -235,27 +235,27 @@ make
 ```
 
 ```bash
-./target/release/weby run tests/run/hello.wb
+./target/release/viper run tests/run/hello.vi
 ```
 
-`make` builds the compiler and its runtime library `liblang_rt.a`, optimised, into `target/release`. `make install` builds and installs the `weby` command into `~/.local/bin`, after which `weby server.wb -o server` compiles a program; `make link` does the same but points the command at this checkout, so each rebuild updates it. `make help` lists the other targets (tests, lint, benchmarks). Without make, `cargo build --workspace --release` builds the compiler; `--workspace` matters, because it builds the runtime library next to the compiler, where the compiler looks for it. Compiled programs need only `libgc1` on the machine that runs them. Programs do not depend on the system's OpenSSL or certificate store: TLS is `rustls`, with the Mozilla root certificates built in, and `SSL_CERT_FILE` adds more.
+`make` builds the compiler and its runtime library `liblang_rt.a`, optimised, into `target/release`. `make install` builds and installs the `viper` command into `~/.local/bin`, after which `viper server.vi -o server` compiles a program; `make link` does the same but points the command at this checkout, so each rebuild updates it. `make help` lists the other targets (tests, lint, benchmarks). Without make, `cargo build --workspace --release` builds the compiler; `--workspace` matters, because it builds the runtime library next to the compiler, where the compiler looks for it. Compiled programs need only `libgc1` on the machine that runs them. Programs do not depend on the system's OpenSSL or certificate store: TLS is `rustls`, with the Mozilla root certificates built in, and `SSL_CERT_FILE` adds more.
 
 [docs/building.md](docs/building.md) has the details: the packages and what each is for, every make target, what each compiler flag does, the environment variables, and fixes for common build errors.
 
 | Command | Does |
 |---|---|
-| `weby run file.wb` | Compile to a temporary executable and run it |
-| `weby build file.wb [-o out] [--release]` | Compile to an executable; `weby file.wb -o out` is short for this |
-| `weby check file.wb` | Report errors without generating code |
-| `weby build --emit=tokens\|ast\|hir\|llvm-ir\|obj file.wb` | Print or write an intermediate form |
-| `weby test [paths] [--filter text]` | Run the `@test` functions, each in its own task |
-| `weby fmt [paths] [--check]` | Rewrite files in the standard layout, or list the ones that are not |
-| `weby fetch [--update]` | Fetch the git dependencies in `weby.toml` and record their commits in `weby.lock` |
-| `weby lsp` | The language server, for editors ([editors/README.md](editors/README.md)) |
+| `viper run file.vi` | Compile to a temporary executable and run it |
+| `viper build file.vi [-o out] [--release]` | Compile to an executable; `viper file.vi -o out` is short for this |
+| `viper check file.vi` | Report errors without generating code |
+| `viper build --emit=tokens\|ast\|hir\|llvm-ir\|obj file.vi` | Print or write an intermediate form |
+| `viper test [paths] [--filter text]` | Run the `@test` functions, each in its own task |
+| `viper fmt [paths] [--check]` | Rewrite files in the standard layout, or list the ones that are not |
+| `viper fetch [--update]` | Fetch the git dependencies in `viper.toml` and record their commits in `viper.lock` |
+| `viper lsp` | The language server, for editors ([editors/README.md](editors/README.md)) |
 
-Programs are built with DWARF line information and frame pointers, so `gdb`, `perf` and panic backtraces show function names and source lines. Set `WEBY_BACKTRACE=0` to leave backtraces out of panic messages.
+Programs are built with DWARF line information and frame pointers, so `gdb`, `perf` and panic backtraces show function names and source lines. Set `VIPER_BACKTRACE=0` to leave backtraces out of panic messages.
 
-A project can have a `weby.toml` next to its main file (or above it) naming dependencies, from git or a local path:
+A project can have a `viper.toml` next to its main file (or above it) naming dependencies, from git or a local path:
 
 ```toml
 [package]
@@ -266,7 +266,7 @@ textutil = { git = "https://example.com/textutil.git", rev = "v1.2" }
 shared = { path = "../shared" }
 ```
 
-`import textutil.strings` then loads `strings.wb` from the dependency, and `import textutil` its `lib.wb`.
+`import textutil.strings` then loads `strings.vi` from the dependency, and `import textutil` its `lib.vi`.
 
 Tests:
 
@@ -274,9 +274,9 @@ Tests:
 cargo test --workspace
 ```
 
-The end-to-end tests compile every program in `tests/run` and compare its output with the `# expect:` comments in the file. Each program runs in debug mode, in release mode, and with the collector running before every allocation. The programs in [docs/examples.md](docs/examples.md) are compiled too, and run where the page shows their output. The tests also check every program in `tests/ui` against the expected compiler messages in its `.stderr` file. After an intended change to a message, regenerate those files with `WEBY_BLESS=1 cargo test -p lang_cli --test programs` and review the diff.
+The end-to-end tests compile every program in `tests/run` and compare its output with the `# expect:` comments in the file. Each program runs in debug mode, in release mode, and with the collector running before every allocation. The programs in [docs/examples.md](docs/examples.md) are compiled too, and run where the page shows their output. The tests also check every program in `tests/ui` against the expected compiler messages in its `.stderr` file. After an intended change to a message, regenerate those files with `VIPER_BLESS=1 cargo test -p lang_cli --test programs` and review the diff.
 
-The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real sockets. The PostgreSQL test runs only when `WEBY_TEST_DATABASE_URL` names a database it may use ([tests/db/README.md](tests/db/README.md)). The Autobahn and JSONTestSuite conformance runs are manual, because each needs a download ([tests/conformance/README.md](tests/conformance/README.md)).
+The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real sockets. The PostgreSQL test runs only when `VIPER_TEST_DATABASE_URL` names a database it may use ([tests/db/README.md](tests/db/README.md)). The Autobahn and JSONTestSuite conformance runs are manual, because each needs a download ([tests/conformance/README.md](tests/conformance/README.md)).
 
 ## The plan
 
@@ -299,10 +299,10 @@ The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real socke
 | [docs/optimization-handoff.md](docs/optimization-handoff.md) | State of the performance work and open leads, for planning the next round |
 | [docs/10-final-optimization-plan.md](docs/10-final-optimization-plan.md) | The final optimisation pass: evidence, five milestones, what is left out and why |
 | [docs/release-notes.md](docs/release-notes.md) | What the first release has, what it does not, and how to install it |
-| [docs/errors.md](docs/errors.md) | Every error and warning code: what it means, a real example, and what to do (`weby explain E0300` prints one) |
+| [docs/errors.md](docs/errors.md) | Every error and warning code: what it means, a real example, and what to do (`viper explain E0300` prints one) |
 | [docs/11-release-polish-plan.md](docs/11-release-polish-plan.md) | The language and compiler work before release: gaps found by probing, five milestones, all done; what each did and left out is in the decision log (D91 to D95) |
 | [docs/12-openapi-docs-plan.md](docs/12-openapi-docs-plan.md) | Built: `server.docs("/docs")` serves an OpenAPI document generated from the routes and a built-in documentation page (a viewer written for the project, no downloads), like Fastify's swagger plugins |
 | [docs/14-production-web-plan.md](docs/14-production-web-plan.md) | Being built: what a web service needs in production, from CORS and static files to metrics with a dashboard, uploads, templates, SQLite and jobs, in 25 milestones; milestone 1 (structured logs and request IDs) is done |
 | [editors/README.md](editors/README.md) | Editor support and the language server |
 
-The name "Weby" and the `.wb` extension may still change. The name is kept out of crate names and runtime symbols and lives in one small crate of constants, so it can be changed later with a short checklist ([docs/03-compiler-architecture.md](docs/03-compiler-architecture.md#renaming-the-language)).
+The name "Viper" and the `.vi` extension may still change. The name is kept out of crate names and runtime symbols and lives in one small crate of constants, so it can be changed later with a short checklist ([docs/03-compiler-architecture.md](docs/03-compiler-architecture.md#renaming-the-language)).

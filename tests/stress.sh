@@ -6,13 +6,13 @@
 set -eu
 runs=${1:-1000}
 root=$(cd "$(dirname "$0")/.." && pwd)
-compiler="$root/target/release/weby"
-[ -x "$compiler" ] || compiler="$root/target/debug/weby"
+compiler="$root/target/release/viper"
+[ -x "$compiler" ] || compiler="$root/target/debug/viper"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 failures=0
 for program in worker_pool shared_counter; do
-    source="$root/tests/run/$program.wb"
+    source="$root/tests/run/$program.vi"
     expected="$work/$program.expected"
     sed -n 's/^# expect: \{0,1\}//p' "$source" > "$expected"
     "$compiler" build --release "$source" -o "$work/$program"
@@ -28,7 +28,7 @@ for program in worker_pool shared_counter; do
     done
     i=0
     while [ "$i" -lt $((runs / 10)) ]; do
-        if ! WEBY_GC_STRESS=1 "$work/$program.debug" > "$work/out" 2>&1 || ! cmp -s "$work/out" "$expected"; then
+        if ! VIPER_GC_STRESS=1 "$work/$program.debug" > "$work/out" 2>&1 || ! cmp -s "$work/out" "$expected"; then
             failures=$((failures + 1))
             echo "$program (GC stress): run $i failed"
             cat "$work/out"

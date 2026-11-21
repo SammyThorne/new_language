@@ -1,9 +1,9 @@
 error[E0330]: `@auth.required` needs the `auth` module
- --> tests/ui/auth_not_imported.wb:4:2
+ --> tests/ui/auth_not_imported.vi:4:2
   |
 4 | @auth.required
   |  ^^^^^^^^^^^^^ not imported
   |
   = help: add `import auth`
 
-error: could not compile `tests/ui/auth_not_imported.wb` due to 1 error
+error: could not compile `tests/ui/auth_not_imported.vi` due to 1 error

@@ -1,9 +1,9 @@
 error[E0315]: cannot infer the type of an empty list
- --> tests/ui/empty_list_needs_type.wb:2:13
+ --> tests/ui/empty_list_needs_type.vi:2:13
   |
 2 |     names = []
   |             ^^ element type unknown
   |
   = help: add a type hint, for example `items: list[int] = []`
 
-error: could not compile `tests/ui/empty_list_needs_type.wb` due to 1 error
+error: could not compile `tests/ui/empty_list_needs_type.vi` due to 1 error

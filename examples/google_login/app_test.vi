@@ -1,4 +1,4 @@
-# The app's tests: `weby test`. They sign requests in with `test_cookie`; nothing contacts Google.
+# The app's tests: `viper test`. They sign requests in with `test_cookie`; nothing contacts Google.
 
 import http
 import auth

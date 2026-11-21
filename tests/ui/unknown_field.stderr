@@ -1,5 +1,5 @@
 error[E0316]: `User` has no field `mail`
- --> tests/ui/unknown_field.wb:7:16
+ --> tests/ui/unknown_field.vi:7:16
   |
 1 | struct User:
   |        ---- `User` is defined here
@@ -9,4 +9,4 @@ error[E0316]: `User` has no field `mail`
   |
   = help: did you mean `email`?
 
-error: could not compile `tests/ui/unknown_field.wb` due to 1 error
+error: could not compile `tests/ui/unknown_field.vi` due to 1 error

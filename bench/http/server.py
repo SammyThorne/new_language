@@ -1,5 +1,5 @@
 # The HTTP benchmark server in Python: the standard library's ThreadingHTTPServer with HTTP/1.1
-# keep-alive, with the same endpoints as server.wb. (A framework such as FastAPI under uvicorn is
+# keep-alive, with the same endpoints as server.vi. (A framework such as FastAPI under uvicorn is
 # not installed on the benchmark machine; see bench/README.md.)
 import json
 import re

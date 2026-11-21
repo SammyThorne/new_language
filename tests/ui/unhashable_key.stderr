@@ -1,9 +1,9 @@
 error[E0313]: `float` cannot be used as a dict key
- --> tests/ui/unhashable_key.wb:2:18
+ --> tests/ui/unhashable_key.vi:2:18
   |
 2 |     prices: dict[float, str] = {}
   |                  ^^^^^ not hashable
   |
   = help: dict keys can be `int`, `str`, `bool`, tuples of those, or types that implement `Hash`
 
-error: could not compile `tests/ui/unhashable_key.wb` due to 1 error
+error: could not compile `tests/ui/unhashable_key.vi` due to 1 error

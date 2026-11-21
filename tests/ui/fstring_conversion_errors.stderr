@@ -1,5 +1,5 @@
 error[E0101]: the `!a` conversion is not supported
- --> tests/ui/fstring_conversion_errors.wb:4:15
+ --> tests/ui/fstring_conversion_errors.vi:4:15
   |
 4 |     print(f"{x!a}")
   |               ^^ not supported
@@ -7,7 +7,7 @@ error[E0101]: the `!a` conversion is not supported
   = help: use `!r`, which shows a string with quotes, as `repr` does
 
 error[E0101]: unknown conversion in an f-string
- --> tests/ui/fstring_conversion_errors.wb:5:15
+ --> tests/ui/fstring_conversion_errors.vi:5:15
   |
 5 |     print(f"{x!q}")
   |               ^^ not supported
@@ -15,7 +15,7 @@ error[E0101]: unknown conversion in an f-string
   = help: the conversions are `!r` and `!s`
 
 error[E0101]: unknown conversion in an f-string
- --> tests/ui/fstring_conversion_errors.wb:6:15
+ --> tests/ui/fstring_conversion_errors.vi:6:15
   |
 6 |     print(f"{x!}")
   |               ^^ not supported
@@ -23,11 +23,11 @@ error[E0101]: unknown conversion in an f-string
   = help: the conversions are `!r` and `!s`
 
 error[E0101]: unknown conversion in an f-string
- --> tests/ui/fstring_conversion_errors.wb:7:15
+ --> tests/ui/fstring_conversion_errors.vi:7:15
   |
 7 |     print(f"{x!rr}")
   |               ^^ not supported
   |
   = help: the conversions are `!r` and `!s`
 
-error: could not compile `tests/ui/fstring_conversion_errors.wb` due to 4 errors
+error: could not compile `tests/ui/fstring_conversion_errors.vi` due to 4 errors

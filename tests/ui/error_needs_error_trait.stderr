@@ -1,9 +1,9 @@
 error[E0300]: expected an error of type `Error`, found `Problem`
- --> tests/ui/error_needs_error_trait.wb:6:20
+ --> tests/ui/error_needs_error_trait.vi:6:20
   |
 6 |         return Err(Problem(n))
   |                    ^^^^^^^^^^ has type `Problem`
   |
   = help: implement `Error` for `Problem` so it can be returned as an error
 
-error: could not compile `tests/ui/error_needs_error_trait.wb` due to 1 error
+error: could not compile `tests/ui/error_needs_error_trait.vi` due to 1 error

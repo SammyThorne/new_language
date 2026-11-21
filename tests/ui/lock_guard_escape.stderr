@@ -1,5 +1,5 @@
 error[E0339]: a value protected by a mutex cannot be stored in another variable
-  --> tests/ui/lock_guard_escape.wb:16:17
+  --> tests/ui/lock_guard_escape.vi:16:17
    |
 16 |         saved = items
    |                 ^^^^^ reached through `items`, which is only valid while the lock is held
@@ -7,7 +7,7 @@ error[E0339]: a value protected by a mutex cannot be stored in another variable
    = help: copy what you need while holding the lock, or keep the work inside the `with` block
 
 error[E0339]: a value protected by a mutex cannot be stored in another variable
-  --> tests/ui/lock_guard_escape.wb:17:17
+  --> tests/ui/lock_guard_escape.vi:17:17
    |
 17 |         alias = items
    |                 ^^^^^ reached through `items`, which is only valid while the lock is held
@@ -15,7 +15,7 @@ error[E0339]: a value protected by a mutex cannot be stored in another variable
    = help: copy what you need while holding the lock, or keep the work inside the `with` block
 
 error[E0338]: a value of type `list[Item]` cannot be passed to another task
-  --> tests/ui/lock_guard_escape.wb:18:20
+  --> tests/ui/lock_guard_escape.vi:18:20
    |
 18 |         spawn keep(items)
    |                    ^^^^^ a `list[Item]` can be changed
@@ -23,13 +23,13 @@ error[E0338]: a value of type `list[Item]` cannot be passed to another task
    = help: share an immutable `tuple[Item, ...]` made with `tuple(items)`, or wrap the list in `Mutex(...)`
 
 error[E0339]: `items` is protected by a lock and cannot be captured by a nested function
-  --> tests/ui/lock_guard_escape.wb:20:24
+  --> tests/ui/lock_guard_escape.vi:20:24
    |
 20 |             return len(items)
    |                        ^^^^^ captured here
 
 error[E0339]: `items` was bound by a `with` block on a lock, and cannot be used after it
-  --> tests/ui/lock_guard_escape.wb:22:15
+  --> tests/ui/lock_guard_escape.vi:22:15
    |
 22 |     print(len(items), saved)
    |               ^^^^^ used after the lock was released
@@ -37,7 +37,7 @@ error[E0339]: `items` was bound by a `with` block on a lock, and cannot be used 
    = help: do the work inside the `with` block, or copy what you need out of it there
 
 error[E0337]: a mutex is locked with a `with` block
-  --> tests/ui/lock_guard_escape.wb:23:16
+  --> tests/ui/lock_guard_escape.vi:23:16
    |
 23 |     unlocked = inventory.lock()
    |                ^^^^^^^^^^^^^^^^ the lock would never be released
@@ -45,11 +45,11 @@ error[E0337]: a mutex is locked with a `with` block
    = help: write `with m.lock() as value:`; the lock is released when the block ends
 
 error[E0338]: a value in a `Mutex` must only be reachable through the lock
-  --> tests/ui/lock_guard_escape.wb:25:19
+  --> tests/ui/lock_guard_escape.vi:25:19
    |
 25 |     later = Mutex(shared)
    |                   ^^^^^^ `shared` still refers to it, so it could be changed without the lock
    |
    = help: create the value inside the call, as in `Mutex([])` or `Mutex(State(...))`
 
-error: could not compile `tests/ui/lock_guard_escape.wb` due to 7 errors
+error: could not compile `tests/ui/lock_guard_escape.vi` due to 7 errors

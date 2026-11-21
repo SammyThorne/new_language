@@ -1,0 +1,24 @@
+[
+  {
+    "label": "viper run $ZED_STEM",
+    "command": "viper",
+    "args": ["run", "$ZED_FILE"],
+    "tags": ["viper-main"]
+  },
+  {
+    "label": "viper test $ZED_SYMBOL",
+    "command": "viper",
+    "args": ["test", "$ZED_FILE", "--filter", "$ZED_SYMBOL"],
+    "tags": ["viper-test"]
+  },
+  {
+    "label": "viper test $ZED_STEM",
+    "command": "viper",
+    "args": ["test", "$ZED_FILE"]
+  },
+  {
+    "label": "viper check $ZED_STEM",
+    "command": "viper",
+    "args": ["check", "$ZED_FILE"]
+  }
+]

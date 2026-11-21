@@ -1,5 +1,5 @@
 warning[W0003]: this case can never match
- --> tests/ui/unreachable_case.wb:5:14
+ --> tests/ui/unreachable_case.vi:5:14
   |
 5 |         case 0:
   |              ^ covered by the cases above

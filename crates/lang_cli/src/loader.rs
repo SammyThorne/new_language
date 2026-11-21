@@ -1,6 +1,6 @@
 //! Finding, reading and parsing the modules a program imports (docs/03, "Module graph").
 //!
-//! `import a.b` names the file `a/b.wb` under the directory of the program's main file (the
+//! `import a.b` names the file `a/b.vi` under the directory of the program's main file (the
 //! project root), and failing that, the standard library module `a.b`. Modules are loaded
 //! depth-first; a module that imports one of the modules still being loaded closes a cycle,
 //! which is an error.

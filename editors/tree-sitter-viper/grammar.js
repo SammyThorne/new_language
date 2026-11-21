@@ -1,5 +1,5 @@
 /**
- * A Tree-sitter grammar for Weby, for editors (Zed, Neovim, Helix) and GitHub. It follows the
+ * A Tree-sitter grammar for Viper, for editors (Zed, Neovim, Helix) and GitHub. It follows the
  * grammar sketch in docs/01-language-design.md and the compiler's parser, but accepts a little
  * more than the compiler does (top-level statements, comparison chains), because an editor should
  * keep highlighting a file that is still wrong. Indentation is handled by the external scanner in
@@ -52,7 +52,7 @@ function stringRule($, open, close, multiline, interpolated) {
 }
 
 module.exports = grammar({
-  name: 'weby',
+  name: 'viper',
 
   externals: ($) => [$._newline, $._indent, $._dedent],
 

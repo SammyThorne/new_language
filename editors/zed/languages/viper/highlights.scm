@@ -1,4 +1,4 @@
-; Highlighting for Weby. Later patterns take priority over earlier ones (Zed and Neovim), so the
+; Highlighting for Viper. Later patterns take priority over earlier ones (Zed and Neovim), so the
 ; general rules come first.
 
 (identifier) @variable

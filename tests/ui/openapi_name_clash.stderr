@@ -1,9 +1,9 @@
 error[E0341]: two schemas are both called `Box_Item` in the API documentation
-  --> tests/ui/openapi_name_clash.wb:32:5
+  --> tests/ui/openapi_name_clash.vi:32:5
    |
 32 |     server.mount(App())
    |     ^^^^^^^^^^^^^^^^^^^ documents `Box[Item]`
    |
    = help: `Box_Item` is documented under the same name; rename one of them
 
-error: could not compile `tests/ui/openapi_name_clash.wb` due to 1 error
+error: could not compile `tests/ui/openapi_name_clash.vi` due to 1 error

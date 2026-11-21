@@ -1,24 +1,24 @@
 # 05 — Standard library
 
-The standard library is what makes Weby a backend language and not a general-purpose one. Its API is written in Weby (`stdlib/*.wb`). What sits behind the API moves over time from the Rust runtime into Weby itself.
+The standard library is what makes Viper a backend language and not a general-purpose one. Its API is written in Viper (`stdlib/*.vi`). What sits behind the API moves over time from the Rust runtime into Viper itself.
 
 ## Layers
 
 | Module | Purpose | Milestone | Implemented in (prototype) |
 |---|---|---|---|
 | prelude | `print` (with `sep`, `end` and `flush`), `len`, `range`, `str`, `int`, `float`, `list`, `ord`, `chr`, `reversed`, `min`, `max`, `sorted`, `panic`, built-in types and traits | M1–M4 | Compiler built-ins plus runtime |
-| `io`, `os` | Files, standard streams, environment variables, arguments | M5 | Weby wrappers over runtime |
-| `time` | Clocks, durations, `sleep` | M6 | Weby wrappers over runtime |
+| `io`, `os` | Files, standard streams, environment variables, arguments | M5 | Viper wrappers over runtime |
+| `time` | Clocks, durations, `sleep` | M6 | Viper wrappers over runtime |
 | `sync` | `Channel`, `Mutex`, `Atomic`, `spawn` support | M6 | Runtime |
 | `json` | Dynamic values, typed encode and decode | M7 | Runtime scanner and writer; compiler-derived per-type code |
 | `net` | TCP listener and stream | M8 | Runtime |
-| `http` | Server, router, request, response, middleware, WebSockets | M8–M9 | Runtime protocol code; Weby API layer |
-| `log` | Levelled, structured logging to standard error | M8 | Weby |
-| `testing` | Assertions and the `@test` runner | post-prototype | Weby |
-| `re` | Regular expressions | M12 | Weby API over the `regex-lite` crate |
-| `postgres` | PostgreSQL client with a connection pool | M12 | Runtime protocol code; Weby API layer |
-| `crypto` | Secure random values, SHA-256, HMAC, constant-time comparison, base64, RS256 checks | post-prototype (D101) | Weby API over the `ring` crate |
-| `auth` | Sign-in with Google: login, callback and logout routes, a signed session cookie, route protection | post-prototype (D102) | Weby, on `http` and `crypto` |
+| `http` | Server, router, request, response, middleware, WebSockets | M8–M9 | Runtime protocol code; Viper API layer |
+| `log` | Levelled, structured logging to standard error | M8 | Viper |
+| `testing` | Assertions and the `@test` runner | post-prototype | Viper |
+| `re` | Regular expressions | M12 | Viper API over the `regex-lite` crate |
+| `postgres` | PostgreSQL client with a connection pool | M12 | Runtime protocol code; Viper API layer |
+| `crypto` | Secure random values, SHA-256, HMAC, constant-time comparison, base64, RS256 checks | post-prototype (D101) | Viper API over the `ring` crate |
+| `auth` | Sign-in with Google: login, callback and logout routes, a signed session cookie, route protection | post-prototype (D102) | Viper, on `http` and `crypto` |
 
 Not in the prototype: HTTP client, TLS, database drivers, templating, regular expressions, cryptography beyond what the WebSocket handshake needs. An HTTP client and a PostgreSQL driver are the first two additions afterwards, since a backend without them is a toy. Milestone 12 added the client, TLS (server and client, through `rustls`), the PostgreSQL driver and regular expressions. The `crypto` and `auth` modules came with Google sign-in (docs/13, D101 and D102).
 
@@ -352,18 +352,18 @@ The mapping is overridable with `server.on_error(handler)`.
 
 ### Implementation
 
-As built in M8 (D49, D50), and since M10 with each connection on a fiber rather than a thread (D61, D65): the request parser, connection handling, limits and timeouts are in the runtime, written by hand rather than with `httparse`; the router, `Request`, `Response`, middleware and error mapping are written in Weby in `stdlib/http.lang`, with routes tried in order rather than through a radix tree. `http.Error(status, message)` is a function returning the struct `http.HttpError` (D51). `server.bind(addr)` and `server.serve()` split `listen` in two, so a program can learn its port (`":0"` picks a free one); `server.handle(req)` with `http.test_request(...)` answers a request without a socket, for tests.
+As built in M8 (D49, D50), and since M10 with each connection on a fiber rather than a thread (D61, D65): the request parser, connection handling, limits and timeouts are in the runtime, written by hand rather than with `httparse`; the router, `Request`, `Response`, middleware and error mapping are written in Viper in `stdlib/http.lang`, with routes tried in order rather than through a radix tree. `http.Error(status, message)` is a function returning the struct `http.HttpError` (D51). `server.bind(addr)` and `server.serve()` split `listen` in two, so a program can learn its port (`":0"` picks a free one); `server.handle(req)` with `http.test_request(...)` answers a request without a socket, for tests.
 
 The original plan for the prototype, inside the runtime:
 
 - One accept loop. Each connection is handled by a task (stage 1: thread).
-- Request parsing with the `httparse` crate into a reusable per-connection buffer. Headers are exposed to Weby lazily: a header is turned into a Weby string only when asked for.
+- Request parsing with the `httparse` crate into a reusable per-connection buffer. Headers are exposed to Viper lazily: a header is turned into a Viper string only when asked for.
 - Routing with a radix tree (the `matchit` crate or equivalent). Route handlers are stored as handles ([04](04-runtime-and-memory.md#the-rust-heap-rule)).
 - HTTP/1.1 keep-alive, `Content-Length` and chunked request bodies, `Expect: 100-continue`, `HEAD` handling, automatic `Date` and `Content-Length` response headers.
 - Limits on header size, body size and idle time, on by default.
 - Responses are serialised into the connection's write buffer and flushed with one system call where possible.
 
-After the prototype: the router and the request/response types move into Weby; the byte-level parser may stay native indefinitely. TLS was added in the runtime with `rustls` in M12. HTTP/2 is considered only if there is demand, since backends usually sit behind a proxy that speaks HTTP/1.1 upstream.
+After the prototype: the router and the request/response types move into Viper; the byte-level parser may stay native indefinitely. TLS was added in the runtime with `rustls` in M12. HTTP/2 is considered only if there is demand, since backends usually sit behind a proxy that speaks HTTP/1.1 upstream.
 
 ## WebSockets
 
@@ -682,7 +682,7 @@ Cancellation is not in the prototype. The intended design is a deadline carried 
 
 ## What lives where
 
-| Component | Compiler built-in | Rust runtime | Weby source |
+| Component | Compiler built-in | Rust runtime | Viper source |
 |---|---|---|---|
 | `int`, `float`, `bool` arithmetic | ✔ | | |
 | `list` indexing and length | ✔ (inline) | growth, sort | methods (later: everything) |
@@ -701,4 +701,4 @@ Cancellation is not in the prototype. The intended design is a deadline carried 
 | `log` | | formatting, the request context, buffering | API, `Logger` |
 | `time`, `io`, `os` | | system calls | API |
 
-The direction of travel is rightwards: as generics, byte buffers and the optimiser mature, implementations move from the runtime column to the Weby column, which makes them inlinable and lets the language test itself.
+The direction of travel is rightwards: as generics, byte buffers and the optimiser mature, implementations move from the runtime column to the Viper column, which makes them inlinable and lets the language test itself.

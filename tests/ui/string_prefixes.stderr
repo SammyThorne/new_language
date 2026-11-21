@@ -1,5 +1,5 @@
 error[E0101]: bytes literals are not supported yet
- --> tests/ui/string_prefixes.wb:3:9
+ --> tests/ui/string_prefixes.vi:3:9
   |
 3 |     a = b"abc"
   |         ^ string prefix
@@ -7,11 +7,11 @@ error[E0101]: bytes literals are not supported yet
   = help: make bytes from text with `"...".encode()`
 
 error[E0101]: raw f-strings are not supported yet
- --> tests/ui/string_prefixes.wb:4:9
+ --> tests/ui/string_prefixes.vi:4:9
   |
 4 |     b = rf"\d{1}"
   |         ^^ string prefix
   |
   = help: write the text as a raw string and join the values to it with `+`
 
-error: could not compile `tests/ui/string_prefixes.wb` due to 2 errors
+error: could not compile `tests/ui/string_prefixes.vi` due to 2 errors

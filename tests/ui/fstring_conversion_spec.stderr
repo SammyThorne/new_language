@@ -1,9 +1,9 @@
 error[E0314]: invalid format spec `.2f`
- --> tests/ui/fstring_conversion_spec.wb:4:18
+ --> tests/ui/fstring_conversion_spec.vi:4:18
   |
 4 |     print(f"{x!r:.2f}")
   |                  ^^^ format type `f` cannot be used with `str`
   |
   = help: the spec follows Python's format mini-language, for example `.2f`, `>8` or `,`
 
-error: could not compile `tests/ui/fstring_conversion_spec.wb` due to 1 error
+error: could not compile `tests/ui/fstring_conversion_spec.vi` due to 1 error

@@ -1,5 +1,5 @@
 error[E0335]: `internal_helper` is private to module `lib.accounts`
- --> tests/ui/module_privacy.wb:2:35
+ --> tests/ui/module_privacy.vi:2:35
   |
 2 | from lib.accounts import Account, internal_helper, open_acount
   |                                   ^^^^^^^^^^^^^^^ not `pub`
@@ -7,7 +7,7 @@ error[E0335]: `internal_helper` is private to module `lib.accounts`
   = help: mark it `pub` in `lib.accounts` to use it from other files
 
 error[E0200]: module `lib.accounts` has no `open_acount`
- --> tests/ui/module_privacy.wb:2:52
+ --> tests/ui/module_privacy.vi:2:52
   |
 2 | from lib.accounts import Account, internal_helper, open_acount
   |                                                    ^^^^^^^^^^^ not found
@@ -15,7 +15,7 @@ error[E0200]: module `lib.accounts` has no `open_acount`
   = help: did you mean `open_account`?
 
 warning[W0004]: `open_acount` is imported but never used
- --> tests/ui/module_privacy.wb:2:52
+ --> tests/ui/module_privacy.vi:2:52
   |
 2 | from lib.accounts import Account, internal_helper, open_acount
   |                                                    ^^^^^^^^^^^ imported here
@@ -23,19 +23,19 @@ warning[W0004]: `open_acount` is imported but never used
   = help: remove the import, or use it
 
 error[E0335]: field `balance` of `Account` is private to module `lib.accounts`
- --> tests/ui/module_privacy.wb:7:22
+ --> tests/ui/module_privacy.vi:7:22
   |
 7 |     print(a.owner, a.balance)
   |                      ^^^^^^^ private field
 
 error[E0335]: method `Account.audit` is private to module `lib.accounts`
- --> tests/ui/module_privacy.wb:8:5
+ --> tests/ui/module_privacy.vi:8:5
   |
 8 |     a.audit()
   |     ^^^^^^^^^ private method
 
 error[E0335]: `Account` cannot be created outside module `lib.accounts`
- --> tests/ui/module_privacy.wb:9:9
+ --> tests/ui/module_privacy.vi:9:9
   |
 9 |     b = Account("bob", 10)
   |         ^^^^^^^^^^^^^^^^^^ its field `balance` is private
@@ -43,11 +43,11 @@ error[E0335]: `Account` cannot be created outside module `lib.accounts`
   = help: use a function from `lib.accounts` that creates one
 
 error[E0335]: `internal_helper` is private to module `lib.accounts`
-  --> tests/ui/module_privacy.wb:10:20
+  --> tests/ui/module_privacy.vi:10:20
    |
 10 |     print(accounts.internal_helper(), b.owner)
    |                    ^^^^^^^^^^^^^^^ not `pub`
    |
    = help: mark it `pub` in `lib.accounts` to use it from other files
 
-error: could not compile `tests/ui/module_privacy.wb` due to 6 errors
+error: could not compile `tests/ui/module_privacy.vi` due to 6 errors

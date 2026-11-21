@@ -1,35 +1,35 @@
 //! Every user-visible name of the language lives in this file.
 //!
 //! The language name is a working name. Renaming it means changing the constants here, the
-//! binary name in `crates/lang_cli/Cargo.toml`, the extension of the `.wb` files under `tests/`,
+//! binary name in `crates/lang_cli/Cargo.toml`, the extension of the `.vi` files under `tests/`,
 //! and the docs. See "Renaming the language" in `docs/03-compiler-architecture.md`.
 //!
 //! No other Rust source file may spell the name or the file extension; the test at the bottom
 //! of this file enforces that.
 
 /// The language's display name, used in prose such as `--help` output.
-pub const LANGUAGE_NAME: &str = "Weby";
+pub const LANGUAGE_NAME: &str = "Viper";
 
 /// The name of the compiler executable.
-pub const CLI_NAME: &str = "weby";
+pub const CLI_NAME: &str = "viper";
 
 /// Source file extension, without the leading dot.
-pub const SOURCE_EXTENSION: &str = "wb";
+pub const SOURCE_EXTENSION: &str = "vi";
 
 /// Prefix of every environment variable the compiler or runtime reads.
-pub const ENV_PREFIX: &str = "WEBY_";
+pub const ENV_PREFIX: &str = "VIPER_";
 
 /// Name of the directory, under the system temporary directory, used for build intermediates.
-pub const CACHE_DIR_NAME: &str = "weby-cache";
+pub const CACHE_DIR_NAME: &str = "viper-cache";
 
 /// The project manifest: the project's name and its dependencies.
-pub const MANIFEST_FILE: &str = "weby.toml";
+pub const MANIFEST_FILE: &str = "viper.toml";
 
 /// Where the exact commits of git dependencies are recorded.
-pub const LOCK_FILE: &str = "weby.lock";
+pub const LOCK_FILE: &str = "viper.lock";
 
 /// Where git dependencies are checked out, inside the project.
-pub const DEPS_DIR: &str = ".weby/deps";
+pub const DEPS_DIR: &str = ".viper/deps";
 
 /// The full name of an environment variable, for example `env_var("RUNTIME")`.
 pub fn env_var(suffix: &str) -> String {

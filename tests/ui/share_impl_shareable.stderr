@@ -1,9 +1,9 @@
 error[E0328]: `Shareable` cannot be implemented by hand
- --> tests/ui/share_impl_shareable.wb:4:6
+ --> tests/ui/share_impl_shareable.vi:4:6
   |
 4 | impl Shareable for Cache:
   |      ^^^^^^^^^^^^^^^^^^^ decided by the compiler
   |
   = help: a type is shareable when it cannot be changed: mark a struct `@frozen` and give it shareable fields
 
-error: could not compile `tests/ui/share_impl_shareable.wb` due to 1 error
+error: could not compile `tests/ui/share_impl_shareable.vi` due to 1 error

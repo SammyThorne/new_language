@@ -1,9 +1,9 @@
 error[E0338]: a value of type `Counter` cannot be passed to another task
- --> tests/ui/share_mutable_struct.wb:9:16
+ --> tests/ui/share_mutable_struct.vi:9:16
   |
 9 |     spawn bump(counter)
   |                ^^^^^^^ `Counter` has fields that can be changed
   |
   = help: mark `Counter` `@frozen`, or wrap the value in `Mutex(...)`
 
-error: could not compile `tests/ui/share_mutable_struct.wb` due to 1 error
+error: could not compile `tests/ui/share_mutable_struct.vi` due to 1 error

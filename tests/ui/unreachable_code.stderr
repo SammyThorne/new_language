@@ -1,5 +1,5 @@
 warning[W0002]: unreachable code
- --> tests/ui/unreachable_code.wb:3:5
+ --> tests/ui/unreachable_code.vi:3:5
   |
 3 |     print("never")
   |     ^^^^^^^^^^^^^^ this never runs

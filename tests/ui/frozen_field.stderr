@@ -1,5 +1,5 @@
 error[E0323]: cannot change a field of `Config`, which is `@frozen`
- --> tests/ui/frozen_field.wb:7:12
+ --> tests/ui/frozen_field.vi:7:12
   |
 2 | struct Config:
   |        ------ `Config` is declared `@frozen` here
@@ -9,4 +9,4 @@ error[E0323]: cannot change a field of `Config`, which is `@frozen`
   |
   = help: build a new value instead, or remove `@frozen` if the struct should be mutable
 
-error: could not compile `tests/ui/frozen_field.wb` due to 1 error
+error: could not compile `tests/ui/frozen_field.vi` due to 1 error

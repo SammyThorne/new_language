@@ -1,5 +1,5 @@
 error[E0328]: `area` does not match its declaration in `Shape`
- --> tests/ui/impl_signature_mismatch.wb:8:9
+ --> tests/ui/impl_signature_mismatch.vi:8:9
   |
 2 |     def area(self) -> float
   |         ---- declared here
@@ -7,4 +7,4 @@ error[E0328]: `area` does not match its declaration in `Shape`
 8 |     def area(self) -> int:
   |         ^^^^ the return type should be `float`
 
-error: could not compile `tests/ui/impl_signature_mismatch.wb` due to 1 error
+error: could not compile `tests/ui/impl_signature_mismatch.vi` due to 1 error

@@ -1,14 +1,14 @@
 #!/bin/sh
 # Install the compiler on macOS. The compiler and the programs it builds are Linux x86-64 only
 # (docs/building.md), so this script sets up a small Ubuntu virtual machine with Lima, installs the
-# compiler in it with scripts/install.sh, and puts a `weby` command on the Mac that runs the
+# compiler in it with scripts/install.sh, and puts a `viper` command on the Mac that runs the
 # compiler in the VM, in the directory you are in.
 #
 # Usage: scripts/install-macos.sh [--yes] [--bin-dir DIR] [--cpus N] [--memory GiB] [--disk GiB]
 #
 # Needs Homebrew; offers to install it if it is missing. Your home directory is shared with the VM
-# (writable), so `weby build app.wb -o app` writes `app` into your folder, as a Linux executable:
-# run it with `weby run app.wb`, or inside the VM with `limactl shell weby ./app`. Servers
+# (writable), so `viper build app.vi -o app` writes `app` into your folder, as a Linux executable:
+# run it with `viper run app.vi`, or inside the VM with `limactl shell viper ./app`. Servers
 # listening in the VM are reachable on localhost on the Mac.
 #
 # On Apple Silicon the VM emulates x86-64, which is slow: building the compiler takes much longer
@@ -21,7 +21,7 @@ bin_dir=$HOME/.local/bin
 cpus=4
 memory=6
 disk=40
-vm=weby
+vm=viper
 while [ $# -gt 0 ]; do
     case $1 in
         --yes | -y) assume_yes=1 ;;
@@ -53,7 +53,7 @@ if [ "$(uname -m)" = arm64 ]; then
     say "Apple Silicon: the VM will emulate x86-64, which is slow (see --help)."
 fi
 
-say "This will: install Lima with Homebrew, create an Ubuntu 24.04 VM named '$vm' ($cpus CPUs, ${memory} GiB memory, ${disk} GiB disk), install the compiler in it, and add $bin_dir/weby."
+say "This will: install Lima with Homebrew, create an Ubuntu 24.04 VM named '$vm' ($cpus CPUs, ${memory} GiB memory, ${disk} GiB disk), install the compiler in it, and add $bin_dir/viper."
 confirm "Continue?" || die "stopped; nothing was changed"
 
 if ! command -v brew >/dev/null 2>&1; then
@@ -71,7 +71,7 @@ command -v limactl >/dev/null 2>&1 || { say "Installing Lima"; brew install lima
 status=$(limactl list --format '{{.Status}}' "$vm" 2>/dev/null || true)
 if [ -z "$status" ]; then
     say "Creating the VM (downloads the Ubuntu 24.04 cloud image, about 600 MB)"
-    config=$(mktemp -t weby-lima).yaml
+    config=$(mktemp -t viper-lima).yaml
     cat >"$config" <<YAML
 arch: "$arch"
 cpus: $cpus
@@ -96,25 +96,25 @@ fi
 
 say "Copying the sources into the VM and installing the compiler (this takes a few minutes)"
 tar -C "$root" --exclude=./target --exclude=./.git -cf - . |
-    limactl shell "$vm" -- sh -c 'rm -rf "$HOME/weby-src" && mkdir -p "$HOME/weby-src" && tar -C "$HOME/weby-src" -xf -'
-limactl shell "$vm" -- sh "\$HOME/weby-src/scripts/install.sh" --yes
+    limactl shell "$vm" -- sh -c 'rm -rf "$HOME/viper-src" && mkdir -p "$HOME/viper-src" && tar -C "$HOME/viper-src" -xf -'
+limactl shell "$vm" -- sh "\$HOME/viper-src/scripts/install.sh" --yes
 
-say "Adding the weby command to $bin_dir"
+say "Adding the viper command to $bin_dir"
 mkdir -p "$bin_dir"
-cat >"$bin_dir/weby" <<'WRAPPER'
+cat >"$bin_dir/viper" <<'WRAPPER'
 #!/bin/sh
 # Runs the compiler installed in the Lima VM, in the current directory (the Mac's home directory is
 # shared with the VM at the same path). Starts the VM if it is stopped.
-vm=weby
+vm=viper
 if [ "$(limactl list --format '{{.Status}}' "$vm" 2>/dev/null)" != Running ]; then
     limactl start "$vm" >/dev/null || exit 1
 fi
-exec limactl shell --workdir "$PWD" "$vm" -- sh -c 'exec "$HOME/.local/bin/weby" "$@"' weby "$@"
+exec limactl shell --workdir "$PWD" "$vm" -- sh -c 'exec "$HOME/.local/bin/viper" "$@"' viper "$@"
 WRAPPER
-chmod +x "$bin_dir/weby"
+chmod +x "$bin_dir/viper"
 
 case ":$PATH:" in
-    *":$bin_dir:"*) say "Done. Try: weby --version" ;;
+    *":$bin_dir:"*) say "Done. Try: viper --version" ;;
     *) say "Done. $bin_dir is not on your PATH; add this line to ~/.zshrc, then open a new terminal:"
        echo "    export PATH=\"$bin_dir:\$PATH\"" ;;
 esac

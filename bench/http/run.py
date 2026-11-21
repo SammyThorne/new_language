@@ -1,4 +1,4 @@
-"""Run the HTTP benchmark: each server (Weby, Go, Python) under the same load on each endpoint.
+"""Run the HTTP benchmark: each server (Viper, Go, Python) under the same load on each endpoint.
 
 Usage: python3 bench/http/run.py [--seconds N] [--connections N[,N...]] [--runs N] [--no-pin] [--browser]
 
@@ -29,7 +29,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-COMPILER = ROOT / "target" / "release" / "weby"
+COMPILER = ROOT / "target" / "release" / "viper"
 SERVER_CPUS = "0-2,6-8"
 LOAD_CPUS = "3-5,9-11"
 
@@ -138,11 +138,11 @@ def main() -> None:
     env = dict(os.environ, GOTOOLCHAIN="local")
     with tempfile.TemporaryDirectory() as out:
         out = Path(out)
-        subprocess.run([COMPILER, "build", "--release", HERE / "server.wb", "-o", out / "weby_server"], check=True)
+        subprocess.run([COMPILER, "build", "--release", HERE / "server.vi", "-o", out / "viper_server"], check=True)
         subprocess.run([go, "build", "-o", out / "go_server", HERE / "server.go"], check=True, env=env)
         subprocess.run([go, "build", "-o", out / "load", HERE / "load.go"], check=True, env=env)
         servers = {
-            "Weby": [str(out / "weby_server")],
+            "Viper": [str(out / "viper_server")],
             "Go": [str(out / "go_server")],
             "Python": [sys.executable, str(HERE / "server.py")],
         }
@@ -152,7 +152,7 @@ def main() -> None:
             print()
             print(f"**{connections} connections.** Requests per second; median and p99 latency in ms; peak server memory.")
             print()
-            print("| Endpoint | Weby | Go | Python | Weby vs Go | Weby vs Python |")
+            print("| Endpoint | Viper | Go | Python | Viper vs Go | Viper vs Python |")
             print("|---|---|---|---|---|---|")
             for path, extra in ENDPOINTS:
                 results = {}
@@ -168,10 +168,10 @@ def main() -> None:
                     if any(r[3] for r in attempts):
                         print(f"<!-- {name} {path}: {sum(r[3] for r in attempts)} errors -->")
                 cell = lambda r: f"{r[0]:,.0f} ({r[1]:.2f} / {r[2]:.2f}; {r[4] / 1024:.0f} MB)"
-                weby, go_r, py = results["Weby"], results["Go"], results["Python"]
+                viper, go_r, py = results["Viper"], results["Go"], results["Python"]
                 label = f"`POST {path}`" if extra else f"`{path}`"
                 print(
-                    f"| {label} | {cell(weby)} | {cell(go_r)} | {cell(py)} | {weby[0] / go_r[0]:.2f}x | {weby[0] / py[0]:.1f}x |",
+                    f"| {label} | {cell(viper)} | {cell(go_r)} | {cell(py)} | {viper[0] / go_r[0]:.2f}x | {viper[0] / py[0]:.1f}x |",
                     flush=True,
                 )
         print()

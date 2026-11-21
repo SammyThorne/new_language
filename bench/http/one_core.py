@@ -1,4 +1,4 @@
-"""Requests per second on one CPU: the Weby server with one worker and the Go server with
+"""Requests per second on one CPU: the Viper server with one worker and the Go server with
 GOMAXPROCS=1, each pinned to CPU 0, against the same load generator on other CPUs. Dividing a
 second by the rate gives the CPU time each request costs, which is the figure to size a
 deployment by.
@@ -22,16 +22,16 @@ def main() -> None:
     env = dict(os.environ, GOTOOLCHAIN="local")
     with tempfile.TemporaryDirectory() as out:
         out = Path(out)
-        subprocess.run([COMPILER, "build", "--release", HERE / "server.wb", "-o", out / "weby_server"], check=True)
+        subprocess.run([COMPILER, "build", "--release", HERE / "server.vi", "-o", out / "viper_server"], check=True)
         subprocess.run([go, "build", "-o", out / "go_server", HERE / "server.go"], check=True, env=env)
         subprocess.run([go, "build", "-o", out / "load", HERE / "load.go"], check=True, env=env)
         servers = {
-            "Weby": ([str(out / "weby_server")], {"WEBY_WORKERS": "1"}),
+            "Viper": ([str(out / "viper_server")], {"VIPER_WORKERS": "1"}),
             "Go": ([str(out / "go_server")], {"GOMAXPROCS": "1"}),
         }
         print(f"One CPU per server, {connections} connections, best of {runs} runs of {seconds} s")
         print()
-        print("| Endpoint | Weby | Go | Weby vs Go | CPU per request: Weby / Go |")
+        print("| Endpoint | Viper | Go | Viper vs Go | CPU per request: Viper / Go |")
         print("|---|---|---|---|---|")
         port = 19700
         for path, extra in ENDPOINTS:
@@ -57,10 +57,10 @@ def main() -> None:
                     best = max(best, float(fields[0]))
                 rates[name] = best
             label = f"`POST {path}`" if extra else f"`{path}`"
-            weby, go_rate = rates["Weby"], rates["Go"]
+            viper, go_rate = rates["Viper"], rates["Go"]
             print(
-                f"| {label} | {weby:,.0f} | {go_rate:,.0f} | {weby / go_rate:.2f}x | "
-                f"{1e6 / weby:.1f} / {1e6 / go_rate:.1f} µs |",
+                f"| {label} | {viper:,.0f} | {go_rate:,.0f} | {viper / go_rate:.2f}x | "
+                f"{1e6 / viper:.1f} / {1e6 / go_rate:.1f} µs |",
                 flush=True,
             )
 

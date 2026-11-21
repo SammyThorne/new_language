@@ -6,11 +6,11 @@ Installs the compiler on Windows.
 The compiler and the programs it builds are Linux x86-64 only (docs/building.md), so this script
 sets up Ubuntu 24.04 in WSL 2 if it is not there, installs the compiler in it with
 scripts/install.sh (which installs LLVM 19, the Boehm collector, a C toolchain and Rust), and puts
-a `weby.cmd` command on the Windows PATH that runs the compiler in WSL, in the folder you are in.
+a `viper.cmd` command on the Windows PATH that runs the compiler in WSL, in the folder you are in.
 
 Windows 10 version 2004 or later, or Windows 11, with virtualisation enabled. Installing WSL needs
 an administrator PowerShell and may ask for a restart; if it does, restart and run this script again.
-Programs that `weby build` writes are Linux executables: run them with `weby run app.wb`, or
+Programs that `viper build` writes are Linux executables: run them with `viper run app.vi`, or
 inside WSL. Servers listening in WSL are reachable on localhost from Windows.
 
 .PARAMETER Distro
@@ -39,7 +39,7 @@ if (-not ((Test-Path (Join-Path $root "Cargo.toml")) -and (Test-Path (Join-Path 
     Die "run this script from a checkout of the repository"
 }
 
-Say "This will set up $Distro in WSL 2 if needed, install the compiler in it (system packages, LLVM 19, Rust), and add weby.cmd to your PATH."
+Say "This will set up $Distro in WSL 2 if needed, install the compiler in it (system packages, LLVM 19, Rust), and add viper.cmd to your PATH."
 if (-not $Yes) {
     $answer = Read-Host "Continue? [y/N]"
     if ($answer -notmatch '^(y|yes)$') { Die "stopped; nothing was changed" }
@@ -73,19 +73,19 @@ function Invoke-Wsl([string]$script) {
 Say "Copying the sources into $Distro"
 $wslRoot = (& wsl.exe -d $Distro -u root -- wslpath -a ($root -replace '\\', '/')).Trim()
 if (-not $wslRoot) { Die "could not translate $root to a WSL path" }
-Invoke-Wsl "rm -rf /opt/weby-src && mkdir -p /opt/weby-src && tar -C '$wslRoot' --exclude=./target --exclude=./.git -cf - . | tar -C /opt/weby-src -xf -"
+Invoke-Wsl "rm -rf /opt/viper-src && mkdir -p /opt/viper-src && tar -C '$wslRoot' --exclude=./target --exclude=./.git -cf - . | tar -C /opt/viper-src -xf -"
 # A Windows checkout may have CRLF line endings, which the shell scripts and the Makefile cannot run with.
-Invoke-Wsl "sed -i 's/\r$//' /opt/weby-src/scripts/*.sh /opt/weby-src/Makefile"
+Invoke-Wsl "sed -i 's/\r$//' /opt/viper-src/scripts/*.sh /opt/viper-src/Makefile"
 
 Say "Installing the compiler in $Distro (this takes a few minutes)"
-Invoke-Wsl "sh /opt/weby-src/scripts/install.sh --yes --prefix /usr/local"
+Invoke-Wsl "sh /opt/viper-src/scripts/install.sh --yes --prefix /usr/local"
 
-Say "Adding weby.cmd to your PATH"
-$bin = Join-Path $env:LOCALAPPDATA "Weby\bin"
+Say "Adding viper.cmd to your PATH"
+$bin = Join-Path $env:LOCALAPPDATA "Viper\bin"
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
 # wsl.exe starts in the current folder, translated to /mnt/..., and passes the exit status back.
-$cmd = "@echo off`r`nwsl.exe -d $Distro -- weby %*`r`nexit /b %ERRORLEVEL%`r`n"
-[IO.File]::WriteAllText((Join-Path $bin "weby.cmd"), $cmd, [Text.Encoding]::ASCII)
+$cmd = "@echo off`r`nwsl.exe -d $Distro -- viper %*`r`nexit /b %ERRORLEVEL%`r`n"
+[IO.File]::WriteAllText((Join-Path $bin "viper.cmd"), $cmd, [Text.Encoding]::ASCII)
 
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if (($userPath -split ";") -notcontains $bin) {
@@ -93,4 +93,4 @@ if (($userPath -split ";") -notcontains $bin) {
     Say "Added $bin to your PATH. Open a new terminal to use it."
 }
 
-Say "Done. In a new terminal, try: weby --version"
+Say "Done. In a new terminal, try: viper --version"

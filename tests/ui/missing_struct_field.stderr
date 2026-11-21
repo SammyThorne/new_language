@@ -1,5 +1,5 @@
 error[E0311]: missing field `id` in `User(...)`
- --> tests/ui/missing_struct_field.wb:7:12
+ --> tests/ui/missing_struct_field.vi:7:12
   |
 1 | struct User:
   |        ---- `User` is defined here
@@ -7,4 +7,4 @@ error[E0311]: missing field `id` in `User(...)`
 7 |     user = User(name="Ada")
   |            ^^^^^^^^^^^^^^^^ missing `id`
 
-error: could not compile `tests/ui/missing_struct_field.wb` due to 1 error
+error: could not compile `tests/ui/missing_struct_field.vi` due to 1 error

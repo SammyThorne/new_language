@@ -1,6 +1,6 @@
 # Release notes
 
-Weby is a compiled, Python-shaped language for web backends. `weby --version` reports 1.1.0: the first release, 1.0.0, with the API documentation of [1.1.0](#new-in-110) added. This page says what the language has, what it does not, and how to install it. The state of each part, with the reasoning behind the choices, is in the [roadmap](06-roadmap.md) and the [decision log](08-decisions-and-risks.md); [Weby by example](examples.md) teaches the language, and every program in it is compiled and run by the test suite.
+Viper is a compiled, Python-shaped language for web backends. `viper --version` reports 1.1.0: the first release, 1.0.0, with the API documentation of [1.1.0](#new-in-110) added. This page says what the language has, what it does not, and how to install it. The state of each part, with the reasoning behind the choices, is in the [roadmap](06-roadmap.md) and the [decision log](08-decisions-and-risks.md); [Viper by example](examples.md) teaches the language, and every program in it is compiled and run by the test suite.
 
 ## What the language has
 
@@ -19,13 +19,15 @@ Weby is a compiled, Python-shaped language for web backends. `weby --version` re
 
 **The web stack.** Handlers can be written with annotations, `@http.get("/todos/{id}")`, and typed parameters that the compiler binds from the path, query, headers, cookies and a JSON body, with `400`s generated for bad input. WebSocket endpoints with `@http.ws`. HTTPS with `rustls`. Graceful shutdown on SIGTERM.
 
-**Tooling.** `weby run`, `build`, `check`, `test` (for `@test` functions), `fmt`, `fetch`, `explain` (for an error code) and `lsp`. The language server gives diagnostics, hover, go to definition, completion and formatting. Editor support for VS Code, Vim, Neovim, Helix and Zed is in `editors/`. The messages point at the source, suggest the nearest name, and every code has an entry in the [error reference](errors.md).
+**Tooling.** `viper run`, `build`, `check`, `test` (for `@test` functions), `fmt`, `fetch`, `explain` (for an error code) and `lsp`. The language server gives diagnostics, hover, go to definition, completion and formatting. Editor support for VS Code, Vim, Neovim, Helix and Zed is in `editors/`. The messages point at the source, suggest the nearest name, and every code has an entry in the [error reference](errors.md).
 
 **Performance.** On this repository's benchmarks every program runs faster than Go's version (between 1.1 and 3.0 times), and the HTTP endpoints serve 1.8 to 3.1 times Go's request rate at 256 connections with about 40% of its CPU per request. Idle WebSocket connections cost about 19 KiB each. A small program's executable is 0.5 MB and the benchmark web server's 1.3 MB. The numbers, how they were measured and what limits them are in [web-performance.md](web-performance.md) and [bench/README.md](../bench/README.md). `bench/run.py --check` and `bench/http/counts.py --check` fail on a regression.
 
 ## Since 1.1.0: signing in with Google, and production web features
 
-Not yet in a numbered release; `weby --version` still says 1.1.0.
+Not yet in a numbered release; `viper --version` still says 1.1.0.
+
+**The language is now called Viper** (D109). The command is `viper`, source files end in `.vi`, environment variables start with `VIPER_` (`VIPER_LOG`, `VIPER_WORKERS`, ...), and projects use `viper.toml` and `viper.lock`. Rename existing `.wb` files and `weby.toml` to match; the old names are not read.
 
 **Logs and requests** ([production web plan](14-production-web-plan.md), milestone 1, D105):
 - `log` functions take `fields` (`log.info("saved", {"order": id})`), written as `name=value`, or as one JSON object per line after `log.set_format("json")` or with the `LOG_FORMAT` variable. `log.with_fields(...)` gives a logger with fields of its own.
@@ -74,7 +76,7 @@ The [release polish plan](11-release-polish-plan.md) closed the gaps a Python pr
 - `set[T]`, with literals, comprehensions, operators, methods and JSON;
 - methods with type parameters of their own, and `case Circle(c):` on a trait object;
 - a clear `panic: stack overflow` and exit status 101 instead of a segmentation fault;
-- completion in the language server, a warning for unused imports, `weby explain`, and executables four to eight times smaller.
+- completion in the language server, a warning for unused imports, `viper explain`, and executables four to eight times smaller.
 
 ## Known limitations
 
@@ -99,7 +101,7 @@ These are choices made for this release, each with its reason in the decision lo
 
 **Tooling.**
 - Debug information has line tables and function names but not variables or types (D67): a debugger can break, step and show a backtrace, not print locals.
-- `weby fmt` keeps your line breaks; it does not fit lines to a width (D68). The language server checks the whole program on each change (D70).
+- `viper fmt` keeps your line breaks; it does not fit lines to a width (D68). The language server checks the whole program on each change (D70).
 - Dependencies come from git or paths with a lock file; there is no registry and no version solving (D71).
 - Testing: the runtime has not been run under ThreadSanitizer, which needs a nightly Rust toolchain (D45). JSON and WebSocket conformance suites are run by hand, not in continuous integration (D81).
 
@@ -117,8 +119,8 @@ make
 make install
 ```
 
-The first builds the compiler and the runtime library; the second puts the `weby` command in `~/.local/bin` (`PREFIX=... make install` for somewhere else). Then:
+The first builds the compiler and the runtime library; the second puts the `viper` command in `~/.local/bin` (`PREFIX=... make install` for somewhere else). Then:
 
 ```bash
-weby run hello.wb
+viper run hello.vi
 ```

@@ -1,9 +1,9 @@
 error[E0103]: comparison chains are not supported
- --> tests/ui/comparison_chain.wb:2:11
+ --> tests/ui/comparison_chain.vi:2:11
   |
 2 |     print(1 < 2 < 3)
   |           ^^^^^^^ second comparison
   |
   = help: write `a < b and b < c` instead of `a < b < c`
 
-error: could not compile `tests/ui/comparison_chain.wb` due to 1 error
+error: could not compile `tests/ui/comparison_chain.vi` due to 1 error

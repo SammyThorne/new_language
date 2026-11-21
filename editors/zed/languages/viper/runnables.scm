@@ -3,7 +3,7 @@
 ((function_definition
   name: (identifier) @run @_name)
   (#eq? @_name "main")
-  (#set! tag weby-main))
+  (#set! tag viper-main))
 
 ((decorated_definition
   (annotation
@@ -11,4 +11,4 @@
   definition: (function_definition
     name: (identifier) @run))
   (#eq? @_annotation "test")
-  (#set! tag weby-test))
+  (#set! tag viper-test))

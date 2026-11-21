@@ -7,7 +7,7 @@
 # expect-exit: 101
 # expect-stderr: panic in task
 # expect-stderr: index 10 is out of range for a list of length 3
-# expect-stderr: --> tests/run/task_panic.wb:17:12
+# expect-stderr: --> tests/run/task_panic.vi:17:12
 # expect-stderr: panic: joined a task that panicked
 
 import time

@@ -1,5 +1,5 @@
 error[E0314]: invalid format spec `.2f`
- --> tests/ui/bad_format_spec.wb:3:19
+ --> tests/ui/bad_format_spec.vi:3:19
   |
 3 |     print(f"{name:.2f}")
   |                   ^^^ format type `f` cannot be used with `str`
@@ -7,11 +7,11 @@ error[E0314]: invalid format spec `.2f`
   = help: the spec follows Python's format mini-language, for example `.2f`, `>8` or `,`
 
 error[E0314]: invalid format spec `q`
- --> tests/ui/bad_format_spec.wb:4:17
+ --> tests/ui/bad_format_spec.vi:4:17
   |
 4 |     print(f"{42:q}")
   |                 ^ unknown format type `q`
   |
   = help: the spec follows Python's format mini-language, for example `.2f`, `>8` or `,`
 
-error: could not compile `tests/ui/bad_format_spec.wb` due to 2 errors
+error: could not compile `tests/ui/bad_format_spec.vi` due to 2 errors

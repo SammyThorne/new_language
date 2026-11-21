@@ -1,19 +1,19 @@
-id = "weby"
-name = "Weby"
-description = "Weby language support: syntax highlighting, outline, indentation, run buttons, and the `weby lsp` language server."
+id = "viper"
+name = "Viper"
+description = "Viper language support: syntax highlighting, outline, indentation, run buttons, and the `viper lsp` language server."
 version = "1.1.0"
 schema_version = 1
-authors = ["Weby contributors"]
+authors = ["Viper contributors"]
 repository = "https://github.com/SammyThorne/new_language"
 
-# The grammar lives in this repository, in editors/tree-sitter-weby. Zed clones the repository at
+# The grammar lives in this repository, in editors/tree-sitter-viper. Zed clones the repository at
 # this commit to build it. While the repository is private, `./install-local.sh` makes a copy
 # that points at your checkout instead.
-[grammars.weby]
+[grammars.viper]
 repository = "https://github.com/SammyThorne/new_language"
 rev = "702a1b8be63c8c3bf9355339929c5d4507da363f"
-path = "editors/tree-sitter-weby"
+path = "editors/tree-sitter-viper"
 
-[language_servers.weby]
-name = "Weby Language Server"
-languages = ["Weby"]
+[language_servers.viper]
+name = "Viper Language Server"
+languages = ["Viper"]

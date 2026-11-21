@@ -1,11 +1,11 @@
 #!/bin/sh
 # Install the compiler on Debian, Ubuntu and other apt-based Linux systems, starting from nothing:
 # the script installs LLVM 19, the Boehm collector, a C toolchain and Rust if they are missing,
-# builds the compiler and runtime from this checkout, and installs the `weby` command.
+# builds the compiler and runtime from this checkout, and installs the `viper` command.
 #
 # Usage: scripts/install.sh [--prefix DIR] [--yes] [--dry-run] [--no-system-packages]
 #
-#   --prefix DIR            where `weby` goes: DIR/bin/weby and DIR/lib/weby (default ~/.local)
+#   --prefix DIR            where `viper` goes: DIR/bin/viper and DIR/lib/viper (default ~/.local)
 #   --yes                   do not ask before installing system packages
 #   --dry-run               print what would be done, and change nothing
 #   --no-system-packages    skip apt (and sudo); build with what is already installed
@@ -139,4 +139,4 @@ sh scripts/check-deps.sh
 say "Building the compiler and runtime, and installing into $prefix (this takes a few minutes)"
 make install PREFIX="$prefix"
 
-say "Done. Try:  $prefix/bin/weby --version"
+say "Done. Try:  $prefix/bin/viper --version"

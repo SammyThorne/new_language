@@ -1,9 +1,9 @@
 error[E0302]: function `double` has no return type but returns a value
- --> tests/ui/return_value_without_type.wb:2:12
+ --> tests/ui/return_value_without_type.vi:2:12
   |
 2 |     return n * 2
   |            ^^^^^ returns `int`
   |
   = help: declare the return type in the signature: `-> int`
 
-error: could not compile `tests/ui/return_value_without_type.wb` due to 1 error
+error: could not compile `tests/ui/return_value_without_type.vi` due to 1 error

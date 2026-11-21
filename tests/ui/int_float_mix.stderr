@@ -1,5 +1,5 @@
 error[E0321]: cannot use `*` on `float` and `int`
- --> tests/ui/int_float_mix.wb:7:11
+ --> tests/ui/int_float_mix.vi:7:11
   |
 7 |     print(average(10, count) * count)
   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^ `float` * `int`
@@ -7,11 +7,11 @@ error[E0321]: cannot use `*` on `float` and `int`
   = help: numbers are not converted implicitly; convert one side with `float(...)` or `int(...)`
 
 error[E0321]: cannot use `*` on `int` and `float`
- --> tests/ui/int_float_mix.wb:8:11
+ --> tests/ui/int_float_mix.vi:8:11
   |
 8 |     print(count * scale)
   |           ^^^^^^^^^^^^^ `int` * `float`
   |
   = help: numbers are not converted implicitly; convert one side with `float(...)` or `int(...)`
 
-error: could not compile `tests/ui/int_float_mix.wb` due to 2 errors
+error: could not compile `tests/ui/int_float_mix.vi` due to 2 errors

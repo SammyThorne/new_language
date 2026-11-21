@@ -1,0 +1,103 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Viper",
+  "scopeName": "source.viper",
+  "fileTypes": ["vi"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#docstring" },
+    { "include": "#fstring" },
+    { "include": "#rawstring" },
+    { "include": "#string" },
+    { "include": "#annotation" },
+    { "include": "#declaration" },
+    { "include": "#keyword" },
+    { "include": "#constant" },
+    { "include": "#number" },
+    { "include": "#type" },
+    { "include": "#call" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": { "match": "#.*$", "name": "comment.line.number-sign.viper" },
+    "docstring": {
+      "begin": "(\"\"\"|''')",
+      "end": "\\1",
+      "name": "string.quoted.docstring.viper",
+      "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.viper" }]
+    },
+    "fstring": {
+      "begin": "\\b[fF](\"|')",
+      "end": "\\1",
+      "name": "string.interpolated.viper",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.viper" },
+        { "match": "\\{\\{|\\}\\}", "name": "constant.character.escape.viper" },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "name": "meta.interpolation.viper",
+          "patterns": [{ "include": "$self" }]
+        }
+      ]
+    },
+    "rawstring": {
+      "begin": "\\b[rR](\"|')",
+      "end": "\\1",
+      "name": "string.quoted.raw.viper",
+      "patterns": [{ "match": "\\\\[\\\\\"']" }]
+    },
+    "string": {
+      "begin": "(\"|')",
+      "end": "\\1",
+      "name": "string.quoted.viper",
+      "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.viper" }]
+    },
+    "annotation": {
+      "match": "^\\s*(@[A-Za-z_][A-Za-z0-9_.]*)",
+      "captures": { "1": { "name": "entity.name.function.decorator.viper" } }
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "match": "\\b(def)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "storage.type.function.viper" }, "2": { "name": "entity.name.function.viper" } }
+        },
+        {
+          "match": "\\b(struct|enum|trait|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "storage.type.viper" }, "2": { "name": "entity.name.type.viper" } }
+        },
+        {
+          "match": "\\b(impl)\\b",
+          "name": "storage.type.viper"
+        }
+      ]
+    },
+    "keyword": {
+      "patterns": [
+        { "match": "\\b(if|elif|else|for|while|break|continue|return|match|case|with|pass|assert|spawn|lambda)\\b", "name": "keyword.control.viper" },
+        { "match": "\\b(import|from|as)\\b", "name": "keyword.control.import.viper" },
+        { "match": "\\b(and|or|not|in|is)\\b", "name": "keyword.operator.logical.viper" },
+        { "match": "\\b(pub|priv|const)\\b", "name": "storage.modifier.viper" },
+        { "match": "\\bself\\b", "name": "variable.language.self.viper" }
+      ]
+    },
+    "constant": { "match": "\\b(True|False|None)\\b", "name": "constant.language.viper" },
+    "number": {
+      "match": "\\b(0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*(\\.[0-9_]+)?([eE][+-]?[0-9_]+)?)\\b",
+      "name": "constant.numeric.viper"
+    },
+    "type": {
+      "patterns": [
+        { "match": "\\b(int|float|bool|str|bytes|list|dict|tuple|frozendict|Result|Task|Channel|Mutex|Atomic|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64)\\b", "name": "support.type.viper" },
+        { "match": "\\b(Some|Ok|Err)\\b", "name": "support.function.builtin.viper" },
+        { "match": "\\b[A-Z][A-Za-z0-9_]*\\b", "name": "entity.name.type.viper" }
+      ]
+    },
+    "call": {
+      "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": { "1": { "name": "entity.name.function.call.viper" } }
+    },
+    "operator": { "match": "->|\\*\\*|//|==|!=|<=|>=|<<|>>|[-+*/%&|^~<>=?]", "name": "keyword.operator.viper" }
+  }
+}

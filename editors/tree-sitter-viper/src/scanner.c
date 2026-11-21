@@ -20,15 +20,15 @@ typedef struct {
     uint16_t depth;
 } Scanner;
 
-void *tree_sitter_weby_external_scanner_create(void) {
+void *tree_sitter_viper_external_scanner_create(void) {
     Scanner *scanner = calloc(1, sizeof(Scanner));
     scanner->depth = 1;
     return scanner;
 }
 
-void tree_sitter_weby_external_scanner_destroy(void *payload) { free(payload); }
+void tree_sitter_viper_external_scanner_destroy(void *payload) { free(payload); }
 
-unsigned tree_sitter_weby_external_scanner_serialize(void *payload, char *buffer) {
+unsigned tree_sitter_viper_external_scanner_serialize(void *payload, char *buffer) {
     Scanner *scanner = payload;
     // The first entry is always 0, so it is not stored.
     unsigned count = scanner->depth - 1;
@@ -41,7 +41,7 @@ unsigned tree_sitter_weby_external_scanner_serialize(void *payload, char *buffer
     return bytes;
 }
 
-void tree_sitter_weby_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {
+void tree_sitter_viper_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {
     Scanner *scanner = payload;
     scanner->indents[0] = 0;
     unsigned count = length / sizeof(uint16_t);
@@ -54,7 +54,7 @@ void tree_sitter_weby_external_scanner_deserialize(void *payload, const char *bu
 
 static void skip(TSLexer *lexer) { lexer->advance(lexer, true); }
 
-bool tree_sitter_weby_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
+bool tree_sitter_viper_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
     Scanner *scanner = payload;
     // During error recovery every symbol is valid; inventing layout then only makes it worse.
     bool error_recovery = valid_symbols[NEWLINE] && valid_symbols[INDENT] && valid_symbols[DEDENT];

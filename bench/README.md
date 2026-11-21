@@ -1,6 +1,6 @@
 # Benchmarks
 
-Each benchmark exists as a Weby program (`.wb`), a Go program (`.go`) and a CPython program (`.py`), all printing the same output. `run.py` builds the Weby version with `--release` and the Go version with `go build`, runs all three, checks that the outputs match, and prints a table. Go is found on `PATH` or in `~/.local/go/bin`; without it, the Go column is left out.
+Each benchmark exists as a Viper program (`.vi`), a Go program (`.go`) and a CPython program (`.py`), all printing the same output. `run.py` builds the Viper version with `--release` and the Go version with `go build`, runs all three, checks that the outputs match, and prints a table. Go is found on `PATH` or in `~/.local/go/bin`; without it, the Go column is left out.
 
 ```bash
 cargo build --release --workspace
@@ -25,7 +25,7 @@ The Go versions are written the way a Go programmer would write them. Where that
 
 ## HTTP
 
-`bench/http/` holds the same small service three times: `server.wb`, `server.go` (`net/http`) and `server.py` (the standard library's `ThreadingHTTPServer`, since no Python web framework is installed and installing one is a download). Each answers three endpoints:
+`bench/http/` holds the same small service three times: `server.vi`, `server.go` (`net/http`) and `server.py` (the standard library's `ThreadingHTTPServer`, since no Python web framework is installed and installing one is a download). Each answers three endpoints:
 
 | Endpoint | What it does |
 |---|---|
@@ -39,7 +39,7 @@ The Go versions are written the way a Go programmer would write them. Where that
 python3 bench/http/run.py --seconds 5 --connections 64
 ```
 
-`one_core.py` runs the same endpoints with each server on a single CPU (`WEBY_WORKERS=1`, `GOMAXPROCS=1`) and prints the CPU time each request costs:
+`one_core.py` runs the same endpoints with each server on a single CPU (`VIPER_WORKERS=1`, `GOMAXPROCS=1`) and prints the CPU time each request costs:
 
 ```bash
 python3 bench/http/one_core.py
@@ -59,7 +59,7 @@ Small effects (a few percent) are hidden by the machine's drift of up to 10% bet
 python3 bench/http/counts.py [--browser] [--server EXECUTABLE]
 ```
 
-- **`ab.py`** runs two builds of the same program interleaved, in alternating order, and prints each side's median and range. Build the "before" side against a saved runtime with `WEBY_RUNTIME=saved/liblang_rt.a`.
+- **`ab.py`** runs two builds of the same program interleaved, in alternating order, and prints each side's median and range. Build the "before" side against a saved runtime with `VIPER_RUNTIME=saved/liblang_rt.a`.
 
 ```bash
 python3 bench/ab.py before after --rounds 5
@@ -69,7 +69,7 @@ python3 bench/ab.py before after --rounds 5
 python3 bench/ab.py before_server after_server --server --one-core --endpoints /items,/plaintext
 ```
 
-- **`WEBY_ALLOC_STATS=1`** makes any compiled program print the bytes it allocated, its number of collections and its heap size when it exits.
+- **`VIPER_ALLOC_STATS=1`** makes any compiled program print the bytes it allocated, its number of collections and its heap size when it exits.
 
 `profile/` has a sampling profiler for machines without `perf` (`sampler.c`, `report.py`; usage in `sampler.c`).
 
@@ -89,13 +89,13 @@ python3 bench/http/counts.py --check
 python3 bench/http/counts.py --browser --check
 ```
 
-- **`run.py --check`** runs each program's Weby and Go versions (not CPython) and compares Weby's time *relative to Go's* with `baseline.json`, which cancels most of the machine's drift. It fails on a program more than 15% slower (and at least 5 ms) or using more than 10% more memory.
+- **`run.py --check`** runs each program's Viper and Go versions (not CPython) and compares Viper's time *relative to Go's* with `baseline.json`, which cancels most of the machine's drift. It fails on a program more than 15% slower (and at least 5 ms) or using more than 10% more memory.
 - **`counts.py --check`** compares the calls and allocations per request with `http/counts.json` (and `counts_browser.json`): `recv`, `send`, clock reads, Rust heap allocations, collector calls and bytes allocated. These do not drift, so the tolerance is small: 0.1 per request or 5%. `epoll_wait` and free-list refills depend on timing and are left out.
 - After an intended change, record new baselines with `--record` in place of `--check`, and commit them.
 
 ## Idle WebSockets and task creation
 
-`ws_idle/` holds a WebSocket echo server (`server.wb`) and a Go client (`client.go`) that opens N connections from several loopback addresses, holds them idle, then checks that each still echoes. `run.py` measures the server's resident memory before and after.
+`ws_idle/` holds a WebSocket echo server (`server.vi`) and a Go client (`client.go`) that opens N connections from several loopback addresses, holds them idle, then checks that each still echoes. `run.py` measures the server's resident memory before and after.
 
 ```bash
 python3 bench/ws_idle/run.py --connections 50000
@@ -109,7 +109,7 @@ python3 bench/ws_idle/run.py --connections 50000
 
 After milestones 1 to 4 of the [final optimisation plan](../docs/10-final-optimization-plan.md) (docs/08, D87 to D90). Best of 3 runs. This run was about 7% slower than the A/B runs in the decision records (Go's `json_orders` took 0.710 s here against 0.664 s for phase 5): compare the ratios, not the times.
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |
 |---|---|---|---|---|---|---|
 | binary_trees | 0.646 s | 0.946 s | 24.000 s | 1.46x faster | 37.1x faster | 65 / 40 / 56 MB |
 | dispatch | 0.010 s | 0.033 s | 0.617 s | 3.39x faster | 63.0x faster | 13 / 13 / 13 MB |
@@ -124,7 +124,7 @@ Against phase 5 (the entry below): `json_orders` went from 1.10x to 2.97x Go's s
 
 HTTP at 256 connections, requests per second (median / p99 latency in ms; peak memory), median of 3 runs of 5 s, pinned:
 
-| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+| Endpoint | Viper | Go 1.27.4 | Python 3.13.5 | Viper vs Go |
 |---|---|---|---|---|
 | `/plaintext` | 959,525 (0.21 / 0.85; 27 MB) | 502,591 (0.37 / 1.97; 23 MB) | 27,964 | 1.91x faster |
 | `/json` | 965,126 (0.21 / 0.85; 28 MB) | 488,599 (0.38 / 2.03; 23 MB) | 24,681 | 1.98x faster |
@@ -134,7 +134,7 @@ HTTP at 256 connections, requests per second (median / p99 latency in ms; peak m
 
 One CPU per server, 64 connections, best of 3 runs of 4 s (`http/one_core.py`):
 
-| Endpoint | Weby | Go 1.27.4 | Weby vs Go | CPU per request: Weby / Go |
+| Endpoint | Viper | Go 1.27.4 | Viper vs Go | CPU per request: Viper / Go |
 |---|---|---|---|---|
 | `/plaintext` | 458,331 | 189,260 | 2.42x | 2.2 / 5.3 µs |
 | `/json` | 526,076 | 189,382 | 2.78x | 1.9 / 5.3 µs |
@@ -157,7 +157,7 @@ Per request (`http/counts.py`; the same with a dozen browser headers): 1 `recv` 
 
 Phase 5 of [docs/09](../docs/09-performance-plan.md) measured the collector's costs and decided to stay on Boehm, with the heap-growth divisor's default raised from 1 to 2 (docs/08, D86). Best of 3 runs. The machine was about 10% slower than for phase 4: compare the ratios, not the times.
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |
 |---|---|---|---|---|---|---|
 | binary_trees | 0.736 s | 0.938 s | 21.833 s | 1.27x faster | 29.7x faster | 65 / 40 / 56 MB |
 | dispatch | 0.011 s | 0.032 s | 0.636 s | 3.05x faster | 60.0x faster | 13 / 13 / 13 MB |
@@ -170,7 +170,7 @@ Phase 5 of [docs/09](../docs/09-performance-plan.md) measured the collector's co
 
 HTTP at 256 connections, requests per second (median / p99 latency in ms; peak memory), median of 3 runs of 5 s, pinned:
 
-| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+| Endpoint | Viper | Go 1.27.4 | Python 3.13.5 | Viper vs Go |
 |---|---|---|---|---|
 | `/plaintext` | 1,010,397 (0.21 / 0.79; 27 MB) | 528,241 (0.36 / 1.77; 25 MB) | 27,269 | 1.91x faster |
 | `/json` | 901,450 (0.23 / 0.98; 20 MB) | 495,903 (0.38 / 1.93; 24 MB) | 25,457 | 1.82x faster |
@@ -194,7 +194,7 @@ The measurements behind [docs/web-performance.md](../docs/web-performance.md), o
 
 One CPU per server, 64 connections, best of 3 runs of 4 s (`one_core.py`):
 
-| Endpoint | Weby | Go | Weby vs Go | CPU per request: Weby / Go |
+| Endpoint | Viper | Go | Viper vs Go | CPU per request: Viper / Go |
 |---|---|---|---|---|
 | `/plaintext` | 382,310 | 186,777 | 2.05x | 2.6 / 5.4 µs |
 | `/json` | 377,275 | 179,428 | 2.10x | 2.7 / 5.6 µs |
@@ -208,7 +208,7 @@ Idle WebSockets: 50,000 connections opened in 2.2 s, all still echoing afterward
 
 Phase 4 of [docs/09](../docs/09-performance-plan.md): devirtualised trait calls, `str` keys hashed and compared directly in dicts, cheaper `split` and lower-casing, and string concatenation chains allocated once (docs/08, D85). Best of 3 runs.
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |
 |---|---|---|---|---|---|---|
 | binary_trees | 0.646 s | 0.834 s | 20.149 s | 1.29x faster | 31.2x faster | 90 / 42 / 56 MB |
 | dispatch | 0.009 s | 0.031 s | 0.591 s | 3.38x faster | 64.4x faster | 13 / 13 / 13 MB |
@@ -221,7 +221,7 @@ Phase 4 of [docs/09](../docs/09-performance-plan.md): devirtualised trait calls,
 
 HTTP at 256 connections, requests per second (median / p99 latency in ms; peak memory), median of 3 runs of 5 s, pinned:
 
-| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+| Endpoint | Viper | Go 1.27.4 | Python 3.13.5 | Viper vs Go |
 |---|---|---|---|---|
 | `/plaintext` | 1,131,830 (0.19 / 0.68; 27 MB) | 572,537 (0.33 / 1.58; 23 MB) | 30,074 | 1.98x faster |
 | `/json` | 1,122,128 (0.19 / 0.68; 30 MB) | 549,237 (0.35 / 1.71; 24 MB) | 27,921 | 2.04x faster |
@@ -240,7 +240,7 @@ What changed:
 
 Phase 3 of [docs/09](../docs/09-performance-plan.md): no collector lock on the context switch, cheaper task creation, a router that does not allocate per route tried, and a 4 MiB floor on allocation between collections (docs/08, D84). Best of 3 runs.
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |
 |---|---|---|---|---|---|---|
 | binary_trees | 0.640 s | 0.839 s | 21.627 s | 1.31x faster | 33.8x faster | 90 / 42 / 57 MB |
 | dispatch | 0.052 s | 0.030 s | 0.594 s | 1.73x the time | 11.3x faster | 13 / 13 / 13 MB |
@@ -253,7 +253,7 @@ Phase 3 of [docs/09](../docs/09-performance-plan.md): no collector lock on the c
 
 HTTP at 256 connections, requests per second (median / p99 latency in ms; peak memory), median of 3 runs of 5 s, pinned:
 
-| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+| Endpoint | Viper | Go 1.27.4 | Python 3.13.5 | Viper vs Go |
 |---|---|---|---|---|
 | `/plaintext` | 1,102,187 (0.19 / 0.71; 25 MB) | 563,294 (0.34 / 1.65; 24 MB) | 29,611 | 1.96x faster |
 | `/json` | 1,037,666 (0.20 / 0.76; 19 MB) | 526,296 (0.36 / 1.86; 23 MB) | 27,654 | 1.97x faster |
@@ -266,7 +266,7 @@ At 64 connections `/items` is 306,726 against Go's 269,187 (1.14x).
 What changed:
 
 - **`spawn`** went from 0.130 s to 0.041 s, level with Go. The main thread was spending its time in contended locks and in glibc's allocator. Now a fiber's record lives on its own stack, the global run queue is lock-free, and stacks move between threads in batches.
-- **`/items`** went from 0.93x to 1.05x Go's rate. It was limited by how often the collector ran, over a thousand times a second, which the 4 MiB floor (`WEBY_GC_MIN_ALLOC`) cuts by 70%. Peak memory rose from 19 to 24 MB, as much as Go's.
+- **`/items`** went from 0.93x to 1.05x Go's rate. It was limited by how often the collector ran, over a thousand times a second, which the 4 MiB floor (`VIPER_GC_MIN_ALLOC`) cuts by 70%. Peak memory rose from 19 to 24 MB, as much as Go's.
 - **`/users/42`** (a route with a parameter, behind ten others) went from 578,000 to 929,000 requests a second: the router no longer builds a dictionary for every route it tries.
 - **`/plaintext`**, **`/json`** and **`POST /orders`** gained 18% to 63%, from the router, the response headers and the collector floor together.
 - p99 latency fell on every endpoint.
@@ -276,7 +276,7 @@ What changed:
 
 Phase 2 of [docs/09](../docs/09-performance-plan.md): inline allocation from per-thread free lists, pointer-free structs in memory the collector does not scan, and escape analysis for structs (docs/08, D83). Best of 3 runs.
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |
 |---|---|---|---|---|---|---|
 | binary_trees | 0.648 s | 0.831 s | 21.374 s | 1.28x faster | 33.0x faster | 90 / 40 / 56 MB |
 | dispatch | 0.053 s | 0.031 s | 0.580 s | 1.72x the time | 10.9x faster | 13 / 13 / 13 MB |
@@ -289,7 +289,7 @@ Phase 2 of [docs/09](../docs/09-performance-plan.md): inline allocation from per
 
 HTTP at 256 connections, requests per second (median / p99 latency in ms; peak memory), median of 3 runs of 5 s, server and load generator pinned to separate cores:
 
-| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+| Endpoint | Viper | Go 1.27.4 | Python 3.13.5 | Viper vs Go |
 |---|---|---|---|---|
 | `/plaintext` | 933,516 (0.23 / 0.67; 15 MB) | 566,764 (0.33 / 1.69; 24 MB) | 28,787 | 1.65x faster |
 | `/json` | 882,838 (0.24 / 0.74; 15 MB) | 542,505 (0.35 / 1.74; 24 MB) | 27,508 | 1.63x faster |
@@ -310,7 +310,7 @@ What changed:
 
 Phase 1 of [docs/09](../docs/09-performance-plan.md): allocator and alias information for LLVM, inline `append` and string equality, builders on the stack (docs/08, D82). Best of 3 runs.
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |
 |---|---|---|---|---|---|---|
 | binary_trees | 0.933 s | 0.840 s | 19.410 s | 1.11x the time | 20.8x faster | 73 / 40 / 56 MB |
 | dispatch | 0.049 s | 0.028 s | 0.564 s | 1.72x the time | 11.5x faster | 13 / 13 / 13 MB |
@@ -323,7 +323,7 @@ Phase 1 of [docs/09](../docs/09-performance-plan.md): allocator and alias inform
 
 HTTP at 256 connections, requests per second (median / p99 latency in ms), second of two runs:
 
-| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+| Endpoint | Viper | Go 1.27.4 | Python 3.13.5 | Viper vs Go |
 |---|---|---|---|---|
 | `/plaintext` | 928,678 (0.20 / 1.02) | 618,199 (0.27 / 1.91) | 21,944 | 1.50x faster |
 | `/json` | 846,318 (0.21 / 1.12) | 583,292 (0.29 / 2.04) | 20,646 | 1.45x faster |
@@ -342,7 +342,7 @@ What changed:
 
 A quieter machine than for milestones 10 and 11 (Go's and CPython's times are back to the milestone 7 levels). Best of 3 runs.
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |
 |---|---|---|---|---|---|---|
 | binary_trees | 0.882 s | 0.795 s | 19.900 s | 1.11x the time | 22.6x faster | 72 / 40 / 56 MB |
 | dispatch | 0.047 s | 0.027 s | 0.512 s | 1.76x the time | 10.9x faster | 13 / 13 / 13 MB |
@@ -355,7 +355,7 @@ A quieter machine than for milestones 10 and 11 (Go's and CPython's times are ba
 
 HTTP at 256 connections, requests per second (median / p99 latency in ms):
 
-| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+| Endpoint | Viper | Go 1.27.4 | Python 3.13.5 | Viper vs Go |
 |---|---|---|---|---|
 | `/plaintext` | 815,528 (0.24 / 1.16) | 545,193 (0.30 / 2.21) | 15,765 | 1.50x faster |
 | `/json` | 767,318 (0.26 / 1.18) | 519,676 (0.31 / 2.28) | 16,647 | 1.48x faster |
@@ -366,14 +366,14 @@ What changed (docs/08, D73 to D75):
 - **`word_count`**: `counts[key] = counts.get_or(key, 0) + 1` now compiles to one dict lookup instead of two: 1.25 s to 0.61 s, from 1.47x Go's time to faster than Go.
 - **The collector's growth policy**: the heap may grow to about twice the live data before a collection, like Go's default, instead of Boehm's default of a third. Allocation-heavy programs got 3% to 7% faster and use 10% to 25% more memory (`binary_trees`, 57 MB to 72 MB); the HTTP server gained much more, because it collected very often with a small live heap.
 - **Responses** are serialised once, straight from the handler's strings.
-- Together these took `/items` from 114,000 to 219,000 requests per second (0.42x to 0.72x Go) and the small-response endpoints from 1.2x to 1.5x Go's rate. Go's median latency on `/items` is still a third of Weby's: the remaining cost is allocation, which is what escape analysis is for.
-- **`spawn`** is unchanged for Weby (0.146 s here, on the quieter machine); Go's time dropped further, so the ratio moved from 2.7x to 3.3x.
+- Together these took `/items` from 114,000 to 219,000 requests per second (0.42x to 0.72x Go) and the small-response endpoints from 1.2x to 1.5x Go's rate. Go's median latency on `/items` is still a third of Viper's: the remaining cost is allocation, which is what escape analysis is for.
+- **`spawn`** is unchanged for Viper (0.146 s here, on the quieter machine); Go's time dropped further, so the ratio moved from 2.7x to 3.3x.
 
 ### 2026-11-18, end of milestone 11: frame pointers and debug information
 
 Generated code now keeps frame pointers and carries DWARF line tables (docs/08, D67). Best of 3 runs, the machine as busy as for milestone 10:
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython |
 |---|---|---|---|---|---|
 | binary_trees | 1.150 s | 0.936 s | 23.303 s | 1.23x the time | 20.3x faster |
 | dispatch | 0.054 s | 0.035 s | 0.600 s | 1.55x the time | 11.1x faster |
@@ -384,7 +384,7 @@ Generated code now keeps frame pointers and carries DWARF line tables (docs/08, 
 | spawn | 0.172 s | 0.056 s | 1.393 s | 3.09x the time | 8.1x faster |
 | word_count | 1.244 s | 0.845 s | 2.402 s | 1.47x the time | 1.9x faster |
 
-Only `fib`, which is nothing but calls, moved: 0.020 s to 0.022 s, the cost of the frame pointer in each call. `spawn` is unchanged for Weby; Go's time varied between runs (0.056 to 0.065 s).
+Only `fib`, which is nothing but calls, moved: 0.020 s to 0.022 s, the cost of the frame pointer in each call. `spawn` is unchanged for Viper; Go's time varied between runs (0.056 to 0.065 s).
 
 ### 2026-11-18, end of milestone 10: fibers
 
@@ -392,7 +392,7 @@ Tasks and connections now run on fibers: one worker thread per core (12 here), a
 
 The machine was busier during these runs than during the earlier ones (Go and CPython are also 10 to 20% slower than in the milestone 7 table), so compare the ratios, not the times. Best of 3 runs.
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |
 |---|---|---|---|---|---|---|
 | binary_trees | 1.181 s | 0.917 s | 23.292 s | 1.29x the time | 19.7x faster | 57 / 40 / 56 MB |
 | dispatch | 0.053 s | 0.032 s | 0.598 s | 1.66x the time | 11.4x faster | 13 / 13 / 13 MB |
@@ -407,7 +407,7 @@ Generated code now has unwind tables instead of being marked `nounwind`, so that
 
 HTTP, requests per second, with median and 99th-percentile latency in milliseconds:
 
-| Connections | Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go |
+| Connections | Endpoint | Viper | Go 1.27.4 | Python 3.13.5 | Viper vs Go |
 |---|---|---|---|---|---|
 | 64 | `/plaintext` | 687,328 (0.06 / 0.43) | 548,816 (0.07 / 0.68) | 20,717 | 1.25x faster |
 | 64 | `/json` | 644,187 (0.06 / 0.46) | 513,588 (0.08 / 0.70) | 17,681 | 1.25x faster |
@@ -420,15 +420,15 @@ Idle WebSockets: 50,000 connections opened in 3.1 s, all still echoing afterward
 
 Notes:
 
-- **Small responses** stay ahead of Go, and Weby's 99th-percentile latency is lower than Go's on every endpoint at both connection counts.
-- **`/items`** (20 records and 1.1 KB of JSON per request, about a hundred allocations) is where the collector shows, as at Gate 2. It improved slightly at 64 connections (0.51x to 0.56x), since 12 workers contend for Boehm's allocator less than 64 threads did, but at 256 connections Weby's median latency is five times Go's. This is Gate 3's open item; see docs/06.
+- **Small responses** stay ahead of Go, and Viper's 99th-percentile latency is lower than Go's on every endpoint at both connection counts.
+- **`/items`** (20 records and 1.1 KB of JSON per request, about a hundred allocations) is where the collector shows, as at Gate 2. It improved slightly at 64 connections (0.51x to 0.56x), since 12 workers contend for Boehm's allocator less than 64 threads did, but at 256 connections Viper's median latency is five times Go's. This is Gate 3's open item; see docs/06.
 - **`spawn`** costs about 0.9 µs per task against Go's 0.3 µs: a stack from the pool, the fiber record, registering it with the collector under its lock, and a queue. Keeping up to 16,384 stacks for reuse (instead of 1,024) took it from 0.22 s to 0.175 s, since most stacks then skip `mmap` and fresh page faults.
 
 ### 2026-11-18, end of milestone 8: HTTP
 
-64 connections, 5 seconds per run, requests per second. Weby's server is stage 1: one OS thread per connection.
+64 connections, 5 seconds per run, requests per second. Viper's server is stage 1: one OS thread per connection.
 
-| Endpoint | Weby | Go 1.27.4 | Python 3.13.5 | Weby vs Go | Weby vs Python |
+| Endpoint | Viper | Go 1.27.4 | Python 3.13.5 | Viper vs Go | Viper vs Python |
 |---|---|---|---|---|---|
 | `/plaintext` | 733,972 | 565,280 | 24,476 | 1.30x faster | 30.0x faster |
 | `/json` | 716,590 | 530,883 | 21,966 | 1.35x faster | 32.6x faster |
@@ -436,15 +436,15 @@ Notes:
 
 Notes:
 
-- **Small responses are faster than Go.** With 64 connections on 12 hardware threads, a thread per connection costs little, and the request path allocates almost nothing: the request is parsed on the connection thread's stack, and only the method, path and body become Weby strings.
-- **`/items` is where the collector shows.** It allocates 20 records, their names and tag lists, and a 1.1 KB string per request: about a hundred allocations. Running it with a large initial heap (`WEBY_GC_INITIAL_HEAP=1000000000`) or `GC_FREE_SPACE_DIVISOR=1` raises it to about 195,000 requests per second (+50%), so about a third of the time is collection. Most of the rest is contention on Boehm's allocator across 64 threads.
-- **Gate 2** (docs/06, "Gates"): on the JSON endpoints Weby is ahead of Go for small responses and at half Go's speed for large ones. Collection is about a third of the `/items` time; the larger part is 64 threads contending for the allocator, which is the thread model. The gate's answer is therefore to proceed to stage 2 (fibers on one worker per core) and measure again at Gate 3; see docs/06.
+- **Small responses are faster than Go.** With 64 connections on 12 hardware threads, a thread per connection costs little, and the request path allocates almost nothing: the request is parsed on the connection thread's stack, and only the method, path and body become Viper strings.
+- **`/items` is where the collector shows.** It allocates 20 records, their names and tag lists, and a 1.1 KB string per request: about a hundred allocations. Running it with a large initial heap (`VIPER_GC_INITIAL_HEAP=1000000000`) or `GC_FREE_SPACE_DIVISOR=1` raises it to about 195,000 requests per second (+50%), so about a third of the time is collection. Most of the rest is contention on Boehm's allocator across 64 threads.
+- **Gate 2** (docs/06, "Gates"): on the JSON endpoints Viper is ahead of Go for small responses and at half Go's speed for large ones. Collection is about a third of the `/items` time; the larger part is 64 threads contending for the allocator, which is the thread model. The gate's answer is therefore to proceed to stage 2 (fibers on one worker per core) and measure again at Gate 3; see docs/06.
 
 ### 2026-11-18, end of milestone 7
 
 Same machine and versions. Best of 3 runs.
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |
 |---|---|---|---|---|---|---|
 | binary_trees | 0.968 s | 0.789 s | 20.137 s | 1.23x the time | 20.8x faster | 57 / 38 / 56 MB |
 | dispatch | 0.045 s | 0.026 s | 0.503 s | 1.68x the time | 11.3x faster | 13 / 13 / 13 MB |
@@ -456,14 +456,14 @@ Same machine and versions. Best of 3 runs.
 
 Notes:
 
-- **Typed JSON** meets the docs/07 target of "within 1.5x of Go's `encoding/json`": it is slightly faster. The encoder and decoder are generated per type, so there is no reflection and no intermediate tree; Go's default encoder uses reflection. Weby writes compact JSON, as Go does.
+- **Typed JSON** meets the docs/07 target of "within 1.5x of Go's `encoding/json`": it is slightly faster. The encoder and decoder are generated per type, so there is no reflection and no intermediate tree; Go's default encoder uses reflection. Viper writes compact JSON, as Go does.
 - **A regression found and fixed.** Midway through milestone 7, `word_count` measured 1.51 s instead of 1.06 s. The cause was milestone 6's call to `GC_allow_register_threads` at startup, which puts Boehm into its multi-threaded mode and makes every allocation slower, even in programs that never start a task. It is now called on the first `spawn` instead (D46), and single-threaded programs are back to their earlier speed. A program that spawns pays the cost from then on.
 
 ### 2026-11-18, end of milestone 4
 
 Same machine and versions as below. Best of 3 runs.
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |
 |---|---|---|---|---|---|---|
 | binary_trees | 0.963 s | 0.799 s | 20.125 s | 1.20x the time | 20.9x faster | 65 / 42 / 56 MB |
 | dispatch | 0.046 s | 0.027 s | 0.539 s | 1.70x the time | 11.8x faster | 13 / 13 / 13 MB |
@@ -474,15 +474,15 @@ Same machine and versions as below. Best of 3 runs.
 
 Notes on `sort`:
 
-- Weby computes each key once (as Python does) and then sorts with a comparison of the keys, so the closure runs a million times rather than once per comparison. Go's `sort.SliceStable` calls its comparator closure about 20 million times and swaps elements through reflection, which is where it loses.
+- Viper computes each key once (as Python does) and then sorts with a comparison of the keys, so the closure runs a million times rather than once per comparison. Go's `sort.SliceStable` calls its comparator closure about 20 million times and swaps elements through reflection, which is where it loses.
 - CPython's sort is written in C, so its margin here is small: most of its time is building the records and calling the key lambda.
-- Weby's memory is higher than Go's because the keys of the tuple sort are kept in a separate list of `(str, int)` tuples, 24 bytes each.
+- Viper's memory is higher than Go's because the keys of the tuple sort are kept in a separate list of `(str, int)` tuples, 24 bytes each.
 
 ### 2026-11-18, end of milestone 3
 
 AMD Ryzen AI 5 340 (12 threads), Debian 13, LLVM 19.1.7, Boehm GC 8.2.8, Go 1.27.4, CPython 3.13.5. Best of 5 runs, wall-clock time; memory is peak resident set size.
 
-| Benchmark | Weby | Go 1.27.4 | CPython 3.13.5 | Weby vs Go | Weby vs CPython | Memory: Weby / Go / CPython |
+| Benchmark | Viper | Go 1.27.4 | CPython 3.13.5 | Viper vs Go | Viper vs CPython | Memory: Viper / Go / CPython |
 |---|---|---|---|---|---|---|
 | binary_trees | 0.957 s | 0.781 s | 20.309 s | 1.22x the time | 21.2x faster | 65 / 39 / 56 MB |
 | dispatch | 0.046 s | 0.026 s | 0.505 s | 1.74x the time | 11.1x faster | 13 / 13 / 13 MB |

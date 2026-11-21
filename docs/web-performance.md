@@ -1,6 +1,6 @@
 # Web performance: what to expect
 
-A rough guide to what a Weby web service can do, measured against the same service written in Go (`net/http`) and in Python (the standard library's HTTP server). The figures are from one laptop and a loopback network. Treat them as orders of magnitude and ratios, not as promises for production hardware. Measured on 2026-11-19, after the [performance plan](09-performance-plan.md) and the [final optimisation plan](10-final-optimization-plan.md).
+A rough guide to what a Viper web service can do, measured against the same service written in Go (`net/http`) and in Python (the standard library's HTTP server). The figures are from one laptop and a loopback network. Treat them as orders of magnitude and ratios, not as promises for production hardware. Measured on 2026-11-19, after the [performance plan](09-performance-plan.md) and the [final optimisation plan](10-final-optimization-plan.md).
 
 ## In short
 
@@ -13,7 +13,7 @@ A rough guide to what a Weby web service can do, measured against the same servi
 | Memory | 3.5 MB idle; 20 to 28 MB under full load; about 19 KiB per open, idle WebSocket |
 | Start-up | 3 ms to the first response; one 1.3 MB executable that needs only `libgc` |
 
-**What this means for a real service:** the framework is unlikely to be the bottleneck. At 2 to 4 µs of server CPU per request, a typical handler that waits 1 to 5 ms on a database spends well under 1% of its time in Weby's HTTP layer. Throughput is then decided by the database, the network and the handler's own work. Where the handler's work is CPU-bound (building and encoding JSON, string processing), Weby runs it 1.1 to 3.4 times as fast as Go (see "The language itself" below).
+**What this means for a real service:** the framework is unlikely to be the bottleneck. At 2 to 4 µs of server CPU per request, a typical handler that waits 1 to 5 ms on a database spends well under 1% of its time in Viper's HTTP layer. Throughput is then decided by the database, the network and the handler's own work. Where the handler's work is CPU-bound (building and encoding JSON, string processing), Viper runs it 1.1 to 3.4 times as fast as Go (see "The language itself" below).
 
 ## The setup
 
@@ -41,7 +41,7 @@ Requests per second, with median and 99th-percentile latency in milliseconds and
 
 **64 connections**
 
-| Endpoint | Weby | Go | Python | Weby vs Go |
+| Endpoint | Viper | Go | Python | Viper vs Go |
 |---|---|---|---|---|
 | `/plaintext` | 981,099 (0.05 / 0.21; 14 MB) | 532,030 (0.09 / 0.57; 19 MB) | 27,361 (1.29 / 6.43) | 1.84x |
 | `/json` | 943,077 (0.05 / 0.23; 12 MB) | 515,447 (0.09 / 0.59; 18 MB) | 26,443 (1.55 / 7.05) | 1.83x |
@@ -51,7 +51,7 @@ Requests per second, with median and 99th-percentile latency in milliseconds and
 
 **256 connections**
 
-| Endpoint | Weby | Go | Python | Weby vs Go |
+| Endpoint | Viper | Go | Python | Viper vs Go |
 |---|---|---|---|---|
 | `/plaintext` | 959,525 (0.21 / 0.85; 27 MB) | 502,591 (0.37 / 1.97; 23 MB) | 27,964 (3.80 / 17.29) | 1.91x |
 | `/json` | 965,126 (0.21 / 0.85; 28 MB) | 488,599 (0.38 / 2.03; 23 MB) | 24,681 (4.10 / 19.13) | 1.98x |
@@ -64,17 +64,17 @@ The Python server dropped a few hundred connections at 256 on every endpoint; it
 On the small endpoints, six CPUs are not the server's limit: it keeps about five of them busy, and the load generator and the kernel's loopback work on the other six set the rate. The per-core figures below are the better measure of the server.
 
 **What to read from this:**
-- **Small requests.** On requests where the server does little, Weby serves about twice Go's rate here, and 2.4 to 2.8 times per core, with lower latency at both percentiles. The difference is the cost of the HTTP layer itself: one read and one write per request, parsing in place, and switching between connections.
-- **`/items`.** Here the handler's own work dominates: formatting 20 records and encoding 1.1 KB of JSON. Weby is 2.2 to 2.8 times Go's rate, with half its median latency and a quarter of its 99th percentile.
+- **Small requests.** On requests where the server does little, Viper serves about twice Go's rate here, and 2.4 to 2.8 times per core, with lower latency at both percentiles. The difference is the cost of the HTTP layer itself: one read and one write per request, parsing in place, and switching between connections.
+- **`/items`.** Here the handler's own work dominates: formatting 20 records and encoding 1.1 KB of JSON. Viper is 2.2 to 2.8 times Go's rate, with half its median latency and a quarter of its 99th percentile.
 - **`POST /orders`**, which decodes JSON into structs, is 3 times Go's rate.
-- **Tails.** Weby's 99th-percentile latency is the lowest of the three on every row.
+- **Tails.** Viper's 99th-percentile latency is the lowest of the three on every row.
 - **Python** is 15 to 40 times slower than either.
 
 ## Per core
 
-Each server on a single logical CPU (`WEBY_WORKERS=1`, `GOMAXPROCS=1`), 64 connections, best of 3 runs (`bench/http/one_core.py`). The CPU time per request is one second divided by the rate.
+Each server on a single logical CPU (`VIPER_WORKERS=1`, `GOMAXPROCS=1`), 64 connections, best of 3 runs (`bench/http/one_core.py`). The CPU time per request is one second divided by the rate.
 
-| Endpoint | Weby | Go | Weby vs Go | CPU per request: Weby / Go |
+| Endpoint | Viper | Go | Viper vs Go | CPU per request: Viper / Go |
 |---|---|---|---|---|
 | `/plaintext` | 458,331 | 189,260 | 2.42x | 2.2 / 5.3 µs |
 | `/json` | 526,076 | 189,382 | 2.78x | 1.9 / 5.3 µs |
@@ -92,14 +92,14 @@ Six logical CPUs gave about three times the one-CPU rate, not six. Those six are
 
 ## Memory
 
-| | Weby | Go | Python |
+| | Viper | Go | Python |
 |---|---|---|---|
 | Idle server | 3.5 MB | 11.0 MB | 17.9 MB |
 | Peak under load (256 connections) | 20 to 28 MB | 23 to 25 MB | 23 to 30 MB |
 | Executable | 1.3 MB, needs only `libgc` at run time | 9.8 MB, static | the interpreter |
 | Start-up to first response | 3 ms | 4 ms | 33 ms |
 
-- **Under load.** Weby's peak is set mostly by the collector: it allocates at least 4 MiB between collections (`WEBY_GC_MIN_ALLOC`, the same minimum as Go's heap), so a busy server sits a few MB above its live data. Setting the variable lower trades memory for collection time.
+- **Under load.** Viper's peak is set mostly by the collector: it allocates at least 4 MiB between collections (`VIPER_GC_MIN_ALLOC`, the same minimum as Go's heap), so a busy server sits a few MB above its live data. Setting the variable lower trades memory for collection time.
 - **Idle WebSockets.** `bench/ws_idle/` opened 50,000 WebSocket connections in 2.6 s and held them idle, and all 50,000 still echoed afterwards. The server grew from 3.6 MB to 927 MB: **18.9 KiB per connection**, almost all of it the touched pages of each connection's task stack.
   - **Rough capacity:** 1 GB of memory holds about 53,000 idle connections.
   - **Compared with earlier:** 11.3 KiB at milestone 10, 15.5 KiB after the performance plan. Building the runtime with link-time optimisation (D87), which made everything 2% to 6% faster, put one more stack page under each parked connection: the same source built without it uses 14.8 KiB (D88).
@@ -108,7 +108,7 @@ Six logical CPUs gave about three times the one-CPU rate, not six. Those six are
 
 Handlers do more than the HTTP layer. These are the standard benchmarks in `bench/` (best of 3 runs, [bench/README.md](../bench/README.md)), with the ones most relevant to web services first:
 
-| Benchmark | What it exercises | Weby | Go | Python | Weby vs Go |
+| Benchmark | What it exercises | Viper | Go | Python | Viper vs Go |
 |---|---|---|---|---|---|
 | `json_orders` | Typed JSON encode and decode of 20,000 orders, ten times | 0.239 s | 0.710 s | 3.714 s | 2.97x faster |
 | `word_count` | Splitting, lower-casing, string-keyed dicts | 0.387 s | 0.829 s | 2.437 s | 2.14x faster |
@@ -119,16 +119,16 @@ Handlers do more than the HTTP layer. These are the standard benchmarks in `benc
 | `fib` | Function calls | 0.022 s | 0.037 s | 0.686 s | 1.72x faster |
 | `sieve` | List indexing and appends | 0.055 s | 0.060 s | 2.502 s | 1.09x faster |
 
-Weby is ahead of Go on all eight, and 3.7 to 63 times faster than CPython. The weak spot is memory in allocation-heavy programs: `binary_trees` peaks at 65 MB against Go's 40 MB, and `sort` at 149 MB against 75 MB. The cause is object layout, not collection: each object carries an 8-byte header and is rounded to 16-byte granules, and a list of structs holds pointers to them where Go stores the values inline.
+Viper is ahead of Go on all eight, and 3.7 to 63 times faster than CPython. The weak spot is memory in allocation-heavy programs: `binary_trees` peaks at 65 MB against Go's 40 MB, and `sort` at 149 MB against 75 MB. The cause is object layout, not collection: each object carries an 8-byte header and is rounded to 16-byte granules, and a list of structs holds pointers to them where Go stores the values inline.
 
 ## What these numbers do not cover
 
 - **One machine, loopback, client and server together.** A real network adds latency and its own CPU costs, and production servers have more cores and different caches.
-- **No TLS.** The servers support HTTPS (`rustls` for Weby), but these runs are plain HTTP. TLS adds a per-connection handshake and per-byte encryption on both sides alike.
+- **No TLS.** The servers support HTTPS (`rustls` for Viper), but these runs are plain HTTP. TLS adds a per-connection handshake and per-byte encryption on both sides alike.
 - **No database.** The PostgreSQL driver is not part of these benchmarks. With a database, its latency usually decides a request's time.
-- **Python's baseline.** Python is the standard library's threaded server, the weakest option there is; an ASGI framework under uvicorn would do several times better, though still far from Go or Weby.
+- **Python's baseline.** Python is the standard library's threaded server, the weakest option there is; an ASGI framework under uvicorn would do several times better, though still far from Go or Viper.
 - **Closed-loop load.** Each connection waits for its response before sending the next request, which understates tail latency under overload compared with an open-loop generator at a fixed arrival rate.
-- **HTTP/1.1 only**, with keep-alive. Weby does not speak HTTP/2.
+- **HTTP/1.1 only**, with keep-alive. Viper does not speak HTTP/2.
 
 ## Reproducing
 

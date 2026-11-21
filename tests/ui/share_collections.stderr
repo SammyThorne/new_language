@@ -1,5 +1,5 @@
 error[E0338]: a value of type `list[int]` cannot be passed to another task
-  --> tests/ui/share_collections.wb:17:21
+  --> tests/ui/share_collections.vi:17:21
    |
 17 |     t = spawn total(items)
    |                     ^^^^^ a `list[int]` can be changed
@@ -7,7 +7,7 @@ error[E0338]: a value of type `list[int]` cannot be passed to another task
    = help: share an immutable `tuple[int, ...]` made with `tuple(items)`, or wrap the list in `Mutex(...)`
 
 error[E0338]: a value of type `dict[str, int]` cannot be passed to another task
-  --> tests/ui/share_collections.wb:19:18
+  --> tests/ui/share_collections.vi:19:18
    |
 19 |     spawn lookup({"a": 1}, "a")
    |                  ^^^^^^^^ a `dict[str, int]` can be changed
@@ -15,7 +15,7 @@ error[E0338]: a value of type `dict[str, int]` cannot be passed to another task
    = help: share an immutable `frozendict[str, int]` made with `frozendict(d)`, or wrap the dict in `Mutex(...)`
 
 error[E0338]: a value of type `Job` cannot be passed to another task
-  --> tests/ui/share_collections.wb:20:15
+  --> tests/ui/share_collections.vi:20:15
    |
 20 |     spawn run(Job(1, ["x"]))
    |               ^^^^^^^^^^^^^ its field `tags` is a `list[str]`: a `list[str]` can be changed
@@ -23,7 +23,7 @@ error[E0338]: a value of type `Job` cannot be passed to another task
    = help: share an immutable `tuple[str, ...]` made with `tuple(items)`, or wrap the list in `Mutex(...)`
 
 error[E0338]: a value of type `Job` cannot be sent on a `Channel`
-  --> tests/ui/share_collections.wb:21:12
+  --> tests/ui/share_collections.vi:21:12
    |
 21 |     jobs = Channel[Job](10)
    |            ^^^^^^^^^^^^^^^^ its field `tags` is a `list[str]`: a `list[str]` can be changed
@@ -31,11 +31,11 @@ error[E0338]: a value of type `Job` cannot be sent on a `Channel`
    = help: share an immutable `tuple[str, ...]` made with `tuple(items)`, or wrap the list in `Mutex(...)`
 
 error[E0338]: a value of type `list[int]` cannot be sent on a `Channel`
-  --> tests/ui/share_collections.wb:22:13
+  --> tests/ui/share_collections.vi:22:13
    |
 22 |     lists = Channel[list[int]](1)
    |             ^^^^^^^^^^^^^^^^^^^^^ a `list[int]` can be changed
    |
    = help: share an immutable `tuple[int, ...]` made with `tuple(items)`, or wrap the list in `Mutex(...)`
 
-error: could not compile `tests/ui/share_collections.wb` due to 5 errors
+error: could not compile `tests/ui/share_collections.vi` due to 5 errors

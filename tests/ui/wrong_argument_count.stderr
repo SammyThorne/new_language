@@ -1,5 +1,5 @@
 error[E0301]: `add` takes 2 arguments but 1 was given
- --> tests/ui/wrong_argument_count.wb:5:11
+ --> tests/ui/wrong_argument_count.vi:5:11
   |
 1 | def add(a: int, b: int) -> int:
   |     --- `add` is defined here
@@ -7,4 +7,4 @@ error[E0301]: `add` takes 2 arguments but 1 was given
 5 |     print(add(1))
   |           ^^^^^^ expected 2 arguments
 
-error: could not compile `tests/ui/wrong_argument_count.wb` due to 1 error
+error: could not compile `tests/ui/wrong_argument_count.vi` due to 1 error

@@ -1,7 +1,7 @@
 error[E0102]: the type `frozenset` is not supported yet
- --> tests/ui/not_supported_yet.wb:2:12
+ --> tests/ui/not_supported_yet.vi:2:12
   |
 2 |     items: frozenset[int] = set()
   |            ^^^^^^^^^^^^^^ not supported yet
 
-error: could not compile `tests/ui/not_supported_yet.wb` due to 1 error
+error: could not compile `tests/ui/not_supported_yet.vi` due to 1 error

@@ -2,7 +2,7 @@
 
 Usage: python3 bench/ws_idle/run.py [--connections N]   (default 50000)
 
-Builds `server.wb` (release) and `client.go`, starts the server, records its resident memory,
+Builds `server.vi` (release) and `client.go`, starts the server, records its resident memory,
 opens the connections, waits for the server to settle, records its memory again, then checks
 that every connection still answers. Prints memory per connection.
 """
@@ -16,7 +16,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-COMPILER = ROOT / "target" / "release" / "weby"
+COMPILER = ROOT / "target" / "release" / "viper"
 
 
 def rss_kib(pid: int) -> int:
@@ -31,7 +31,7 @@ def main() -> None:
     go = shutil.which("go") or str(Path.home() / ".local" / "go" / "bin" / "go")
     with tempfile.TemporaryDirectory() as out:
         out = Path(out)
-        subprocess.run([COMPILER, "build", "--release", HERE / "server.wb", "-o", out / "server"], check=True)
+        subprocess.run([COMPILER, "build", "--release", HERE / "server.vi", "-o", out / "server"], check=True)
         subprocess.run([go, "build", "-o", out / "client", HERE / "client.go"], check=True, env={"GOTOOLCHAIN": "local", **__import__("os").environ})
         server = subprocess.Popen([out / "server"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
         port = int(server.stderr.readline().split()[-1])

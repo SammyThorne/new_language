@@ -1,5 +1,5 @@
 error[E0330]: a value of type `list[int]` cannot be passed to a C function
- --> tests/ui/extern_and_with.wb:2:14
+ --> tests/ui/extern_and_with.vi:2:14
   |
 2 | def c_abs(x: list[int]) -> dict[str, int]
   |              ^^^^^^^^^ not a C type
@@ -7,7 +7,7 @@ error[E0330]: a value of type `list[int]` cannot be passed to a C function
   = help: `@extern` functions take numbers, `bool` and `str`
 
 error[E0330]: a C function cannot return a value of type `dict[str, int]`
- --> tests/ui/extern_and_with.wb:2:28
+ --> tests/ui/extern_and_with.vi:2:28
   |
 2 | def c_abs(x: list[int]) -> dict[str, int]
   |                            ^^^^^^^^^^^^^^ not a C type
@@ -15,13 +15,13 @@ error[E0330]: a C function cannot return a value of type `dict[str, int]`
   = help: `@extern` functions return numbers, `bool`, `str`, `str?` or nothing
 
 error[E0330]: `@extern` takes the C function's name as a string
- --> tests/ui/extern_and_with.wb:4:1
+ --> tests/ui/extern_and_with.vi:4:1
   |
 4 | @extern(labs)
   | ^^^^^^^^^^^^^ for example `@extern("labs")`
 
 error[E0330]: unknown annotation `@cache` on a function
- --> tests/ui/extern_and_with.wb:7:2
+ --> tests/ui/extern_and_with.vi:7:2
   |
 7 | @cache
   |  ^^^^^ not a known annotation
@@ -29,7 +29,7 @@ error[E0330]: unknown annotation `@cache` on a function
   = help: functions can have `@test`, `@extern("c_name")`, the `@http` route annotations and `@auth.required`
 
 error[E0337]: a value of type `int` cannot be used with `with`
-  --> tests/ui/extern_and_with.wb:15:10
+  --> tests/ui/extern_and_with.vi:15:10
    |
 15 |     with 5 as five:
    |          ^ has type `int`
@@ -37,7 +37,7 @@ error[E0337]: a value of type `int` cannot be used with `with`
    = help: a value works with `with` when its type has a method `def exit(self)`, which runs when the block ends
 
 error[E0337]: a value of type `Plain` cannot be used with `with`
-  --> tests/ui/extern_and_with.wb:17:10
+  --> tests/ui/extern_and_with.vi:17:10
    |
 17 |     with Plain(1):
    |          ^^^^^^^^ has type `Plain`
@@ -45,17 +45,17 @@ error[E0337]: a value of type `Plain` cannot be used with `with`
    = help: a value works with `with` when its type has a method `def exit(self)`, which runs when the block ends
 
 error[E0006]: integer literal is too large for `u8`
-  --> tests/ui/extern_and_with.wb:19:16
+  --> tests/ui/extern_and_with.vi:19:16
    |
 19 |     tiny: u8 = 300
    |                ^^^ the largest `u8` is 255
 
 error[E0321]: `//` is not available on `i32`
-  --> tests/ui/extern_and_with.wb:20:17
+  --> tests/ui/extern_and_with.vi:20:17
    |
 20 |     print(tiny, i32(1) // i32(2))
    |                 ^^^^^^^^^^^^^^^^ both sides are `i32`
    |
    = help: convert first: `int(a) // int(b)`
 
-error: could not compile `tests/ui/extern_and_with.wb` due to 8 errors
+error: could not compile `tests/ui/extern_and_with.vi` due to 8 errors

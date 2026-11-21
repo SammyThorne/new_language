@@ -1,4 +1,4 @@
-//! The milestone 9 exit test: `tests/http/chat.wb` (the chat hub from docs/05, plus an echo
+//! The milestone 9 exit test: `tests/http/chat.vi` (the chat hub from docs/05, plus an echo
 //! endpoint) driven by a hand-written WebSocket client.
 //!
 //! The roadmap's bar is the Autobahn test suite. Fetching it is a download, so this test covers

@@ -1,5 +1,5 @@
 error[E0326]: this `match` does not cover every case
- --> tests/ui/match_expression_errors.wb:9:12
+ --> tests/ui/match_expression_errors.vi:9:12
   |
 9 |     return match c:
   |            ^^^^^^^^ not covered: Blue
@@ -7,11 +7,11 @@ error[E0326]: this `match` does not cover every case
   = help: add the missing cases, or `case _:` to cover everything else
 
 error[E0300]: the cases have different types, `str` and `int`
-  --> tests/ui/match_expression_errors.wb:16:17
+  --> tests/ui/match_expression_errors.vi:16:17
    |
 15 |         case 1: "one"
    |                 ----- this is `str`
 16 |         case 2: 2
    |                 ^ this is `int`
 
-error: could not compile `tests/ui/match_expression_errors.wb` due to 2 errors
+error: could not compile `tests/ui/match_expression_errors.vi` due to 2 errors

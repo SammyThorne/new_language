@@ -1,5 +1,5 @@
 error[E0313]: `list[int]` cannot be used as a dict key
-  --> tests/ui/set_errors.wb:11:16
+  --> tests/ui/set_errors.vi:11:16
    |
 11 |     _nested = {[1], [2]}
    |                ^^^ not hashable
@@ -7,7 +7,7 @@ error[E0313]: `list[int]` cannot be used as a dict key
    = help: dict keys can be `int`, `str`, `bool`, tuples of those, or types that implement `Hash`
 
 error[E0313]: `list[int]` cannot be used as a dict key
-  --> tests/ui/set_errors.wb:12:22
+  --> tests/ui/set_errors.vi:12:22
    |
 12 |     _unhashable: set[list[int]] = set()
    |                      ^^^^^^^^^ not hashable
@@ -15,7 +15,7 @@ error[E0313]: `list[int]` cannot be used as a dict key
    = help: dict keys can be `int`, `str`, `bool`, tuples of those, or types that implement `Hash`
 
 error[E0313]: `Loose` cannot be used as a dict key
-  --> tests/ui/set_errors.wb:13:20
+  --> tests/ui/set_errors.vi:13:20
    |
 13 |     _from_loose = {Loose(1)}
    |                    ^^^^^^^^ not hashable
@@ -23,7 +23,7 @@ error[E0313]: `Loose` cannot be used as a dict key
    = help: add `@derive(Eq, Hash)` to `Loose` to use it as a key
 
 error[E0300]: `{...}` with `key: value` pairs, and `{}`, are dicts, not sets
-  --> tests/ui/set_errors.wb:14:24
+  --> tests/ui/set_errors.vi:14:24
    |
 14 |     _empty: set[int] = {}
    |                        ^^ a dict
@@ -31,7 +31,7 @@ error[E0300]: `{...}` with `key: value` pairs, and `{}`, are dicts, not sets
    = help: an empty set is `set()`, and a set with elements is `{a, b}`
 
 error[E0300]: `{...}` with `key: value` pairs, and `{}`, are dicts, not sets
-  --> tests/ui/set_errors.wb:15:24
+  --> tests/ui/set_errors.vi:15:24
    |
 15 |     _pairs: set[int] = {1: 2}
    |                        ^^^^^^ a dict
@@ -39,7 +39,7 @@ error[E0300]: `{...}` with `key: value` pairs, and `{}`, are dicts, not sets
    = help: an empty set is `set()`, and a set with elements is `{a, b}`
 
 error[E0320]: a set cannot be indexed
-  --> tests/ui/set_errors.wb:17:11
+  --> tests/ui/set_errors.vi:17:11
    |
 17 |     print(items[0])
    |           ^^^^^^^^ a set has no positions
@@ -47,7 +47,7 @@ error[E0320]: a set cannot be indexed
    = help: test membership with `x in items`, or loop over the set
 
 error[E0320]: cannot assign to an element of a set
-  --> tests/ui/set_errors.wb:18:5
+  --> tests/ui/set_errors.vi:18:5
    |
 18 |     items[0] = 5
    |     ^^^^^^^^ a set has no positions
@@ -55,7 +55,7 @@ error[E0320]: cannot assign to an element of a set
    = help: add an element with `items.add(x)`
 
 error[E0320]: `del` cannot remove an element of a set
-  --> tests/ui/set_errors.wb:19:9
+  --> tests/ui/set_errors.vi:19:9
    |
 19 |     del items[1]
    |         ^^^^^^^^ a set has no positions
@@ -63,7 +63,7 @@ error[E0320]: `del` cannot remove an element of a set
    = help: use `items.remove(x)`, which panics if it is absent, or `items.discard(x)`
 
 error[E0313]: `set[int]` cannot be used as a dict key
-  --> tests/ui/set_errors.wb:20:16
+  --> tests/ui/set_errors.vi:20:16
    |
 20 |     _by_set = {items: 1}
    |                ^^^^^ not hashable
@@ -71,7 +71,7 @@ error[E0313]: `set[int]` cannot be used as a dict key
    = help: dict keys can be `int`, `str`, `bool`, tuples of those, or types that implement `Hash`
 
 error[E0313]: `set[int]` cannot be used as a dict key
-  --> tests/ui/set_errors.wb:21:21
+  --> tests/ui/set_errors.vi:21:21
    |
 21 |     _nested_sets = {items}
    |                     ^^^^^ not hashable
@@ -79,7 +79,7 @@ error[E0313]: `set[int]` cannot be used as a dict key
    = help: dict keys can be `int`, `str`, `bool`, tuples of those, or types that implement `Hash`
 
 error[E0316]: `set[int]` has no method `append`
-  --> tests/ui/set_errors.wb:22:11
+  --> tests/ui/set_errors.vi:22:11
    |
 22 |     items.append(1)
    |           ^^^^^^ no such method
@@ -87,19 +87,19 @@ error[E0316]: `set[int]` has no method `append`
    = help: the method is called `add`
 
 error[E0301]: `set.remove` takes 1 argument but 0 were given
-  --> tests/ui/set_errors.wb:23:5
+  --> tests/ui/set_errors.vi:23:5
    |
 23 |     items.remove()
    |     ^^^^^^^^^^^^^^ expected 1 argument
 
 error[E0316]: `set[int]` has no method `get`
-  --> tests/ui/set_errors.wb:24:11
+  --> tests/ui/set_errors.vi:24:11
    |
 24 |     items.get(1)
    |           ^^^ no such method
 
 error[E0318]: cannot make a set from a `int`
-  --> tests/ui/set_errors.wb:25:15
+  --> tests/ui/set_errors.vi:25:15
    |
 25 |     print(set(5), set(1, 2), set([1]) < set([2]), items + items, items <= items)
    |               ^ has type `int`
@@ -107,13 +107,13 @@ error[E0318]: cannot make a set from a `int`
    = help: `set(...)` takes a list, a string, a set, a dict (its keys) or `range(...)`
 
 error[E0301]: `set` takes 1 argument but 2 were given
-  --> tests/ui/set_errors.wb:25:19
+  --> tests/ui/set_errors.vi:25:19
    |
 25 |     print(set(5), set(1, 2), set([1]) < set([2]), items + items, items <= items)
    |                   ^^^^^^^^^ expected 1 argument
 
 error[E0321]: cannot compare `set[int]` values with `<`
-  --> tests/ui/set_errors.wb:25:30
+  --> tests/ui/set_errors.vi:25:30
    |
 25 |     print(set(5), set(1, 2), set([1]) < set([2]), items + items, items <= items)
    |                              ^^^^^^^^^^^^^^^^^^^ both sides are `set[int]`
@@ -121,7 +121,7 @@ error[E0321]: cannot compare `set[int]` values with `<`
    = help: sets are compared with `a.is_subset(b)` and `a.is_superset(b)`
 
 error[E0321]: cannot use `+` on `set[int]` and `set[int]`
-  --> tests/ui/set_errors.wb:25:51
+  --> tests/ui/set_errors.vi:25:51
    |
 25 |     print(set(5), set(1, 2), set([1]) < set([2]), items + items, items <= items)
    |                                                   ^^^^^^^^^^^^^ `set[int]` + `set[int]`
@@ -129,7 +129,7 @@ error[E0321]: cannot use `+` on `set[int]` and `set[int]`
    = help: combine sets with `a | b`, which keeps each element once
 
 error[E0321]: cannot compare `set[int]` values with `<=`
-  --> tests/ui/set_errors.wb:25:66
+  --> tests/ui/set_errors.vi:25:66
    |
 25 |     print(set(5), set(1, 2), set([1]) < set([2]), items + items, items <= items)
    |                                                                  ^^^^^^^^^^^^^^ both sides are `set[int]`
@@ -137,7 +137,7 @@ error[E0321]: cannot compare `set[int]` values with `<=`
    = help: sets are compared with `a.is_subset(b)` and `a.is_superset(b)`
 
 error[E0338]: a value of type `set[int]` cannot be passed to another task
-  --> tests/ui/set_errors.wb:26:25
+  --> tests/ui/set_errors.vi:26:25
    |
 26 |     task = spawn worker(items)
    |                         ^^^^^ a `set[int]` can be changed
@@ -145,11 +145,11 @@ error[E0338]: a value of type `set[int]` cannot be passed to another task
    = help: wrap the set in `Mutex(...)`; there is no immutable set yet
 
 error[E0200]: unknown name `frozenset`
-  --> tests/ui/set_errors.wb:27:24
+  --> tests/ui/set_errors.vi:27:24
    |
 27 |     print(task.join(), frozenset([1]))
    |                        ^^^^^^^^^ not defined
    |
    = help: there is no immutable set yet; share a `set` through `Mutex(...)`
 
-error: could not compile `tests/ui/set_errors.wb` due to 20 errors
+error: could not compile `tests/ui/set_errors.vi` due to 20 errors

@@ -1,6 +1,6 @@
 # 03 — Compiler architecture
 
-The compiler is a Rust program, `weby`, that turns a project's `.wb` files into one native executable. It is a batch, whole-program compiler: it reads every module reachable from the entry file, checks them, generates one LLVM module, and links it with the runtime.
+The compiler is a Rust program, `viper`, that turns a project's `.vi` files into one native executable. It is a batch, whole-program compiler: it reads every module reachable from the entry file, checks them, generates one LLVM module, and links it with the runtime.
 
 ## Repository layout
 
@@ -14,23 +14,23 @@ A Cargo workspace. Few crates at first; split further only when compile times or
 | `crates/lang_syntax` | library | Tokens, lexer, AST, parser |
 | `crates/lang_sema` | library | Module graph, name resolution, type interner, type checker, trait tables, HIR, derivations, monomorphisation |
 | `crates/lang_codegen` | library | HIR to LLVM IR through `inkwell`, object emission |
-| `crates/lang_cli` | binary `weby` | Argument parsing, pipeline driver, linker invocation |
+| `crates/lang_cli` | binary `viper` | Argument parsing, pipeline driver, linker invocation |
 | `crates/lang_rt` | static library | The runtime ([04](04-runtime-and-memory.md)) |
-| `stdlib/` | Weby source | Standard library modules ([05](05-standard-library.md)) |
+| `stdlib/` | Viper source | Standard library modules ([05](05-standard-library.md)) |
 | `tests/` | data | End-to-end test programs and expected output ([07](07-testing-and-performance.md)) |
-| `bench/` | data | Benchmark programs in Weby, Go and Python |
+| `bench/` | data | Benchmark programs in Viper, Go and Python |
 | `docs/` | markdown | These documents, later the language reference |
 
 Spans and the source map live in `lang_diag` rather than `lang_syntax`, so that every phase, the lexer included, can report diagnostics without a dependency cycle.
 
-`lang_sema` and `lang_syntax` must not depend on LLVM. That keeps `weby check` fast, keeps the frontend testable without LLVM installed, and lets a future language server reuse them.
+`lang_sema` and `lang_syntax` must not depend on LLVM. That keeps `viper check` fast, keeps the frontend testable without LLVM installed, and lets a future language server reuse them.
 
 ### Renaming the language
 
-The name "Weby" and the `.wb` extension may still change, so the name is kept out of everything that is expensive to rename.
+The name "Viper" and the `.vi` extension may still change, so the name is kept out of everything that is expensive to rename.
 
 - **Crates** use the neutral prefix `lang_`. **Runtime symbols** use the neutral prefix `lrt_`. The runtime archive is `liblang_rt.a`. None of these change on a rename.
-- One small crate, `crates/lang_names`, holds every name-dependent constant: the language's display name, the CLI name, the source file extension, the environment variable prefix (`WEBY_`), and the cache directory name. The compiler, the runtime and the test harness read these constants; none of them contains the name as a literal.
+- One small crate, `crates/lang_names`, holds every name-dependent constant: the language's display name, the CLI name, the source file extension, the environment variable prefix (`VIPER_`), and the cache directory name. The compiler, the runtime and the test harness read these constants; none of them contains the name as a literal.
 - A CI check searches the Rust sources outside `lang_names` for the current name and extension and fails if it finds either.
 
 Rename checklist:
@@ -50,7 +50,7 @@ After the first public release a rename also means keeping the old extension wor
 | LLVM bindings | `inkwell` | Feature flag selects LLVM 19 |
 | Diagnostics rendering | Hand-written, in `lang_diag` | Chosen over `ariadne` and `codespan-reporting` at M0: plain text with no colours keeps golden tests stable, and it is about 100 lines |
 | CLI parsing | `clap` | |
-| Snapshot tests | `insta`, if needed | Diagnostics goldens are plain `.stderr` files under `tests/ui`, regenerated with `WEBY_BLESS=1`; lexer and parser tests are ordinary assertions so far |
+| Snapshot tests | `insta`, if needed | Diagnostics goldens are plain `.stderr` files under `tests/ui`, regenerated with `VIPER_BLESS=1`; lexer and parser tests are ordinary assertions so far |
 | String interning | `lasso` or a small hand-written interner | |
 
 ## Pipeline
@@ -108,7 +108,7 @@ Hand-written recursive descent for declarations and statements; precedence climb
 
 ## Module graph and name resolution
 
-- Starting from the entry file, follow `import` statements. `import a.b` maps to `a/b.wb` under the project root, then under the standard library root.
+- Starting from the entry file, follow `import` statements. `import a.b` maps to `a/b.vi` under the project root, then under the standard library root.
 - The prelude (built-in types, traits and functions such as `print`, `len`, `range`) is implicitly imported into every module.
 - Resolution is two-pass per module: first declare every top-level name, then resolve references inside signatures and bodies. Declaration order within a file never matters.
 - Inside function bodies, a per-function table records each local at its first assignment.
@@ -169,7 +169,7 @@ Symbol names follow a simple reversible scheme: module path, item name, and type
 
 ### Type mapping
 
-| Weby | LLVM |
+| Viper | LLVM |
 |---|---|
 | `int`, `float`, `bool` | `i64`, `double`, `i1` |
 | Sized numerics | `i8` .. `i64`, `float` |
@@ -227,11 +227,11 @@ Operations that are too hot to be runtime calls are emitted directly: list lengt
 
 ### Linking
 
-The runtime archive is built with link-time optimisation in one code-generation unit (D87). The driver invokes the system C compiler as a linker driver (`cc`), passing the object file, `liblang_rt.a`, the GC library, and the system libraries the Rust runtime needs (threads, math, dynamic loading). The runtime archive is located relative to the `weby` executable. A fully static binary (`--static`, musl target) is a later option that suits container deployment.
+The runtime archive is built with link-time optimisation in one code-generation unit (D87). The driver invokes the system C compiler as a linker driver (`cc`), passing the object file, `liblang_rt.a`, the GC library, and the system libraries the Rust runtime needs (threads, math, dynamic loading). The runtime archive is located relative to the `viper` executable. A fully static binary (`--static`, musl target) is a later option that suits container deployment.
 
 ### Debug information
 
-Deferred to after the prototype, with one exception: panic messages carry file and line from M1, because they are static data and cost nothing. Full DWARF (so that `gdb`, `perf` and backtraces show Weby functions and lines) is the first post-prototype tooling task, since profiling needs it.
+Deferred to after the prototype, with one exception: panic messages carry file and line from M1, because they are static data and cost nothing. Full DWARF (so that `gdb`, `perf` and backtraces show Viper functions and lines) is the first post-prototype tooling task, since profiling needs it.
 
 ## Diagnostics
 
@@ -240,7 +240,7 @@ Good errors are part of the readability goal.
 - Every diagnostic has a severity, a stable code (`E0123`), a primary span with a label, optional secondary spans, and optional help text.
 - Messages state what was expected and what was found, in the language's own terms ("expected `User`, found `User?`; use `match` or `?` to handle `None`").
 - Common Python habits get specific messages: `if items:` (truthiness), `class` (suggest `struct` and `impl`), `try` (suggest `Result` and `?`), `a < b < c`, `self.x` used without `self` parameter.
-- Type hints get the same treatment: a parameter or field with no hint is an error that shows where to write it; `string`, `integer`, `boolean`, `List[...]`, `Dict[...]` and `Optional[...]` each produce an error naming the Weby spelling.
+- Type hints get the same treatment: a parameter or field with no hint is an error that shows where to write it; `string`, `integer`, `boolean`, `List[...]`, `Dict[...]` and `Optional[...]` each produce an error naming the Viper spelling.
 - Warnings: unused variable, unused import, unreachable code, naming convention.
 - Diagnostics are golden-tested ([07](07-testing-and-performance.md)).
 
@@ -248,13 +248,13 @@ Good errors are part of the readability goal.
 
 | Command | Does | Milestone |
 |---|---|---|
-| `weby build file.wb` | Compile to an executable; `--release`, `-o` | M0 |
-| `weby run file.wb [args]` | Build to a cache directory and execute | M0 |
-| `weby check file.wb` | Phases 1–6 only; no LLVM | M1 |
-| `weby build --emit=tokens\|ast\|hir\|llvm-ir\|obj` | Dump an intermediate form | M1, used heavily by tests |
-| `weby test` | Run `@test` functions | post-prototype |
-| `weby build --race` | Build with data-race detection instrumented | post-prototype |
-| `weby fmt` | Formatter | post-prototype |
+| `viper build file.vi` | Compile to an executable; `--release`, `-o` | M0 |
+| `viper run file.vi [args]` | Build to a cache directory and execute | M0 |
+| `viper check file.vi` | Phases 1–6 only; no LLVM | M1 |
+| `viper build --emit=tokens\|ast\|hir\|llvm-ir\|obj` | Dump an intermediate form | M1, used heavily by tests |
+| `viper test` | Run `@test` functions | post-prototype |
+| `viper build --race` | Build with data-race detection instrumented | post-prototype |
+| `viper fmt` | Formatter | post-prototype |
 
 ## Deferred compiler work
 

@@ -125,7 +125,7 @@ impl Str {
     }
 }
 
-/// A source location string such as `app.wb:3:5`, passed by generated code to functions that can
+/// A source location string such as `app.vi:3:5`, passed by generated code to functions that can
 /// panic.
 ///
 /// # Safety

@@ -1,6 +1,6 @@
 # Sign in with Google: an example
 
-A small notes app whose pages and API need a Google account: a home page, a protected notes page, a JSON API under `/api/notes`, `/me`, and its API documentation at `/docs`. `app.wb` is the app, `main.wb` serves it with a real Google client, and `app_test.wb` tests it without one.
+A small notes app whose pages and API need a Google account: a home page, a protected notes page, a JSON API under `/api/notes`, `/me`, and its API documentation at `/docs`. `app.vi` is the app, `main.vi` serves it with a real Google client, and `app_test.vi` tests it without one.
 
 ## Running it
 
@@ -11,7 +11,7 @@ A small notes app whose pages and API need a Google account: a home page, a prot
 
    ```bash
    export SESSION_SECRET="$(head -c 32 /dev/urandom | base64)"
-   weby run main.wb
+   viper run main.vi
    ```
 
 5. Open <http://localhost:8080> and sign in. Without `SESSION_SECRET` the app still runs on `localhost`, with a key made for the run and a warning, so sign-ins end when it stops.
@@ -21,7 +21,7 @@ Instead of the file, the app also takes `GOOGLE_CLIENT_SECRETS` (the file's path
 ## Testing it
 
 ```bash
-weby test
+viper test
 ```
 
 The tests use `auth.google_for_tests()` and sign requests in with `test_cookie`; nothing contacts Google.

@@ -1,5 +1,5 @@
-# Milestone 5 exit program: the milestone 3 evaluator split into modules (calc/syntax.wb,
-# calc/parser.wb, calc/eval.wb), with private fields and methods behind a public function.
+# Milestone 5 exit program: the milestone 3 evaluator split into modules (calc/syntax.vi,
+# calc/parser.vi, calc/eval.vi), with private fields and methods behind a public function.
 # expect: 1 + 2 * 3 = 7.0
 # expect: (1 + 2) * 3 = 9.0
 # expect: x * (y - 0.5) = 8.0

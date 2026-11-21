@@ -1,11 +1,11 @@
 error[E0340]: the path has `{id}`, but `missing_param` has no parameter `id`
-  --> tests/ui/route_errors.wb:15:5
+  --> tests/ui/route_errors.vi:15:5
    |
 15 |     @http.get("/notes/{id}")
    |     ^^^^^^^^^^^^^^^^^^^^^^^^ `{id}` is not used
 
 error[E0340]: path parameter `id` cannot be a `list[int]`
-  --> tests/ui/route_errors.wb:20:30
+  --> tests/ui/route_errors.vi:20:30
    |
 20 |     def wrong_type(self, id: list[int]) -> str:
    |                              ^^^^^^^^^ not parsed from a path
@@ -13,7 +13,7 @@ error[E0340]: path parameter `id` cannot be a `list[int]`
    = help: path parameters are `int`, `float`, `bool` or `str`
 
 error[E0340]: a GET route has no request body
-  --> tests/ui/route_errors.wb:24:33
+  --> tests/ui/route_errors.vi:24:33
    |
 24 |     def body_on_get(self, note: Note) -> str:
    |                                 ^^^^ a body parameter
@@ -21,13 +21,13 @@ error[E0340]: a GET route has no request body
    = help: read data from the path or the query, or use `@http.post` or `@http.put`
 
 error[E0340]: a handler has one JSON body, but `a` and `b` both want it
-  --> tests/ui/route_errors.wb:28:38
+  --> tests/ui/route_errors.vi:28:38
    |
 28 |     def two_bodies(self, a: Note, b: Note) -> str:
    |                                      ^^^^ second body parameter
 
 error[E0340]: cannot tell where parameter `p` comes from
-  --> tests/ui/route_errors.wb:32:26
+  --> tests/ui/route_errors.vi:32:26
    |
 32 |     def unbound(self, p: Plain) -> str:
    |                          ^^^^^ a `Plain`
@@ -35,7 +35,7 @@ error[E0340]: cannot tell where parameter `p` comes from
    = help: to read it from the JSON body, add `@derive(Json)` to `Plain`
 
 error[E0340]: a `Plain` cannot be turned into a response
-  --> tests/ui/route_errors.wb:36:29
+  --> tests/ui/route_errors.vi:36:29
    |
 36 |     def bad_return(self) -> Plain:
    |                             ^^^^^ not a response
@@ -43,7 +43,7 @@ error[E0340]: a `Plain` cannot be turned into a response
    = help: return `http.Response`, `str`, a type with `@derive(Json)`, nothing, or a `Result` of those
 
 error[E0340]: two handlers for GET /dup
-  --> tests/ui/route_errors.wb:43:5
+  --> tests/ui/route_errors.vi:43:5
    |
 39 |     @http.get("/dup")
    |     ----------------- first declared here
@@ -52,13 +52,13 @@ error[E0340]: two handlers for GET /dup
    |     ^^^^^^^^^^^^^^^^^ declared again here
 
 error[E0340]: route path `no-slash` must start with `/`
-  --> tests/ui/route_errors.wb:47:5
+  --> tests/ui/route_errors.vi:47:5
    |
 47 |     @http.get("no-slash")
    |     ^^^^^^^^^^^^^^^^^^^^^ not a path
 
 error[E0340]: the default of query parameter `limit` must be a literal
-  --> tests/ui/route_errors.wb:52:42
+  --> tests/ui/route_errors.vi:52:42
    |
 52 |     def query_default(self, limit: int = len("abc")) -> str:
    |                                          ^^^^^^^^^^ not a literal
@@ -66,7 +66,7 @@ error[E0340]: the default of query parameter `limit` must be a literal
    = help: use a number, string, `True`, `False` or `None`
 
 error[E0338]: a value of type `Counter` cannot be served by several tasks at once
-  --> tests/ui/route_errors.wb:69:18
+  --> tests/ui/route_errors.vi:69:18
    |
 69 |     server.mount(Counter(0))
    |                  ^^^^^^^^^^ `Counter` has fields that can be changed
@@ -74,7 +74,7 @@ error[E0338]: a value of type `Counter` cannot be served by several tasks at onc
    = help: mark `Counter` `@frozen`, or wrap the value in `Mutex(...)`
 
 error[E0338]: a value of type `def(Request) -> Result[Response]` cannot be used to serve requests from several tasks
-  --> tests/ui/route_errors.wb:74:28
+  --> tests/ui/route_errors.vi:74:28
    |
 74 |     server.get("/capture", capture)
    |                            ^^^^^^^ a function value might capture variables that can be changed
@@ -82,11 +82,11 @@ error[E0338]: a value of type `def(Request) -> Result[Response]` cannot be used 
    = help: pass a named function, or the data the function needs
 
 error[E0340]: a `def(Request) -> Result[Response]` has no `@http` routes to mount
-  --> tests/ui/route_errors.wb:76:18
+  --> tests/ui/route_errors.vi:76:18
    |
 76 |     server.mount(handler)
    |                  ^^^^^^^ nothing to mount
    |
    = help: mount a value whose type has methods marked `@http.get(...)` and so on, or a function marked that way
 
-error: could not compile `tests/ui/route_errors.wb` due to 12 errors
+error: could not compile `tests/ui/route_errors.vi` due to 12 errors

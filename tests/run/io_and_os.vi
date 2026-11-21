@@ -39,7 +39,7 @@ def leave_early(t: Tracker) -> str:
         return "early return"
 
 def main():
-    path = "/tmp/weby_io_test.txt"
+    path = "/tmp/viper_io_test.txt"
     written = io.write_file(path, "alpha\nbeta\n")
     print("written:", written.is_ok())
     io.append_file(path, "gamma\ndelta\n").unwrap()
@@ -52,11 +52,11 @@ def main():
             print("unexpected")
         case Err(error):
             print("missing:", error.message())
-    print("listed:", "weby_io_test.txt" in io.list_dir("/tmp").unwrap())
+    print("listed:", "viper_io_test.txt" in io.list_dir("/tmp").unwrap())
     io.remove(path).unwrap()
     print("removed:", io.exists(path))
     io.eprint("a message on standard error")
-    print("env:", os.getenv("WEBY_TEST_SURELY_UNSET"))
+    print("env:", os.getenv("VIPER_TEST_SURELY_UNSET"))
 
     t = Tracker([])
     with t as log:

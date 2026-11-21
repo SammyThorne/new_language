@@ -21,11 +21,11 @@ A test (`every_code_has_a_section` in `crates/lang_cli/tests/errors.rs`) fails w
 
 A tab character in the indentation at the start of a line.
 
-From `tests/ui/tab_indentation.wb`:
+From `tests/ui/tab_indentation.vi`:
 
 ```text
 error[E0001]: tab character in indentation
- --> tests/ui/tab_indentation.wb:2:1
+ --> tests/ui/tab_indentation.vi:2:1
   |
 2 |  print("tab")
   | ^ tab here
@@ -39,11 +39,11 @@ error[E0001]: tab character in indentation
 
 A line is less indented than its block but matches no enclosing block.
 
-From `tests/ui/lexical_errors.wb`:
+From `tests/ui/lexical_errors.vi`:
 
 ```text
 error[E0002]: unindent does not match any outer indentation level
- --> tests/ui/lexical_errors.wb:8:1
+ --> tests/ui/lexical_errors.vi:8:1
   |
 8 |   w = 4
   | ^^ this indentation
@@ -57,11 +57,11 @@ error[E0002]: unindent does not match any outer indentation level
 
 A string literal without its closing quote.
 
-From `tests/ui/unterminated_string.wb`:
+From `tests/ui/unterminated_string.vi`:
 
 ```text
 error[E0003]: unterminated string literal
- --> tests/ui/unterminated_string.wb:2:11
+ --> tests/ui/unterminated_string.vi:2:11
   |
 2 |     print("no closing quote)
   |           ^ string starts here
@@ -75,11 +75,11 @@ error[E0003]: unterminated string literal
 
 An unknown backslash escape in a string literal.
 
-From `tests/ui/lexical_errors.wb`:
+From `tests/ui/lexical_errors.vi`:
 
 ```text
 error[E0004]: unknown escape sequence `\q`
- --> tests/ui/lexical_errors.wb:4:15
+ --> tests/ui/lexical_errors.vi:4:15
   |
 4 |     print("tab\q")
   |               ^^ unknown escape
@@ -93,11 +93,11 @@ error[E0004]: unknown escape sequence `\q`
 
 A character that cannot start any token.
 
-From `tests/ui/lexical_errors.wb`:
+From `tests/ui/lexical_errors.vi`:
 
 ```text
 error[E0005]: unexpected character `$`
- --> tests/ui/lexical_errors.wb:6:11
+ --> tests/ui/lexical_errors.vi:6:11
   |
 6 |     y = 1 $ 2
   |           ^ not valid here
@@ -109,11 +109,11 @@ error[E0005]: unexpected character `$`
 
 An integer literal that does not fit in 64 bits.
 
-From `tests/ui/extern_and_with.wb`:
+From `tests/ui/extern_and_with.vi`:
 
 ```text
 error[E0006]: integer literal is too large for `u8`
-  --> tests/ui/extern_and_with.wb:19:16
+  --> tests/ui/extern_and_with.vi:19:16
    |
 19 |     tiny: u8 = 300
    |                ^^^ the largest `u8` is 255
@@ -125,11 +125,11 @@ error[E0006]: integer literal is too large for `u8`
 
 A malformed number literal.
 
-From `tests/ui/lexical_errors.wb`:
+From `tests/ui/lexical_errors.vi`:
 
 ```text
 error[E0007]: invalid number literal `12abc`
- --> tests/ui/lexical_errors.wb:5:9
+ --> tests/ui/lexical_errors.vi:5:9
   |
 5 |     x = 12abc
   |         ^^^^^ not a valid number
@@ -144,11 +144,11 @@ error[E0007]: invalid number literal `12abc`
 
 The parser found a token it did not expect.
 
-From `tests/ui/lexical_errors.wb`:
+From `tests/ui/lexical_errors.vi`:
 
 ```text
 error[E0100]: expected a declaration, found name `w`
- --> tests/ui/lexical_errors.wb:8:3
+ --> tests/ui/lexical_errors.vi:8:3
   |
 8 |   w = 4
   |   ^ statements are not allowed here
@@ -162,11 +162,11 @@ error[E0100]: expected a declaration, found name `w`
 
 Valid syntax for a feature this compiler does not implement yet.
 
-From `tests/ui/fstring_conversion_errors.wb`:
+From `tests/ui/fstring_conversion_errors.vi`:
 
 ```text
 error[E0101]: the `!a` conversion is not supported
- --> tests/ui/fstring_conversion_errors.wb:4:15
+ --> tests/ui/fstring_conversion_errors.vi:4:15
   |
 4 |     print(f"{x!a}")
   |               ^^ not supported
@@ -180,11 +180,11 @@ error[E0101]: the `!a` conversion is not supported
 
 A recognised construct that the type checker does not implement yet.
 
-From `tests/ui/del_errors.wb`:
+From `tests/ui/del_errors.vi`:
 
 ```text
 error[E0102]: `del n` is not supported
- --> tests/ui/del_errors.wb:5:9
+ --> tests/ui/del_errors.vi:5:9
   |
 5 |     del n
   |         ^ not supported
@@ -198,11 +198,11 @@ error[E0102]: `del n` is not supported
 
 `a < b < c`.
 
-From `tests/ui/comparison_chain.wb`:
+From `tests/ui/comparison_chain.vi`:
 
 ```text
 error[E0103]: comparison chains are not supported
- --> tests/ui/comparison_chain.wb:2:11
+ --> tests/ui/comparison_chain.vi:2:11
   |
 2 |     print(1 < 2 < 3)
   |           ^^^^^^^ second comparison
@@ -216,11 +216,11 @@ error[E0103]: comparison chains are not supported
 
 `break` or `continue` outside a loop.
 
-From `tests/ui/break_outside_loop.wb`:
+From `tests/ui/break_outside_loop.vi`:
 
 ```text
 error[E0104]: `break` outside a loop
- --> tests/ui/break_outside_loop.wb:3:5
+ --> tests/ui/break_outside_loop.vi:3:5
   |
 3 |     break
   |     ^^^^^ not inside `for` or `while`
@@ -235,11 +235,11 @@ error[E0104]: `break` outside a loop
 
 A name that refers to nothing.
 
-From `tests/ui/module_privacy.wb`:
+From `tests/ui/module_privacy.vi`:
 
 ```text
 error[E0200]: module `lib.accounts` has no `open_acount`
- --> tests/ui/module_privacy.wb:2:52
+ --> tests/ui/module_privacy.vi:2:52
   |
 2 | from lib.accounts import Account, internal_helper, open_acount
   |                                                    ^^^^^^^^^^^ not found
@@ -253,11 +253,11 @@ error[E0200]: module `lib.accounts` has no `open_acount`
 
 Two definitions of the same name.
 
-From `tests/ui/definition_errors.wb`:
+From `tests/ui/definition_errors.vi`:
 
 ```text
 error[E0201]: `helper` is defined more than once
- --> tests/ui/definition_errors.wb:6:5
+ --> tests/ui/definition_errors.vi:6:5
   |
 3 | def helper() -> int:
   |     ------ first defined here
@@ -272,11 +272,11 @@ error[E0201]: `helper` is defined more than once
 
 The program has no `main` function.
 
-From `tests/ui/no_main.wb`:
+From `tests/ui/no_main.vi`:
 
 ```text
 error[E0202]: the program has no `main` function
- --> tests/ui/no_main.wb:1:1
+ --> tests/ui/no_main.vi:1:1
   |
 1 | def helper():
   | ^
@@ -290,11 +290,11 @@ error[E0202]: the program has no `main` function
 
 Calling something that is not a function, or assigning to a function.
 
-From `tests/ui/generic_method_errors.wb`:
+From `tests/ui/generic_method_errors.vi`:
 
 ```text
 error[E0203]: `Holder.smaller` needs a `Holder` value
-  --> tests/ui/generic_method_errors.wb:30:18
+  --> tests/ui/generic_method_errors.vi:30:18
    |
 30 |     print(Holder.smaller(1, 2), holder.make(3))
    |                  ^^^^^^^ takes `self`
@@ -308,11 +308,11 @@ error[E0203]: `Holder.smaller` needs a `Holder` value
 
 A variable read before its first assignment.
 
-From `tests/ui/maybe_unassigned.wb`:
+From `tests/ui/maybe_unassigned.vi`:
 
 ```text
 error[E0204]: `result` might not be assigned here
- --> tests/ui/maybe_unassigned.wb:5:11
+ --> tests/ui/maybe_unassigned.vi:5:11
   |
 4 |             result = "done"
   |             ------ assigned here, but not on every path to the use
@@ -331,11 +331,11 @@ error[E0204]: `result` might not be assigned here
 
 A value of one type where another was expected.
 
-From `tests/ui/builtin_method_hints.wb`:
+From `tests/ui/builtin_method_hints.vi`:
 
 ```text
 error[E0300]: expected `str`, found `int`
-  --> tests/ui/builtin_method_hints.wb:12:58
+  --> tests/ui/builtin_method_hints.vi:12:58
    |
 12 |     print(text.count(), text.count("a", "b"), text.count(1))
    |                                                          ^ expected `str`, found `int`
@@ -349,11 +349,11 @@ error[E0300]: expected `str`, found `int`
 
 A call with the wrong number of arguments.
 
-From `tests/ui/builtin_method_hints.wb`:
+From `tests/ui/builtin_method_hints.vi`:
 
 ```text
 error[E0301]: `str.count` takes 1 argument but 0 were given
-  --> tests/ui/builtin_method_hints.wb:12:11
+  --> tests/ui/builtin_method_hints.vi:12:11
    |
 12 |     print(text.count(), text.count("a", "b"), text.count(1))
    |           ^^^^^^^^^^^^ expected 1 argument
@@ -365,11 +365,11 @@ error[E0301]: `str.count` takes 1 argument but 0 were given
 
 A function without `->` returns a value.
 
-From `tests/ui/return_value_without_type.wb`:
+From `tests/ui/return_value_without_type.vi`:
 
 ```text
 error[E0302]: function `double` has no return type but returns a value
- --> tests/ui/return_value_without_type.wb:2:12
+ --> tests/ui/return_value_without_type.vi:2:12
   |
 2 |     return n * 2
   |            ^^^^^ returns `int`
@@ -383,11 +383,11 @@ error[E0302]: function `double` has no return type but returns a value
 
 A function with a return type can reach its end without returning.
 
-From `tests/ui/missing_return.wb`:
+From `tests/ui/missing_return.vi`:
 
 ```text
 error[E0303]: function `answer` can finish without returning a value
- --> tests/ui/missing_return.wb:1:5
+ --> tests/ui/missing_return.vi:1:5
   |
 1 | def answer() -> int:
   |     ^^^^^^ can reach its end without `return`
@@ -402,11 +402,11 @@ error[E0303]: function `answer` can finish without returning a value
 
 A type hint names a type that does not exist.
 
-From `tests/ui/unknown_type.wb`:
+From `tests/ui/unknown_type.vi`:
 
 ```text
 error[E0304]: unknown type `string`
- --> tests/ui/unknown_type.wb:1:21
+ --> tests/ui/unknown_type.vi:1:21
   |
 1 | def test(a: int) -> string:
   |                     ^^^^^^ not a type
@@ -420,11 +420,11 @@ error[E0304]: unknown type `string`
 
 A parameter without a type hint.
 
-From `tests/ui/missing_type_hint.wb`:
+From `tests/ui/missing_type_hint.vi`:
 
 ```text
 error[E0305]: parameter `w` has no type hint
- --> tests/ui/missing_type_hint.wb:1:10
+ --> tests/ui/missing_type_hint.vi:1:10
   |
 1 | def area(w, h: int) -> int:
   |          ^ needs a type hint
@@ -438,11 +438,11 @@ error[E0305]: parameter `w` has no type hint
 
 `main` has parameters or a return type.
 
-From `tests/ui/definition_errors.wb`:
+From `tests/ui/definition_errors.vi`:
 
 ```text
 error[E0306]: `main` cannot take parameters
-  --> tests/ui/definition_errors.wb:12:5
+  --> tests/ui/definition_errors.vi:12:5
    |
 12 | def main(args: list[str]) -> int:
    |     ^^^^ defined with parameters
@@ -454,11 +454,11 @@ error[E0306]: `main` cannot take parameters
 
 A type hint on an assignment to a variable that already exists.
 
-From `tests/ui/definition_errors.wb`:
+From `tests/ui/definition_errors.vi`:
 
 ```text
 error[E0307]: `count` already has a type
-  --> tests/ui/definition_errors.wb:14:12
+  --> tests/ui/definition_errors.vi:14:12
    |
 13 |     count: int = 1
    |     ----- `count` was declared as `int` here
@@ -474,11 +474,11 @@ error[E0307]: `count` already has a type
 
 A variable whose value has type `None`, which carries no information.
 
-From `tests/ui/definition_errors.wb`:
+From `tests/ui/definition_errors.vi`:
 
 ```text
 error[E0308]: `nothing` would have type `None`
-  --> tests/ui/definition_errors.wb:15:15
+  --> tests/ui/definition_errors.vi:15:15
    |
 15 |     nothing = None
    |               ^^^^ the type cannot be inferred from `None`
@@ -492,11 +492,11 @@ error[E0308]: `nothing` would have type `None`
 
 Type arguments on a type that takes none.
 
-From `tests/ui/generic_inference.wb`:
+From `tests/ui/generic_inference.vi`:
 
 ```text
 error[E0309]: `Stack` takes 1 type argument
-  --> tests/ui/generic_inference.wb:16:8
+  --> tests/ui/generic_inference.vi:16:8
    |
 16 |     t: Stack[int, str] = Stack(items=[1])
    |        ^^^^^^^^^^^^^^^ expected 1 type argument
@@ -510,11 +510,11 @@ error[E0309]: `Stack` takes 1 type argument
 
 A parameter whose type is `None`.
 
-From `tests/ui/definition_errors.wb`:
+From `tests/ui/definition_errors.vi`:
 
 ```text
 error[E0310]: parameter `x` cannot have type `None`
- --> tests/ui/definition_errors.wb:9:19
+ --> tests/ui/definition_errors.vi:9:19
   |
 9 | def takes_none(x: None):
   |                   ^^^^ a `None` parameter carries no information
@@ -526,11 +526,11 @@ error[E0310]: parameter `x` cannot have type `None`
 
 A struct construction that leaves out a field without a default.
 
-From `tests/ui/missing_struct_field.wb`:
+From `tests/ui/missing_struct_field.vi`:
 
 ```text
 error[E0311]: missing field `id` in `User(...)`
- --> tests/ui/missing_struct_field.wb:7:12
+ --> tests/ui/missing_struct_field.vi:7:12
   |
 1 | struct User:
   |        ---- `User` is defined here
@@ -545,11 +545,11 @@ error[E0311]: missing field `id` in `User(...)`
 
 A constant whose value cannot be worked out when compiling, or is defined in terms of itself.
 
-From `tests/ui/const_errors.wb`:
+From `tests/ui/const_errors.vi`:
 
 ```text
 error[E0312]: the value of constant `CALLED` cannot be worked out when compiling
- --> tests/ui/const_errors.wb:3:16
+ --> tests/ui/const_errors.vi:3:16
   |
 3 | const CALLED = len("abc")
   |                ^^^^^^^^^^ a call
@@ -563,11 +563,11 @@ error[E0312]: the value of constant `CALLED` cannot be worked out when compiling
 
 A dict key type that cannot be hashed.
 
-From `tests/ui/set_errors.wb`:
+From `tests/ui/set_errors.vi`:
 
 ```text
 error[E0313]: `list[int]` cannot be used as a dict key
-  --> tests/ui/set_errors.wb:11:16
+  --> tests/ui/set_errors.vi:11:16
    |
 11 |     _nested = {[1], [2]}
    |                ^^^ not hashable
@@ -581,11 +581,11 @@ error[E0313]: `list[int]` cannot be used as a dict key
 
 An f-string format spec that is malformed or does not suit the value.
 
-From `tests/ui/bad_format_spec.wb`:
+From `tests/ui/bad_format_spec.vi`:
 
 ```text
 error[E0314]: invalid format spec `.2f`
- --> tests/ui/bad_format_spec.wb:3:19
+ --> tests/ui/bad_format_spec.vi:3:19
   |
 3 |     print(f"{name:.2f}")
   |                   ^^^ format type `f` cannot be used with `str`
@@ -599,11 +599,11 @@ error[E0314]: invalid format spec `.2f`
 
 A type that cannot be inferred, such as that of `[]` with no type hint.
 
-From `tests/ui/closure_errors.wb`:
+From `tests/ui/closure_errors.vi`:
 
 ```text
 error[E0315]: cannot infer the types of this lambda's parameters
- --> tests/ui/closure_errors.wb:5:14
+ --> tests/ui/closure_errors.vi:5:14
   |
 5 |     double = lambda x: x * 2
   |              ^^^^^^^^^^^^^^^ parameter types unknown
@@ -617,11 +617,11 @@ error[E0315]: cannot infer the types of this lambda's parameters
 
 A field or method that does not exist.
 
-From `tests/ui/builtin_method_hints.wb`:
+From `tests/ui/builtin_method_hints.vi`:
 
 ```text
 error[E0316]: `str` has no method `splitlines`
-  --> tests/ui/builtin_method_hints.wb:10:16
+  --> tests/ui/builtin_method_hints.vi:10:16
    |
 10 |     print(text.splitlines(), text.isdigit(), text.isalpha(), text.removeprefix("a"))
    |                ^^^^^^^^^^ no such method
@@ -635,11 +635,11 @@ error[E0316]: `str` has no method `splitlines`
 
 A condition that is not a `bool`.
 
-From `tests/ui/truthiness.wb`:
+From `tests/ui/truthiness.vi`:
 
 ```text
 error[E0317]: a condition must be a `bool`, found `int`
- --> tests/ui/truthiness.wb:3:8
+ --> tests/ui/truthiness.vi:3:8
   |
 3 |     if len(items):
   |        ^^^^^^^^^^ has type `int`
@@ -653,11 +653,11 @@ error[E0317]: a condition must be a `bool`, found `int`
 
 A `for` loop over something that cannot be iterated.
 
-From `tests/ui/set_errors.wb`:
+From `tests/ui/set_errors.vi`:
 
 ```text
 error[E0318]: cannot make a set from a `int`
-  --> tests/ui/set_errors.wb:25:15
+  --> tests/ui/set_errors.vi:25:15
    |
 25 |     print(set(5), set(1, 2), set([1]) < set([2]), items + items, items <= items)
    |               ^ has type `int`
@@ -671,11 +671,11 @@ error[E0318]: cannot make a set from a `int`
 
 Unpacking a value into the wrong number of names.
 
-From `tests/ui/unpack_mismatch.wb`:
+From `tests/ui/unpack_mismatch.vi`:
 
 ```text
 error[E0319]: cannot unpack `tuple[int, int, int]` into 2 names
- --> tests/ui/unpack_mismatch.wb:2:5
+ --> tests/ui/unpack_mismatch.vi:2:5
   |
 2 |     a, b = (1, 2, 3)
   |     ^^^^ the value is `tuple[int, int, int]`
@@ -689,11 +689,11 @@ error[E0319]: cannot unpack `tuple[int, int, int]` into 2 names
 
 Indexing something that cannot be indexed that way.
 
-From `tests/ui/del_errors.wb`:
+From `tests/ui/del_errors.vi`:
 
 ```text
 error[E0320]: `del` cannot remove an element of `int`
- --> tests/ui/del_errors.wb:9:9
+ --> tests/ui/del_errors.vi:9:9
   |
 9 |     del n[0]
   |         ^^^^ has type `int`
@@ -707,11 +707,11 @@ error[E0320]: `del` cannot remove an element of `int`
 
 An operator applied to types it does not support.
 
-From `tests/ui/extern_and_with.wb`:
+From `tests/ui/extern_and_with.vi`:
 
 ```text
 error[E0321]: `//` is not available on `i32`
-  --> tests/ui/extern_and_with.wb:20:17
+  --> tests/ui/extern_and_with.vi:20:17
    |
 20 |     print(tiny, i32(1) // i32(2))
    |                 ^^^^^^^^^^^^^^^^ both sides are `i32`
@@ -725,11 +725,11 @@ error[E0321]: `//` is not available on `i32`
 
 A `Result` that is neither used nor explicitly discarded.
 
-From `tests/ui/unused_result.wb`:
+From `tests/ui/unused_result.vi`:
 
 ```text
 error[E0322]: this `Result` is not used
- --> tests/ui/unused_result.wb:5:5
+ --> tests/ui/unused_result.vi:5:5
   |
 5 |     load("config.toml")
   |     ^^^^^^^^^^^^^^^^^^^ may hold an error that is being ignored
@@ -743,11 +743,11 @@ error[E0322]: this `Result` is not used
 
 Assigning to a field of a `@frozen` struct.
 
-From `tests/ui/frozen_field.wb`:
+From `tests/ui/frozen_field.vi`:
 
 ```text
 error[E0323]: cannot change a field of `Config`, which is `@frozen`
- --> tests/ui/frozen_field.wb:7:12
+ --> tests/ui/frozen_field.vi:7:12
   |
 2 | struct Config:
   |        ------ `Config` is declared `@frozen` here
@@ -764,11 +764,11 @@ error[E0323]: cannot change a field of `Config`, which is `@frozen`
 
 An implementation whose trait requires another trait the type does not implement.
 
-From `tests/ui/derive_requires_eq.wb`:
+From `tests/ui/derive_requires_eq.vi`:
 
 ```text
 error[E0324]: `Key` implements `Hash` but not `Eq`, which `Hash` requires
- --> tests/ui/derive_requires_eq.wb:1:9
+ --> tests/ui/derive_requires_eq.vi:1:9
   |
 1 | @derive(Hash)
   |         ^^^^ `Hash` requires `Eq`
@@ -782,11 +782,11 @@ error[E0324]: `Key` implements `Hash` but not `Eq`, which `Hash` requires
 
 A trait used as a type although some method prevents it, or a trait method with type parameters.
 
-From `tests/ui/generic_method_errors.wb`:
+From `tests/ui/generic_method_errors.vi`:
 
 ```text
 error[E0325]: trait method `pick` cannot have type parameters
- --> tests/ui/generic_method_errors.wb:4:14
+ --> tests/ui/generic_method_errors.vi:4:14
   |
 4 |     def pick[T](self, first: T, second: T) -> T
   |              ^ not allowed in a trait
@@ -800,11 +800,11 @@ error[E0325]: trait method `pick` cannot have type parameters
 
 A `match` that does not cover every possible value.
 
-From `tests/ui/match_expression_errors.wb`:
+From `tests/ui/match_expression_errors.vi`:
 
 ```text
 error[E0326]: this `match` does not cover every case
- --> tests/ui/match_expression_errors.wb:9:12
+ --> tests/ui/match_expression_errors.vi:9:12
   |
 9 |     return match c:
   |            ^^^^^^^^ not covered: Blue
@@ -818,11 +818,11 @@ error[E0326]: this `match` does not cover every case
 
 `?` in a function whose return type cannot carry the error or `None`.
 
-From `tests/ui/question_mark_outside_result.wb`:
+From `tests/ui/question_mark_outside_result.vi`:
 
 ```text
 error[E0327]: `?` passes an error to the caller, but this function does not return a `Result`
- --> tests/ui/question_mark_outside_result.wb:2:12
+ --> tests/ui/question_mark_outside_result.vi:2:12
   |
 2 |     port = int.parse("8080")?
   |            ^^^^^^^^^^^^^^^^^^ error has nowhere to go
@@ -836,11 +836,11 @@ error[E0327]: `?` passes an error to the caller, but this function does not retu
 
 An implementation that is missing a method, has an extra one, or has the wrong signature.
 
-From `tests/ui/impl_signature_mismatch.wb`:
+From `tests/ui/impl_signature_mismatch.vi`:
 
 ```text
 error[E0328]: `area` does not match its declaration in `Shape`
- --> tests/ui/impl_signature_mismatch.wb:8:9
+ --> tests/ui/impl_signature_mismatch.vi:8:9
   |
 2 |     def area(self) -> float
   |         ---- declared here
@@ -855,11 +855,11 @@ error[E0328]: `area` does not match its declaration in `Shape`
 
 A pattern that does not fit the value being matched.
 
-From `tests/ui/trait_type_pattern_errors.wb`:
+From `tests/ui/trait_type_pattern_errors.vi`:
 
 ```text
 error[E0329]: `Unrelated` does not implement `Shape`, so a `Shape` is never one
-  --> tests/ui/trait_type_pattern_errors.wb:31:14
+  --> tests/ui/trait_type_pattern_errors.vi:31:14
    |
 31 |         case Unrelated(u):
    |              ^^^^^^^^^^^^ this case can never match
@@ -873,11 +873,11 @@ error[E0329]: `Unrelated` does not implement `Shape`, so a `Shape` is never one
 
 An annotation that does not exist or cannot be used here.
 
-From `tests/ui/extern_and_with.wb`:
+From `tests/ui/extern_and_with.vi`:
 
 ```text
 error[E0330]: a value of type `list[int]` cannot be passed to a C function
- --> tests/ui/extern_and_with.wb:2:14
+ --> tests/ui/extern_and_with.vi:2:14
   |
 2 | def c_abs(x: list[int]) -> dict[str, int]
   |              ^^^^^^^^^ not a C type
@@ -891,11 +891,11 @@ error[E0330]: a value of type `list[int]` cannot be passed to a C function
 
 A type argument that does not implement a trait its type parameter requires.
 
-From `tests/ui/builtin_method_hints.wb`:
+From `tests/ui/builtin_method_hints.vi`:
 
 ```text
 error[E0331]: `Point` does not implement `Eq`, which `list.count` requires of `T`
-  --> tests/ui/builtin_method_hints.wb:13:29
+  --> tests/ui/builtin_method_hints.vi:13:29
    |
 13 |     print(items.count("a"), [Point(1)].count(Point(2)))
    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^ `T` is `Point` here
@@ -909,11 +909,11 @@ error[E0331]: `Point` does not implement `Eq`, which `list.count` requires of `T
 
 Assigning, from a nested function or lambda, to a variable of the enclosing function.
 
-From `tests/ui/closure_errors.wb`:
+From `tests/ui/closure_errors.vi`:
 
 ```text
 error[E0332]: cannot assign to `total`, which belongs to the enclosing function
- --> tests/ui/closure_errors.wb:8:9
+ --> tests/ui/closure_errors.vi:8:9
   |
 8 |         total = total + n
   |         ^^^^^ assigned inside a nested function
@@ -927,11 +927,11 @@ error[E0332]: cannot assign to `total`, which belongs to the enclosing function
 
 A call to a function value with keyword arguments, or other misuse of a function value.
 
-From `tests/ui/closure_errors.wb`:
+From `tests/ui/closure_errors.vi`:
 
 ```text
 error[E0333]: a function value cannot take keyword arguments
-  --> tests/ui/closure_errors.wb:13:13
+  --> tests/ui/closure_errors.vi:13:13
    |
 13 |     print(g(x=1))
    |             ^ keyword argument
@@ -945,16 +945,16 @@ error[E0333]: a function value cannot take keyword arguments
 
 An import of a module that does not exist.
 
-From `tests/ui/module_errors.wb`:
+From `tests/ui/module_errors.vi`:
 
 ```text
 error[E0334]: cannot find module `lib.nowhere`
- --> tests/ui/module_errors.wb:2:8
+ --> tests/ui/module_errors.vi:2:8
   |
 2 | import lib.nowhere
   |        ^^^^^^^^^^^ no such module
   |
-  = help: looked for `tests/ui/lib/nowhere.wb` and for a standard library module; the standard library has `io`, `os`, `time`, `json`, `log`, `http`, `re`, `crypto`, `auth`, `postgres`
+  = help: looked for `tests/ui/lib/nowhere.vi` and for a standard library module; the standard library has `io`, `os`, `time`, `json`, `log`, `http`, `re`, `crypto`, `auth`, `postgres`
 ```
 
 **What to do.** Check the module name and that its file is in the project directory or a dependency. Standard modules are `io`, `os`, `json`, `http`, `re`, `time`, `log` and `postgres`.
@@ -963,11 +963,11 @@ error[E0334]: cannot find module `lib.nowhere`
 
 Using a declaration or member that is private to another file.
 
-From `tests/ui/module_privacy.wb`:
+From `tests/ui/module_privacy.vi`:
 
 ```text
 error[E0335]: `internal_helper` is private to module `lib.accounts`
- --> tests/ui/module_privacy.wb:2:35
+ --> tests/ui/module_privacy.vi:2:35
   |
 2 | from lib.accounts import Account, internal_helper, open_acount
   |                                   ^^^^^^^^^^^^^^^ not `pub`
@@ -981,11 +981,11 @@ error[E0335]: `internal_helper` is private to module `lib.accounts`
 
 Modules that import each other, directly or not.
 
-From `tests/ui/module_errors.wb`:
+From `tests/ui/module_errors.vi`:
 
 ```text
 error[E0336]: modules import each other: lib.cycle_a -> lib.cycle_b -> lib.cycle_a
- --> tests/ui/lib/cycle_b.wb:1:8
+ --> tests/ui/lib/cycle_b.vi:1:8
   |
 1 | import lib.cycle_a
   |        ^^^^^^^^^^^ this import closes the cycle
@@ -999,11 +999,11 @@ error[E0336]: modules import each other: lib.cycle_a -> lib.cycle_b -> lib.cycle
 
 A `with` statement whose value has no `exit` method.
 
-From `tests/ui/extern_and_with.wb`:
+From `tests/ui/extern_and_with.vi`:
 
 ```text
 error[E0337]: a value of type `int` cannot be used with `with`
-  --> tests/ui/extern_and_with.wb:15:10
+  --> tests/ui/extern_and_with.vi:15:10
    |
 15 |     with 5 as five:
    |          ^ has type `int`
@@ -1017,11 +1017,11 @@ error[E0337]: a value of type `int` cannot be used with `with`
 
 A value that would be handed to another task but can be changed, so the tasks would race.
 
-From `tests/ui/lock_guard_escape.wb`:
+From `tests/ui/lock_guard_escape.vi`:
 
 ```text
 error[E0338]: a value of type `list[Item]` cannot be passed to another task
-  --> tests/ui/lock_guard_escape.wb:18:20
+  --> tests/ui/lock_guard_escape.vi:18:20
    |
 18 |         spawn keep(items)
    |                    ^^^^^ a `list[Item]` can be changed
@@ -1035,11 +1035,11 @@ error[E0338]: a value of type `list[Item]` cannot be passed to another task
 
 A value protected by a mutex leaving the `with` block that holds the lock.
 
-From `tests/ui/lock_guard_escape.wb`:
+From `tests/ui/lock_guard_escape.vi`:
 
 ```text
 error[E0339]: a value protected by a mutex cannot be stored in another variable
-  --> tests/ui/lock_guard_escape.wb:16:17
+  --> tests/ui/lock_guard_escape.vi:16:17
    |
 16 |         saved = items
    |                 ^^^^^ reached through `items`, which is only valid while the lock is held
@@ -1053,11 +1053,11 @@ error[E0339]: a value protected by a mutex cannot be stored in another variable
 
 An `@http` route whose path, parameters or return type do not fit together.
 
-From `tests/ui/route_errors.wb`:
+From `tests/ui/route_errors.vi`:
 
 ```text
 error[E0340]: the path has `{id}`, but `missing_param` has no parameter `id`
-  --> tests/ui/route_errors.wb:15:5
+  --> tests/ui/route_errors.vi:15:5
    |
 15 |     @http.get("/notes/{id}")
    |     ^^^^^^^^^^^^^^^^^^^^^^^^ `{id}` is not used
@@ -1069,11 +1069,11 @@ error[E0340]: the path has `{id}`, but `missing_param` has no parameter `id`
 
 The OpenAPI document that `server.docs` and `server.openapi_json` serve lists each JSON type under `components.schemas` by its name, with a generic type's arguments joined by `_` (`Page[Todo]` is `Page_Todo`). Two different types that a server documents would get the same name. The name `Error` is taken by the body of error responses.
 
-From `tests/ui/openapi_name_clash.wb`:
+From `tests/ui/openapi_name_clash.vi`:
 
 ```text
 error[E0341]: two schemas are both called `Box_Item` in the API documentation
-  --> tests/ui/openapi_name_clash.wb:32:5
+  --> tests/ui/openapi_name_clash.vi:32:5
    |
 32 |     server.mount(App())
    |     ^^^^^^^^^^^^^^^^^^^ documents `Box[Item]`
@@ -1087,11 +1087,11 @@ error[E0341]: two schemas are both called `Box_Item` in the API documentation
 
 `@auth.required` and parameters of type `auth.User` protect `@http` routes (docs/05, "Signing in with Google"). The error is `@auth.required` on a function that is not a route or with arguments, an `auth.User` parameter in a WebSocket handler, or two of them in one handler.
 
-From `tests/ui/auth_route_errors.wb`:
+From `tests/ui/auth_route_errors.vi`:
 
 ```text
 error[E0342]: `@auth.required` is on `helper`, which is not a route
- --> tests/ui/auth_route_errors.wb:5:1
+ --> tests/ui/auth_route_errors.vi:5:1
   |
 5 | @auth.required
   | ^^^^^^^^^^^^^^ no `@http` annotation
@@ -1107,11 +1107,11 @@ error[E0342]: `@auth.required` is on `helper`, which is not a route
 
 A variable that is assigned but never read.
 
-From `tests/ui/unused_variable.wb`:
+From `tests/ui/unused_variable.vi`:
 
 ```text
 warning[W0001]: variable `unused` is assigned but never used
- --> tests/ui/unused_variable.wb:2:5
+ --> tests/ui/unused_variable.vi:2:5
   |
 2 |     unused = 1
   |     ^^^^^^ assigned here
@@ -1125,11 +1125,11 @@ warning[W0001]: variable `unused` is assigned but never used
 
 Statements after a `return`.
 
-From `tests/ui/unreachable_code.wb`:
+From `tests/ui/unreachable_code.vi`:
 
 ```text
 warning[W0002]: unreachable code
- --> tests/ui/unreachable_code.wb:3:5
+ --> tests/ui/unreachable_code.vi:3:5
   |
 3 |     print("never")
   |     ^^^^^^^^^^^^^^ this never runs
@@ -1143,11 +1143,11 @@ warning[W0002]: unreachable code
 
 A `case` that can never match, because earlier cases cover everything it would.
 
-From `tests/ui/unreachable_case.wb`:
+From `tests/ui/unreachable_case.vi`:
 
 ```text
 warning[W0003]: this case can never match
- --> tests/ui/unreachable_case.wb:5:14
+ --> tests/ui/unreachable_case.vi:5:14
   |
 5 |         case 0:
   |              ^ covered by the cases above
@@ -1161,11 +1161,11 @@ warning[W0003]: this case can never match
 
 An `import` of a name the file never uses.
 
-From `tests/ui/module_privacy.wb`:
+From `tests/ui/module_privacy.vi`:
 
 ```text
 warning[W0004]: `open_acount` is imported but never used
- --> tests/ui/module_privacy.wb:2:52
+ --> tests/ui/module_privacy.vi:2:52
   |
 2 | from lib.accounts import Account, internal_helper, open_acount
   |                                                    ^^^^^^^^^^^ imported here

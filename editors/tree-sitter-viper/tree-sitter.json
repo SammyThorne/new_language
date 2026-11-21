@@ -1,0 +1,17 @@
+{
+  "grammars": [
+    {
+      "name": "viper",
+      "camelcase": "Viper",
+      "scope": "source.viper",
+      "path": ".",
+      "file-types": ["vi"],
+      "highlights": "queries/highlights.scm",
+      "injection-regex": "^viper$"
+    }
+  ],
+  "metadata": {
+    "version": "1.1.0",
+    "description": "Viper grammar for tree-sitter"
+  }
+}

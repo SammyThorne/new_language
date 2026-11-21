@@ -7,7 +7,7 @@ Batch programs (the default): each run's wall time.
 
     python3 bench/ab.py A B [--rounds 5]
 
-Servers built from bench/http/server.wb: requests per second on each endpoint of run.py.
+Servers built from bench/http/server.vi: requests per second on each endpoint of run.py.
 
     python3 bench/ab.py A B --server [--one-core] [--rounds 3] [--seconds 4] [--connections N]
                         [--endpoints /items,/plaintext] [--browser]
@@ -15,7 +15,7 @@ Servers built from bench/http/server.wb: requests per second on each endpoint of
 With `--one-core` each server gets one CPU and one worker (as one_core.py does) and the default is
 64 connections; otherwise it gets the six CPUs run.py gives it and 256 connections. Builds of A
 and B usually come from the same source compiled against two runtimes:
-`WEBY_RUNTIME=old/liblang_rt.a weby build --release ...`.
+`VIPER_RUNTIME=old/liblang_rt.a viper build --release ...`.
 
 Prints each side's median and range and B's change against A: for batch programs negative is
 faster, for servers positive is faster.
@@ -57,7 +57,7 @@ def serve(programs: dict[str, str], rounds: int) -> None:
     wanted = arg("--endpoints", "")
     endpoints = [e for e in ENDPOINTS if not wanted or e[0] in wanted.split(",")]
     cpus = "0" if one_core else SERVER_CPUS
-    env = dict(os.environ, **({"WEBY_WORKERS": "1"} if one_core else {}))
+    env = dict(os.environ, **({"VIPER_WORKERS": "1"} if one_core else {}))
     with tempfile.TemporaryDirectory() as out:
         load = Path(out) / "load"
         subprocess.run([find_go(), "build", "-o", load, HERE / "load.go"], check=True, env=dict(os.environ, GOTOOLCHAIN="local"))

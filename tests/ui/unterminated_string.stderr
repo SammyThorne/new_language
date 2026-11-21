@@ -1,9 +1,9 @@
 error[E0003]: unterminated string literal
- --> tests/ui/unterminated_string.wb:2:11
+ --> tests/ui/unterminated_string.vi:2:11
   |
 2 |     print("no closing quote)
   |           ^ string starts here
   |
   = help: close the string with a matching quote on the same line, or use `"""` for text spanning lines
 
-error: could not compile `tests/ui/unterminated_string.wb` due to 1 error
+error: could not compile `tests/ui/unterminated_string.vi` due to 1 error

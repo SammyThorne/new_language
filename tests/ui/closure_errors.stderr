@@ -1,5 +1,5 @@
 error[E0315]: cannot infer the types of this lambda's parameters
- --> tests/ui/closure_errors.wb:5:14
+ --> tests/ui/closure_errors.vi:5:14
   |
 5 |     double = lambda x: x * 2
   |              ^^^^^^^^^^^^^^^ parameter types unknown
@@ -7,7 +7,7 @@ error[E0315]: cannot infer the types of this lambda's parameters
   = help: use a lambda where a function type is expected, such as an argument, or define the function with `def` and type hints
 
 error[E0332]: cannot assign to `total`, which belongs to the enclosing function
- --> tests/ui/closure_errors.wb:8:9
+ --> tests/ui/closure_errors.vi:8:9
   |
 8 |         total = total + n
   |         ^^^^^ assigned inside a nested function
@@ -15,29 +15,29 @@ error[E0332]: cannot assign to `total`, which belongs to the enclosing function
   = help: a nested function can read the enclosing function's variables but not reassign them; keep changing state in a list or a struct field
 
 error[E0300]: this lambda takes 2 parameters, but `def(int) -> int` takes 1
- --> tests/ui/closure_errors.wb:9:17
+ --> tests/ui/closure_errors.vi:9:17
   |
 9 |     print(apply(lambda x, y: x + y, 1))
   |                 ^^^^^^^^^^^^^^^^^^ expected `def(int) -> int`
 
 error[E0300]: expected `int`, found `str`
-  --> tests/ui/closure_errors.wb:10:27
+  --> tests/ui/closure_errors.vi:10:27
    |
 10 |     print(apply(lambda x: "text", 1))
    |                           ^^^^^^ expected `int`, found `str`
 
 error[E0300]: `len` cannot take a `int`
-  --> tests/ui/closure_errors.wb:11:17
+  --> tests/ui/closure_errors.vi:11:17
    |
 11 |     print(apply(len, 1))
    |                 ^^^ expected a `str`, list or dict
 
 error[E0333]: a function value cannot take keyword arguments
-  --> tests/ui/closure_errors.wb:13:13
+  --> tests/ui/closure_errors.vi:13:13
    |
 13 |     print(g(x=1))
    |             ^ keyword argument
    |
    = help: function types only know the types of their parameters, not their names
 
-error: could not compile `tests/ui/closure_errors.wb` due to 6 errors
+error: could not compile `tests/ui/closure_errors.vi` due to 6 errors

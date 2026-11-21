@@ -1,9 +1,9 @@
 error[E0324]: `Key` implements `Hash` but not `Eq`, which `Hash` requires
- --> tests/ui/derive_requires_eq.wb:1:9
+ --> tests/ui/derive_requires_eq.vi:1:9
   |
 1 | @derive(Hash)
   |         ^^^^ `Hash` requires `Eq`
   |
   = help: add `Eq` to the `@derive(...)` list
 
-error: could not compile `tests/ui/derive_requires_eq.wb` due to 1 error
+error: could not compile `tests/ui/derive_requires_eq.vi` due to 1 error

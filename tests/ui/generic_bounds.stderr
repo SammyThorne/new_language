@@ -1,5 +1,5 @@
 error[E0316]: `T` has no method `to_str`
-  --> tests/ui/generic_bounds.wb:12:18
+  --> tests/ui/generic_bounds.vi:12:18
    |
 12 |     return value.to_str()
    |                  ^^^^^^ no such method
@@ -7,7 +7,7 @@ error[E0316]: `T` has no method `to_str`
    = help: `T` is a type parameter, so only the methods of its bounds are available; add a bound such as `T: Display`
 
 error[E0321]: cannot compare `T` values with `<`
-  --> tests/ui/generic_bounds.wb:15:12
+  --> tests/ui/generic_bounds.vi:15:12
    |
 15 |     return a < b
    |            ^^^^^ both sides are `T`
@@ -15,7 +15,7 @@ error[E0321]: cannot compare `T` values with `<`
    = help: add the bound `T: Ord` to the type parameter
 
 error[E0331]: `Point` does not implement `Ord`, which `largest` requires of `T`
-  --> tests/ui/generic_bounds.wb:18:11
+  --> tests/ui/generic_bounds.vi:18:11
    |
  4 | def largest[T: Ord](items: list[T]) -> T:
    |             - `T: Ord` is required here
@@ -25,4 +25,4 @@ error[E0331]: `Point` does not implement `Ord`, which `largest` requires of `T`
    |
    = help: implement `Ord` for `Point`, or derive it
 
-error: could not compile `tests/ui/generic_bounds.wb` due to 3 errors
+error: could not compile `tests/ui/generic_bounds.vi` due to 3 errors

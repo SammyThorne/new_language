@@ -1,5 +1,5 @@
 error[E0300]: expected `bytes`, found `str`
- --> tests/ui/crypto_errors.wb:6:28
+ --> tests/ui/crypto_errors.vi:6:28
   |
 6 |     digest = crypto.sha256("text")
   |                            ^^^^^^ expected `bytes`, found `str`
@@ -7,7 +7,7 @@ error[E0300]: expected `bytes`, found `str`
   = help: `text.encode()` makes `bytes` from a `str`
 
 error[E0300]: expected `bytes`, found `str`
- --> tests/ui/crypto_errors.wb:7:33
+ --> tests/ui/crypto_errors.vi:7:33
   |
 7 |     same = crypto.equal(digest, "x")
   |                                 ^^^ expected `bytes`, found `str`
@@ -15,7 +15,7 @@ error[E0300]: expected `bytes`, found `str`
   = help: `text.encode()` makes `bytes` from a `str`
 
 error[E0300]: expected `str`, found `bytes`
- --> tests/ui/crypto_errors.wb:8:18
+ --> tests/ui/crypto_errors.vi:8:18
   |
 8 |     shown: str = crypto.sha256("text".encode())
   |            --- expected because of this type hint
@@ -24,9 +24,9 @@ error[E0300]: expected `str`, found `bytes`
   = help: `data.hex()` writes `bytes` as hex digits; `data.decode()` gives the UTF-8 text, or `None`
 
 error[E0300]: expected `int`, found `str`
- --> tests/ui/crypto_errors.wb:9:37
+ --> tests/ui/crypto_errors.vi:9:37
   |
 9 |     print(same, shown, crypto.token("32"))
   |                                     ^^^^ expected `int`, found `str`
 
-error: could not compile `tests/ui/crypto_errors.wb` due to 4 errors
+error: could not compile `tests/ui/crypto_errors.vi` due to 4 errors

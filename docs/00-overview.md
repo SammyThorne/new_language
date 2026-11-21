@@ -2,13 +2,13 @@
 
 ## What we are building
 
-Weby is a statically typed, ahead-of-time compiled language for writing web backends. It reads like Python (indentation, colons, `def`, no braces or semicolons), organises code like Rust (structs, traits, `impl` blocks, enums, no inheritance), and runs like Go (native binary, garbage collected, cheap concurrent tasks, HTTP in the standard library).
+Viper is a statically typed, ahead-of-time compiled language for writing web backends. It reads like Python (indentation, colons, `def`, no braces or semicolons), organises code like Rust (structs, traits, `impl` blocks, enums, no inheritance), and runs like Go (native binary, garbage collected, cheap concurrent tasks, HTTP in the standard library).
 
 The compiler frontend is written in Rust and emits LLVM IR. A small runtime library, also in Rust, is linked into every program.
 
 ## A taste
 
-The snippets in these documents are Weby source, shown to pin down the design. They are not implementation code.
+The snippets in these documents are Viper source, shown to pin down the design. They are not implementation code.
 
 ```python
 import http
@@ -59,7 +59,7 @@ Everything in that example is checked at compile time: that `{id}` in the path h
 
 ## Goals, in priority order
 
-1. **Readability.** A Python programmer should be able to read a Weby service on day one. One obvious way to do each thing; little punctuation; no lifetime or ownership annotations.
+1. **Readability.** A Python programmer should be able to read a Viper service on day one. One obvious way to do each thing; little punctuation; no lifetime or ownership annotations.
 2. **Speed.** Much faster than CPython from the first milestone; within reach of Go on HTTP and JSON workloads by the end of the roadmap.
 3. **Web backend batteries.** REST routing, WebSockets, JSON and concurrency are in the standard library and designed together.
 4. **Trait polymorphism.** Structs plus traits are the only way to get polymorphic behaviour. There are no classes and no inheritance.
@@ -79,7 +79,7 @@ Everything in that example is checked at compile time: that `{id}` in the path h
 ## The plan on one page
 
 ```
- .wb source
+ .vi source
      │
      ▼
  ┌────────┐  tokens with    ┌────────┐  AST   ┌──────────┐  typed HIR  ┌────────────────┐
@@ -140,7 +140,7 @@ Confirmed by you on 2026-11-18. Reasoning and rejected alternatives are in [08](
 
 | # | Decision | Record |
 |---|---|---|
-| 1 | The language is called **Weby**, source files end in `.wb`, the CLI is `weby`. Still changeable: a rename touches one small crate and the docs ([03](03-compiler-architecture.md#renaming-the-language)) | D14 |
+| 1 | The language is called **Viper**, source files end in `.vi`, the CLI is `viper`. Still changeable: a rename touches one small crate and the docs ([03](03-compiler-architecture.md#renaming-the-language)) | D14 |
 | 2 | Memory is managed by an automatic garbage collector. Matching C or Rust is not a goal | D3 |
 | 3 | Variables are declared by first assignment (`x = 5`), with no `let` or `var` | D11 |
 | 4 | Errors are `Result` values propagated with `?`, not `try`/`except` | D5 |

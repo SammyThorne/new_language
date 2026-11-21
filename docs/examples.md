@@ -1,6 +1,6 @@
-# Weby by example
+# Viper by example
 
-This page teaches the language through short programs, from "hello" to a JSON web service. It assumes you can already program, preferably in Python: most of the syntax will look familiar, and the page points out where Weby differs.
+This page teaches the language through short programs, from "hello" to a JSON web service. It assumes you can already program, preferably in Python: most of the syntax will look familiar, and the page points out where Viper differs.
 
 Every program with a `def main():` on this page is compiled by the test suite. Where an output block follows a program, the test runs it and checks the output is exactly what is printed here. The server, database and network examples are only compiled, because they wait for connections. So everything below works as shown.
 
@@ -42,7 +42,7 @@ compiled.
 
 ## 1. Running a program
 
-A program is a `.wb` file with a `main` function. Code outside functions is not allowed, apart from declarations, so the program always starts in `main`.
+A program is a `.vi` file with a `main` function. Code outside functions is not allowed, apart from declarations, so the program always starts in `main`.
 
 ```python
 def main():
@@ -53,14 +53,14 @@ def main():
 Hello, world!
 ```
 
-Save it as `hello.wb` and run it. `weby run` compiles to a temporary executable and runs it; `weby build` leaves the executable behind.
+Save it as `hello.vi` and run it. `viper run` compiles to a temporary executable and runs it; `viper build` leaves the executable behind.
 
 ```bash
-weby run hello.wb
+viper run hello.vi
 ```
 
 ```bash
-weby build hello.wb --release -o hello
+viper build hello.vi --release -o hello
 ```
 
 Debug builds compile faster and check more. `--release` turns on LLVM's optimisations, and is what you deploy and benchmark. Both produce one native executable with no runtime to install.
@@ -714,10 +714,10 @@ Mistakes in the program itself, such as an index out of range, a missing dict ke
 
 ```text
 panic: index 10 is out of range for a list of length 3
-  --> shop.wb:3:12
+  --> shop.vi:3:12
 backtrace:
-    pick at shop.wb:3:18
-    main at shop.wb:6:16
+    pick at shop.vi:3:18
+    main at shop.vi:6:16
 ```
 
 In a web server, a panic in one handler becomes a 500 response and the server carries on.
@@ -981,18 +981,18 @@ countdown 1
 
 ## 14. Modules and packages
 
-Each file is a module. `import a.b` loads `a/b.wb` relative to the main file, and `from a.b import name` imports single names. Two keywords control what other files can see. A top-level declaration is private to its file unless it is marked `pub`. Fields and methods are visible wherever their type is, unless marked `priv`. A single-file program never needs either.
+Each file is a module. `import a.b` loads `a/b.vi` relative to the main file, and `from a.b import name` imports single names. Two keywords control what other files can see. A top-level declaration is private to its file unless it is marked `pub`. Fields and methods are visible wherever their type is, unless marked `priv`. A single-file program never needs either.
 
 A project laid out as:
 
 ```text
-main.wb
+main.vi
 calc/
-    syntax.wb
-    parser.wb
+    syntax.vi
+    parser.vi
 ```
 
-`calc/syntax.wb`:
+`calc/syntax.vi`:
 
 ```python
 pub enum Expr:
@@ -1014,9 +1014,9 @@ pub def show(e: Expr) -> str:
             return f"({show(left)} + {show(right)})"
 ```
 
-`calc/parser.wb` starts with `from calc.syntax import Expr, ParseError` and defines `pub def parse(text: str) -> Result[Expr]`.
+`calc/parser.vi` starts with `from calc.syntax import Expr, ParseError` and defines `pub def parse(text: str) -> Result[Expr]`.
 
-`main.wb`:
+`main.vi`:
 
 <!-- not compiled: imports files that are not on this page -->
 ```python
@@ -1027,7 +1027,7 @@ def main():
     print(syntax.show(parse("1 + 2").unwrap()))
 ```
 
-Standard library modules are imported the same way: `import json`, `import http`. For dependencies from git or another folder, a `weby.toml` next to the main file lists them; see the [README](../README.md#building-and-running). `weby fetch` downloads them and records their exact commits in `weby.lock`.
+Standard library modules are imported the same way: `import json`, `import http`. For dependencies from git or another folder, a `viper.toml` next to the main file lists them; see the [README](../README.md#building-and-running). `viper fetch` downloads them and records their exact commits in `viper.lock`.
 
 ## 15. Files, the environment and `with`
 
@@ -1567,11 +1567,11 @@ slept at least 10 ms: True
 
 `re` has the usual Perl-style syntax, including named groups, but no backreferences or lookaround. That is what lets it guarantee matching in time linear in the text, so a pattern can't make a server spin. A compiled `re.Regex` can be shared between tasks. Patterns are ordinary strings, so a raw string, `r"\d+"`, saves doubling the backslashes.
 
-`log` writes one line per message to standard error, with a UTC timestamp and the level: `debug`, `info`, `warn` or `error`. The default level is `info`. `log.set_level` changes it, as does the `WEBY_LOG` environment variable.
+`log` writes one line per message to standard error, with a UTC timestamp and the level: `debug`, `info`, `warn` or `error`. The default level is `info`. `log.set_level` changes it, as does the `VIPER_LOG` environment variable.
 
 ## 23. Writing tests
 
-Mark a function `@test` and run `weby test`. A file of tests, `adder.wb`: Each test runs in its own task, so a panicking test fails without stopping the others. `assert condition, message` fails a test. A test that returns `Result[None]` can use `?`, and fails if it returns an error.
+Mark a function `@test` and run `viper test`. A file of tests, `adder.vi`: Each test runs in its own task, so a panicking test fails without stopping the others. `assert condition, message` fails a test. A test that returns `Result[None]` can use `?`, and fails if it returns an error.
 
 ```python
 def add(a: int, b: int) -> int:
@@ -1592,11 +1592,11 @@ def parses_what_it_prints() -> Result[None]:
 ```
 
 ```bash
-weby test
+viper test
 ```
 
 ```text
-running 3 tests in ./adder.wb
+running 3 tests in ./adder.vi
 test adds_small_numbers ... ok
 test adds_negative_numbers ... ok
 test parses_what_it_prints ... ok
@@ -1604,27 +1604,27 @@ test parses_what_it_prints ... ok
 test result: ok. 3 passed; 0 failed
 ```
 
-`weby test` with no arguments runs the tests in every `.wb` file under the current folder. `--filter text` runs only the tests whose names contain `text`.
+`viper test` with no arguments runs the tests in every `.vi` file under the current folder. `--filter text` runs only the tests whose names contain `text`.
 
 ## 24. Tools
 
 | Command | Does |
 |---|---|
-| `weby run file.wb` | Compile and run |
-| `weby build file.wb [-o out] [--release]` | Compile to an executable |
-| `weby check file.wb` | Report errors without generating code (fast) |
-| `weby test [paths] [--filter text]` | Run `@test` functions |
-| `weby fmt [paths] [--check]` | Format files in the standard layout |
-| `weby fetch [--update]` | Fetch git dependencies and update `weby.lock` |
-| `weby explain E0300` | What an error or warning code means, with an example and what to do ([errors.md](errors.md) has them all) |
-| `weby lsp` | The language server: diagnostics, hover, go to definition, completion, formatting |
-| `weby build --emit=tokens\|ast\|hir\|llvm-ir\|obj file.wb` | Show an intermediate form |
+| `viper run file.vi` | Compile and run |
+| `viper build file.vi [-o out] [--release]` | Compile to an executable |
+| `viper check file.vi` | Report errors without generating code (fast) |
+| `viper test [paths] [--filter text]` | Run `@test` functions |
+| `viper fmt [paths] [--check]` | Format files in the standard layout |
+| `viper fetch [--update]` | Fetch git dependencies and update `viper.lock` |
+| `viper explain E0300` | What an error or warning code means, with an example and what to do ([errors.md](errors.md) has them all) |
+| `viper lsp` | The language server: diagnostics, hover, go to definition, completion, formatting |
+| `viper build --emit=tokens\|ast\|hir\|llvm-ir\|obj file.vi` | Show an intermediate form |
 
 Compiler messages show the source and usually suggest a fix:
 
 ```text
 error[E0317]: a condition must be a `bool`, found `int`
- --> shop.wb:3:8
+ --> shop.vi:3:8
   |
 3 |     if len(items):
   |        ^^^^^^^^^^ has type `int`
@@ -1636,7 +1636,7 @@ Programs include debug line information for their own code, so `gdb` and `perf` 
 
 ## 25. Coming from Python
 
-| In Python | In Weby |
+| In Python | In Viper |
 |---|---|
 | `class User:` | `struct User:` for data, `impl User:` for methods, `trait` for interfaces |
 | Inheritance | Traits with default methods; a trait can require other traits |

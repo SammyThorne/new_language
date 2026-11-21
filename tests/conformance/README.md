@@ -8,7 +8,7 @@ results are in docs/07, "Protocol conformance".
 
 ```bash
 git clone --depth 1 https://github.com/nst/JSONTestSuite /tmp/JSONTestSuite
-weby run --release tests/conformance/json_suite.wb /tmp/JSONTestSuite/test_parsing
+viper run --release tests/conformance/json_suite.vi /tmp/JSONTestSuite/test_parsing
 ```
 
 It prints how many `y_` (must accept), `n_` (must reject) and `i_` (either) files were accepted
@@ -36,12 +36,12 @@ ssl` optional (`try`/`except ImportError: ssl = None`).
 Then start the echo server and point the fuzzing client at it:
 
 ```bash
-weby build --release tests/conformance/ws_echo.wb -o /tmp/ws_echo
+viper build --release tests/conformance/ws_echo.vi -o /tmp/ws_echo
 /tmp/ws_echo 9001 &
 cat > fuzzingclient.json <<'JSON'
 {
   "outdir": "./reports/servers",
-  "servers": [{"agent": "weby", "url": "ws://127.0.0.1:9001/"}],
+  "servers": [{"agent": "viper", "url": "ws://127.0.0.1:9001/"}],
   "cases": ["*"],
   "exclude-cases": ["12.*", "13.*"],
   "exclude-agent-cases": {}

@@ -1,6 +1,6 @@
-name = "Weby"
-grammar = "weby"
-path_suffixes = ["wb"]
+name = "Viper"
+grammar = "viper"
+path_suffixes = ["vi"]
 line_comments = ["# "]
 tab_size = 4
 hard_tabs = false

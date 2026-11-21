@@ -1,9 +1,9 @@
 error[E0200]: unknown name `prnt`
- --> tests/ui/unknown_name.wb:2:5
+ --> tests/ui/unknown_name.vi:2:5
   |
 2 |     prnt("hi")
   |     ^^^^ not defined
   |
   = help: did you mean `print`?
 
-error: could not compile `tests/ui/unknown_name.wb` due to 1 error
+error: could not compile `tests/ui/unknown_name.vi` due to 1 error

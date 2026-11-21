@@ -4,7 +4,7 @@
 # expect: 404 False
 # expect: 7
 # expect: k1 tester abc==
-# expect: k2 weby no session
+# expect: k2 viper no session
 # expect: 400 {"error":"missing header `Api-Key`"}
 # expect: client error: no host in `http://`
 # expect: `ftp://x` is not an http:// or https:// URL

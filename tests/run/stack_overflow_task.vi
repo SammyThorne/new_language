@@ -3,8 +3,8 @@
 # expect: before
 # expect-exit: 101
 # expect-stderr: panic: stack overflow in a task
-# expect-stderr: WEBY_TASK_STACK
-# env: WEBY_TASK_STACK=65536
+# expect-stderr: VIPER_TASK_STACK
+# env: VIPER_TASK_STACK=65536
 def deep(n: int, items: list[int]) -> int:
     items.append(n)
     return deep(n + 1, items) + len(items)

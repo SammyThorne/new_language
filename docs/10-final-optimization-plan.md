@@ -116,7 +116,7 @@ Boehm's parallel marker is compiled into `libgc.so.1`, but marker threads only s
 
 ### 2.5 Generated code
 
-From `weby build --release --emit llvm-ir` on `bench/http/server.wb` and `bench/sieve.wb`:
+From `viper build --release --emit llvm-ir` on `bench/http/server.vi` and `bench/sieve.vi`:
 - JSON encoding emits one out-of-line `lrt_builder_push` call per constant piece. Keys are merged with their punctuation (`{"id":`), but neighbours such as `]` then `}` are separate calls.
 - The JSON output builder starts empty.
 - A comprehension over `range(20)` calls `lrt_list_new(desc, 0)`. A list literal calls `lrt_list_new(desc, n)` and then does a capacity check for each element.
@@ -174,7 +174,7 @@ cargo fmt --check
 
 **How to measure:**
 1. **Counts first.** Every item below names a count that must move: `recv` per request, `malloc` per request, collector calls per request, bytes allocated per request. Counts are exact on this machine; timings are not. An item whose count moved as designed is done even if the timing gain is inside the noise.
-2. **Timings by interleaved A/B.** Keep the baseline runtime: copy `target/release/liblang_rt.a` aside at the start of each milestone, and build the baseline server with `WEBY_RUNTIME=<that copy>`. For compiler changes, keep the baseline compiler binary too. Run A and B alternately (A B B A A B), three rounds or more of 5 s, pinned as in section 2. Compare medians. Milestone 1 automates this.
+2. **Timings by interleaved A/B.** Keep the baseline runtime: copy `target/release/liblang_rt.a` aside at the start of each milestone, and build the baseline server with `VIPER_RUNTIME=<that copy>`. For compiler changes, keep the baseline compiler binary too. Run A and B alternately (A B B A A B), three rounds or more of 5 s, pinned as in section 2. Compare medians. Milestone 1 automates this.
 3. **Never benchmark while building or testing.**
 4. **Check peak memory** (`bench/run.py` and `bench/http/run.py` report it) whenever an item changes allocation.
 5. **Drop what does not pay.** An item that shows neither a count change nor 2% in A/B is reverted, and the decision record says so. Several items below are marked optional for this reason.
@@ -190,7 +190,7 @@ cargo fmt --check
 Build these first; later milestones use them as exit criteria.
 
 - **`bench/profile/count.c`**, the call-counting shim in appendix A, and **`bench/http/counts.py`**, which runs each endpoint under it and prints the table of section 2.2. Document both in `bench/README.md`.
-- **Bytes allocated.** With `WEBY_ALLOC_STATS=1`, print `GC_get_total_bytes()` and `GC_get_gc_no()` to standard error at exit (`gc.rs`; both functions are exported by `libgc`). No cost on any hot path. `counts.py` divides by the request count.
+- **Bytes allocated.** With `VIPER_ALLOC_STATS=1`, print `GC_get_total_bytes()` and `GC_get_gc_no()` to standard error at exit (`gc.rs`; both functions are exported by `libgc`). No cost on any hot path. `counts.py` divides by the request count.
 - **`bench/ab.py`.** Takes two executables (two servers, or two batch programs), runs them interleaved in alternating order with the pinning of section 2, and prints each side's median, the ratio and the spread. For servers it takes the endpoint list from `bench/http/run.py`.
 - **A browser-like load mode.** `bench/http/load.go` gets a flag that adds about twelve typical request headers, about 600 bytes (`User-Agent`, `Accept`, `Accept-Language`, `Accept-Encoding`, `Cookie`, `Referer`, `Cache-Control`, the `Sec-Fetch-*` set). `bench/http/run.py --browser` passes it. The current load sends only `Host`, which understates parsing cost. Record the baseline in this mode before milestone 2.
 

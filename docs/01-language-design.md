@@ -1,8 +1,8 @@
 # 01 — Language design
 
-This document defines what Weby source looks like and what it means. The type system has its own document ([02](02-type-system-and-traits.md)). Each feature is tagged with the milestone that introduces it ([06](06-roadmap.md)).
+This document defines what Viper source looks like and what it means. The type system has its own document ([02](02-type-system-and-traits.md)). Each feature is tagged with the milestone that introduces it ([06](06-roadmap.md)).
 
-Code blocks here are Weby. They are highlighted as Python because the surface syntax is close.
+Code blocks here are Viper. They are highlighted as Python because the surface syntax is close.
 
 ## Design rules
 
@@ -13,7 +13,7 @@ Code blocks here are Weby. They are highlighted as Python because the surface sy
 
 ## Lexical structure (M1)
 
-- Source files are UTF-8 with the extension `.wb`.
+- Source files are UTF-8 with the extension `.vi`.
 - Blocks are introduced by `:` and delimited by indentation. Indentation is spaces only; a tab in leading whitespace is a compile error. The amount is free but must be consistent within a block; the formatter will use four.
 - A statement ends at the end of the line. Inside `()`, `[]` or `{}` newlines and indentation are ignored, so long calls and literals wrap freely. There is no backslash continuation.
 - Comments start with `#`. A `"""docstring"""` as the first statement of a function, struct or trait is kept for tooling.
@@ -32,7 +32,7 @@ trait True while with
 
 ```python
 count = 0                # declares count: int
-name = "weby"            # declares name: str
+name = "viper"            # declares name: str
 ratio: float = 1         # annotation when the literal alone would infer something else
 items: list[int] = []    # annotation required: an empty literal has no element type
 
@@ -59,11 +59,11 @@ There are no mutable globals. Shared state is created in `main` and passed down,
 
 ## Built-in types
 
-Weby includes Python's built-in types under Python's names, written the way Python type hints write them. User-defined types are structs, enums and traits.
+Viper includes Python's built-in types under Python's names, written the way Python type hints write them. User-defined types are structs, enums and traits.
 
-| Python type | In Weby | Notes | Milestone |
+| Python type | In Viper | Notes | Milestone |
 |---|---|---|---|
-| `int` | `int` | 64-bit signed. Python's `int` is unbounded; Weby's wraps around on overflow, as Go's does | M1 |
+| `int` | `int` | 64-bit signed. Python's `int` is unbounded; Viper's wraps around on overflow, as Go's does | M1 |
 | `float` | `float` | 64-bit IEEE, the same as Python | M1 |
 | `bool` | `bool` | `True` and `False`. Not a kind of `int`: `True + 1` is a type error | M1 |
 | `str` | `str` | Immutable, UTF-8 | M1 |
@@ -80,7 +80,7 @@ Weby includes Python's built-in types under Python's names, written the way Pyth
 | `memoryview` | not planned | Slices of `bytes` already share the underlying data | |
 | `object`, `type`, `Any` | not available | Every value has exactly one static type | |
 
-Types Weby adds:
+Types Viper adds:
 
 | Type | Meaning | Python equivalent |
 |---|---|---|
@@ -90,7 +90,7 @@ Types Weby adds:
 | `i8 i16 i32 u8 u16 u32 u64 f32` | Sized numerics for binary protocols and FFI (M5) | (none) |
 | Structs, enums, traits | User-defined types | classes |
 
-Where Weby differs from Python:
+Where Viper differs from Python:
 
 - **Collections are homogeneous.** `[1, "a"]` is a type error. Mixed data uses an enum, a trait as the element type, or `json.Value`.
 - **`int` has a fixed size.**
@@ -408,32 +408,32 @@ requests.increment()
 (M5; not required for the first vertical slice)
 
 ```python
-# models.wb
+# models.vi
 pub struct User:
     id: int
     name: str
-    priv password_hash: str              # hidden outside models.wb
+    priv password_hash: str              # hidden outside models.vi
 
 impl User:
     def check_password(self, attempt: str) -> bool:      # visible wherever User is
         return hash_password(attempt) == self.password_hash
 
-    priv def rehash(self):               # hidden outside models.wb
+    priv def rehash(self):               # hidden outside models.vi
         ...
 
 pub def load_user(id: int) -> Result[User]:
     ...
 
-def hash_password(text: str) -> str:     # no `pub`: private to models.wb
+def hash_password(text: str) -> str:     # no `pub`: private to models.vi
     ...
 ```
 
 ```python
-# main.wb
+# main.vi
 import http
-import models                            # models.wb next to this file
+import models                            # models.vi next to this file
 from models import User, load_user
-import services.billing as billing       # services/billing.wb
+import services.billing as billing       # services/billing.vi
 ```
 
 - One file is one module. A directory groups modules; there is no `__init__` file.
@@ -476,7 +476,7 @@ def parses() -> Result[None]:
     assert n == 12
 ```
 
-`weby test [paths]` finds the files with `@test` functions, builds each with a generated runner instead of its `main`, and runs every test in its own task, so a failing test does not stop the others. `--filter text` runs the tests whose names contain `text`. A file with tests is still an ordinary program: `weby run` ignores them.
+`viper test [paths]` finds the files with `@test` functions, builds each with a generated runner instead of its `main`, and runs every test in its own task, so a failing test does not stop the others. `--filter text` runs the tests whose names contain `text`. A file with tests is still an ordinary program: `viper run` ignores them.
 
 ## Annotations (M3 onward)
 
@@ -490,7 +490,7 @@ def parses() -> Result[None]:
 | `@http.get(path)`, `@http.post`, `@http.put`, `@http.patch`, `@http.delete` on a function or method | Declare an HTTP route. Parameters are bound from the request and checked at compile time ([05](05-standard-library.md#http)) | M8 |
 | `@http.ws(path)` | Declare a WebSocket endpoint | M9 |
 | `@extern("c_symbol")` on a bodiless `def` | Bind a C function | M5 |
-| `@test` on a top-level `def` that takes nothing and returns nothing or `Result[None]` | A test, run by `weby test` in its own task. It fails if it panics (a failed `assert`) or returns `Err` | M11 |
+| `@test` on a top-level `def` that takes nothing and returns nothing or `Result[None]` | A test, run by `viper test` in its own task. It fails if it panics (a failed `assert`) or returns `Err` | M11 |
 
 ## Deliberately left out
 

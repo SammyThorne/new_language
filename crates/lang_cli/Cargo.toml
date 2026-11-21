@@ -9,7 +9,7 @@ publish.workspace = true
 # The executable's name is the one place outside `lang_names` that spells the language's
 # name; see "Renaming the language" in docs/03-compiler-architecture.md.
 [[bin]]
-name = "weby"
+name = "viper"
 path = "src/main.rs"
 
 [dependencies]

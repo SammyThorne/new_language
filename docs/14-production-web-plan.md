@@ -474,7 +474,7 @@ One HTML page, one stylesheet and one script, embedded in the runtime like the d
 - **`METRICS_PASSWORD_HASH`** is an alternative to a plaintext password in the environment.
   - Its format is `pbkdf2-sha256$<iterations>$<salt b64>$<hash b64>`.
   - `ring::pbkdf2` is already a dependency.
-  - `weby hash-password` prints one, prompting without echo. The default is 600,000 iterations, OWASP's 2023 figure for PBKDF2-SHA256.
+  - `viper hash-password` prints one, prompting without echo. The default is 600,000 iterations, OWASP's 2023 figure for PBKDF2-SHA256.
   - A verified hash is cached for the process (keyed by the HMAC of the presented password), so the dashboard's polling does not pay for PBKDF2 each time.
 - **Failed attempts:** after 10 failures from one `client_ip` in a minute, that address gets 429s for a minute, with a `warn` log line. This uses the rate limiter of 4.12 once it exists; before then, it uses a small fixed table in the metrics module.
 - **Plain HTTP:** if the server is not TLS and the request did not come through a trusted proxy with `X-Forwarded-Proto: https`, a warning is logged once that Basic credentials are crossing plain HTTP. Loopback addresses are exempt.
@@ -678,7 +678,7 @@ return pages.render("home.html", {"user": user, "photos": photos})     # a ToJso
 - **Bookkeeping:** applied files are recorded in `schema_migrations(version, name, checksum, applied_at)`. A changed checksum on an applied file is an error: "migration 0003_add_tags.sql was edited after it ran".
 - **Locking:** on Postgres, `pg_advisory_lock` keeps two instances starting together from both migrating. On SQLite, the write lock does this.
 - **Forward only** (decision 11). `migrate.status(db, dir)` lists what is pending.
-- **The CLI:** `weby migrate new <name>` creates the next numbered file, and `weby migrate status` reports.
+- **The CLI:** `viper migrate new <name>` creates the next numbered file, and `viper migrate status` reports.
 - **Embedding:** migrations are files beside the program. Embedding them in the binary needs a compile-time `embed` feature, which is out of scope (section 7).
 
 ### 4.16 Background jobs and scheduling
@@ -849,7 +849,7 @@ Each milestone follows docs/11's rules:
   2. `cargo clippy --workspace --offline --all-targets -- -D warnings`
   3. `cargo fmt --check`
   4. `sh tests/stress.sh 300`
-  5. `python3 site/check_examples.py --weby target/debug/weby`
+  5. `python3 site/check_examples.py --viper target/debug/viper`
   6. `python3 bench/http/counts.py --check`, run alone
   7. `bench/run.py --check`, when the request path changed
 - **Records:**
@@ -883,7 +883,7 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
 - The format variable takes the language's prefix, like `LOG`.
 - The access line has no route pattern or response size yet; they come with milestone 8. A request whose handler panics gets no access line; the panic report stands for it.
 - `trusted_proxies` is process-wide, set by `bind`, because a request has no reference to its server.
-- Tests: `tests/run/http_binary_and_client.wb` (binary bodies both ways, `client_ip` with and without a trusted proxy and with a forged header, request IDs kept and replaced, `os.setenv`); `crates/lang_cli/tests/logging.rs` with `tests/http/request_log.wb` (text and JSON lines, the ID in a spawned task, after an error and after a panic, lines arriving while the server runs and in order at exit); unit tests for the line formats, the ID generator and the `X-Forwarded-For` walk.
+- Tests: `tests/run/http_binary_and_client.vi` (binary bodies both ways, `client_ip` with and without a trusted proxy and with a forged header, request IDs kept and replaced, `os.setenv`); `crates/lang_cli/tests/logging.rs` with `tests/http/request_log.vi` (text and JSON lines, the ID in a spawned task, after an error and after a panic, lines arriving while the server runs and in order at exit); unit tests for the line formats, the ID generator and the `X-Forwarded-For` walk.
 - A task's request context is an optional counted string (two words), not an inline buffer: a 129-byte inline ID made every task larger whether or not it served a request.
 - Gates: the workspace tests, clippy, `cargo fmt --check`, `tests/stress.sh 300` and the site's examples pass. `bench/run.py --check` passes (spawn 14 MB, as recorded). `bench/http/counts.json` was re-recorded, with the owner's approval, for one change: 16 more bytes allocated per request on every endpoint (`/plaintext` 240 to 256), with the same number of allocations. It is `Response`'s new `data` field, which moves a response from the 64-byte size class to the 80-byte one; even a one-word field does, and the other ways to carry binary bodies (raw bytes in `body`, a hidden header) break `body`'s guarantee of valid text. This is the one exception to rule 1 of section 4.20 so far.
 
@@ -901,7 +901,7 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
 - Group-scoped preflights needed a router change: a group route with middleware keeps that middleware around a 405, and an `OPTIONS` request with `Access-Control-Request-Method` that no route accepts goes to it (D106).
 - Headers for error responses: middleware records them on the request, and `Server.handle` adds them to the response it makes from an `Err`. `request_log`'s `X-Request-Id` now uses the same path.
 - A preflight from a refused origin gets a 204 with only `Vary`; setup also panics for an origin with a path and for no origins.
-- Tests: `tests/run/http_cors.wb` (preflights allowed and refused, actual requests, `Vary` merged with the handler's, errors, `*`, credentials, `allow`, a group policy, a group without one), two setup-panic programs, and a checker unit test. The browser check ran in the built-in browser: a page on 127.0.0.1:8601 called an API on :8602 whose `/api` group allowed it; the preflighted `POST` with a custom header succeeded and read the exposed `X-Request-Id`, a 404 was readable, and a route outside the group was blocked.
+- Tests: `tests/run/http_cors.vi` (preflights allowed and refused, actual requests, `Vary` merged with the handler's, errors, `*`, credentials, `allow`, a group policy, a group without one), two setup-panic programs, and a checker unit test. The browser check ran in the built-in browser: a page on 127.0.0.1:8601 called an API on :8602 whose `/api` group allowed it; the preflighted `POST` with a custom header succeeded and read the exposed `X-Request-Id`, a 404 was readable, and a route outside the group was blocked.
 - Gates: all pass, with the counts unchanged.
 
 #### Milestone 3: static files (about 2.5 days)
@@ -921,7 +921,7 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
 - Only IMF-fixdate HTTP dates are read; the obsolete forms count as no date.
 - Also built: a directory named without its trailing `/` is redirected (301); the fallback is sent with `Cache-Control: no-cache`; pre-compressed files are skipped for range requests; `If-Match` and `If-Unmodified-Since` (412); setup panics for a root that is not a readable directory; static routes are left out of the API documentation.
 - The response a handler returns stays ordinary: the runtime sends the file only if the response still has the file's status and no body, so middleware headers apply and middleware can replace it. Test requests get the bytes in the response, so a test `HEAD` returns a body that a real one does not.
-- Tests: `tests/run/http_static.wb` (content types, indexes, the redirect, the refusals, every precondition case, ranges, `If-Range`, `br` and `gzip` with q-values, `immutable`, the fallback beside an API route); `crates/lang_cli/tests/static_files.rs` with `tests/http/static_server.wb`, over raw sockets: thirteen escapes (`..`, `%2e%2e`, `%2F`, `..%5C`, NUL, `//`, two symbolic links out, dotfiles plain and encoded, a 6 KB path) that leak nothing, a symbolic link inside the root, `HEAD` then a range on the same connection, a 304, a 3 MB range of a 20 MiB file, a client that leaves mid-file, and six 20 MiB downloads with resident memory flat (8.4 MiB) and a collected heap of 0.7 MiB at exit; unit tests for path checks, ranges, validators, encodings and HTTP dates.
+- Tests: `tests/run/http_static.vi` (content types, indexes, the redirect, the refusals, every precondition case, ranges, `If-Range`, `br` and `gzip` with q-values, `immutable`, the fallback beside an API route); `crates/lang_cli/tests/static_files.rs` with `tests/http/static_server.vi`, over raw sockets: thirteen escapes (`..`, `%2e%2e`, `%2F`, `..%5C`, NUL, `//`, two symbolic links out, dotfiles plain and encoded, a 6 KB path) that leak nothing, a symbolic link inside the root, `HEAD` then a range on the same connection, a 304, a 3 MB range of a 20 MiB file, a client that leaves mid-file, and six 20 MiB downloads with resident memory flat (8.4 MiB) and a collected heap of 0.7 MiB at exit; unit tests for path checks, ranges, validators, encodings and HTTP dates.
 - Gates: all pass, with the counts unchanged.
 
 #### Milestone 4: compression (about 1 day; needs decision 1)
@@ -941,7 +941,7 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
 - `Accept-Encoding` is parsed by the runtime (`lrt_http_gzip_choice`), sharing the static file server's parser. `identity;q=0` (or `*;q=0`) means a non-empty body is compressed whatever its size and type.
 - Also: `Cache-Control: no-transform` is honoured; `Vary` is added to every response that could be compressed, not only compressed ones; a body made by `http.binary` is compressed like a text one; errors returned as `Err` and `server.static` files are left alone (D108 says why); setup panics for a level outside 0 to 9 or a negative `min_size`.
 - The client sends `Accept-Encoding: gzip` only when the caller sets no `Accept-Encoding`, and then decodes, dropping `Content-Encoding` and `Content-Length`.
-- Tests: `tests/run/http_compress.wb` (gzip with `Vary` and a weak `ETag`; bodies under `min_size`, other types, refused and absent encodings; q-values, `*` and `identity;q=0`; responses with their own encoding, 304 and 206; binary bodies; a round trip through the client over a socket, with and without its own header; a static file), a setup-panic program, and unit tests for the CRC, round trips at four levels, two members, a body made by `gzip -9 -n`, corrupt, truncated and oversized bodies, and the encoding choice.
+- Tests: `tests/run/http_compress.vi` (gzip with `Vary` and a weak `ETag`; bodies under `min_size`, other types, refused and absent encodings; q-values, `*` and `identity;q=0`; responses with their own encoding, 304 and 206; binary bodies; a round trip through the client over a socket, with and without its own header; a static file), a setup-panic program, and unit tests for the CRC, round trips at four levels, two members, a body made by `gzip -9 -n`, corrupt, truncated and oversized bodies, and the encoding choice.
 - Gates: all pass, with the counts unchanged (`http.compress` is middleware; servers without it run the same code).
 
 ### Track B: dates, times and UUIDs
@@ -1000,7 +1000,7 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
 
 - The history ring and its sampling thread; the recent-errors and slowest-requests records; `data.json`.
 - The embedded page, stylesheet and script, as in 4.8, with `lrt_dashboard_asset` and ETags.
-- `METRICS_PASSWORD_HASH` and `weby hash-password`.
+- `METRICS_PASSWORD_HASH` and `viper hash-password`.
 - Lock-out after failed attempts. The warning about plain HTTP.
 - **Tests:**
   - The page, the stylesheet and the script are absent from an optimised binary that does not call `server.metrics`, and present in one that does. Search the binary for a phrase of the script, as `carries_viewer` does in `crates/lang_cli/tests/executables.rs`.
@@ -1114,7 +1114,7 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
 #### Milestone 18: migrations (about 2 days; after 17)
 
 - `migrate.apply` and `status` for both databases; checksums; the advisory lock; `no-transaction`.
-- `weby migrate new` and `status`.
+- `viper migrate new` and `status`.
 - **Tests:**
   - Applying twice does nothing the second time.
   - An edited file is an error.

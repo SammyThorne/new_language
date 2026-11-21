@@ -1,12 +1,12 @@
 error[E0300]: `_c` already has type `Circle`
-  --> tests/ui/trait_type_pattern_errors.wb:29:34
+  --> tests/ui/trait_type_pattern_errors.vi:29:34
    |
 29 |         case Circle(_c) | Square(_c):
    |                     -- `_c` was declared as `Circle` here
    |                                  ^^ the pattern gives `Square`
 
 error[E0329]: `Unrelated` does not implement `Shape`, so a `Shape` is never one
-  --> tests/ui/trait_type_pattern_errors.wb:31:14
+  --> tests/ui/trait_type_pattern_errors.vi:31:14
    |
 31 |         case Unrelated(u):
    |              ^^^^^^^^^^^^ this case can never match
@@ -14,7 +14,7 @@ error[E0329]: `Unrelated` does not implement `Shape`, so a `Shape` is never one
    = help: implement `Shape` for `Unrelated`, or remove the case
 
 error[E0329]: `Wrapper` is generic, and a pattern on a `Shape` cannot name its type arguments yet
-  --> tests/ui/trait_type_pattern_errors.wb:33:14
+  --> tests/ui/trait_type_pattern_errors.vi:33:14
    |
 33 |         case Wrapper(w):
    |              ^^^^^^^^^^ generic type
@@ -22,7 +22,7 @@ error[E0329]: `Wrapper` is generic, and a pattern on a `Shape` cannot name its t
    = help: match a non-generic type, or call the trait's methods
 
 error[E0329]: a pattern for a `Shape` takes one name for the whole value, or none
-  --> tests/ui/trait_type_pattern_errors.wb:35:14
+  --> tests/ui/trait_type_pattern_errors.vi:35:14
    |
 35 |         case Square(a, b):
    |              ^^^^^^^^^^^^ too much
@@ -30,7 +30,7 @@ error[E0329]: a pattern for a `Shape` takes one name for the whole value, or non
    = help: write `case Circle(c):` to bind the value, or `case Circle():` to only test its type
 
 error[E0329]: `area` is not a struct or enum, which a `Shape` can be
-  --> tests/ui/trait_type_pattern_errors.wb:37:14
+  --> tests/ui/trait_type_pattern_errors.vi:37:14
    |
 37 |         case area(x):
    |              ^^^^^^^ not a type that implements the trait
@@ -38,11 +38,11 @@ error[E0329]: `area` is not a struct or enum, which a `Shape` can be
    = help: write the name of a type that implements the trait, as in `case Circle(c):`
 
 error[E0326]: this `match` does not cover every case
-  --> tests/ui/trait_type_pattern_errors.wb:43:5
+  --> tests/ui/trait_type_pattern_errors.vi:43:5
    |
 43 |     match shape:
    |     ^^^^^^^^^^^ some values are not covered
    |
    = help: any type can implement `Shape`, so end the `match` with `case _:` for the rest
 
-error: could not compile `tests/ui/trait_type_pattern_errors.wb` due to 6 errors
+error: could not compile `tests/ui/trait_type_pattern_errors.vi` due to 6 errors

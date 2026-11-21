@@ -486,7 +486,7 @@ Each milestone follows docs/11's rules: the gates (`make lint`, `make test`, `ma
 - Several values of one header are newline-joined in the one `headers` entry, and `serve` writes a line each. There is a public `response.add_header(name, value)` for any header. `response.cookie(name)` reads a cookie back, for tests. The client keeps repeated response headers the same way.
 - `set_cookie` percent-encodes only what a cookie cannot hold (and `%`), and `req.cookie` decodes `%XX`. An invalid name, path or `same_site` panics, which is a 500. `__Host-`, `__Secure-` and `SameSite=None` cookies are always `Secure`.
 - The test-request parts and the locals share one optional field that replaced the cached body text, so `Request` did not grow. Two separate fields had cost 16 bytes per request in `bench/http/counts.py`. `req.text()` now reads the connection's buffer on each call.
-- The test is `tests/run/http_cookies_and_encoding.wb`, with a real server and client in one program, which checks the `Set-Cookie` lines on the wire. No `curl` test was added.
+- The test is `tests/run/http_cookies_and_encoding.vi`, with a real server and client in one program, which checks the `Set-Cookie` lines on the wire. No `curl` test was added.
 - The gates passed: tests, stress (300 runs), clippy, the formatter, the site's examples, and the HTTP counts (unchanged). `bench/run.py --check` failed on different unrelated benchmarks on two runs (`sort` and `spawn`, then `json_orders`' memory) and passed on the third, which is noise.
 
 ### Milestone 2: `crypto` (about 1.5 days)
@@ -502,9 +502,9 @@ Each milestone follows docs/11's rules: the gates (`make lint`, `make test`, `ma
 
 **Done** (D101). Everything listed, with these differences:
 - The functions are those of section 4.1 without the AES-GCM pair, which decision 3 made unnecessary, plus `base64_encode` and `base64_decode` for the standard alphabet. Base64 is written in the runtime, not taken from a crate. The decoders accept padding or none, and reject anything no encoder writes.
-- The run test is `tests/run/crypto_module.wb`, since a program named after a module cannot import it (E0336). Its RSA fixture is a 2048-bit key's `n` and `e` and an `openssl` signature, embedded as base64url; the private key is not in the repository. It checks the right message, a tampered message, a changed signature, another key (the modulus without its first byte) and a key too short for `ring`.
+- The run test is `tests/run/crypto_module.vi`, since a program named after a module cannot import it (E0336). Its RSA fixture is a 2048-bit key's `n` and `e` and an `openssl` signature, embedded as base64url; the private key is not in the repository. It checks the right message, a tampered message, a changed signature, another key (the modulus without its first byte) and a key too short for `ring`.
 - The runtime has unit tests for the same known answers and for the decoder's rejections.
-- Passing a `str` where `bytes` is expected now has a help line (`text.encode()`), and the reverse names `hex()` and `decode()`. The golden is `tests/ui/crypto_errors.wb`.
+- Passing a `str` where `bytes` is expected now has a help line (`text.encode()`), and the reverse names `hex()` and `decode()`. The golden is `tests/ui/crypto_errors.vi`.
 - The standard library's module list in E0334's help now names `crypto`, which changed one golden (`tests/ui/module_errors.stderr`) and its copy in docs/errors.md.
 - The gates passed: tests, stress (300 runs), clippy, the formatter, the site's examples, the HTTP counts (unchanged) and `bench/run.py --check`, on the first run.
 
@@ -526,8 +526,8 @@ Each milestone follows docs/11's rules: the gates (`make lint`, `make test`, `ma
 - `install` takes a `Server`; groups use `group.use(auth.required)`. `logout_response` is a `Provider` method. `test_cookie` takes `expires_in=`. `google_for_tests` takes `endpoints=auth.Endpoints(...)`, the policies and `on_login`.
 - The checks of the redirect URI follow Google's rules as read on 2026-11-20: `https` except on `localhost`, `127.0.0.1` and `[::1]`; no fragment, wildcard or user name. A query is allowed. The file's `auth_uri` and `token_uri` are ignored (decision 6).
 - Google's web-server page describes neither PKCE nor the `iss` parameter; the discovery document advertises both. PKCE is sent, and `iss` is checked when present (D102).
-- The compiler checks what the program hands the module: `on_...` arguments of standard library functions, and functions such as `auth.protect(handler)`, must be shareable (`tests/ui/auth_sharing.wb`). `http.Request` gained `query_string()`.
-- The tests are `tests/run/auth_google_flow.wb` and `tests/run/auth_setup.wb`. The fake Google is a server in the same program that the client calls; the app is driven with `server.handle`. They cover everything listed, plus a wrong PKCE verifier, `alg: none`, a failing token endpoint, the `hd` and email policies, a cookie signed with another key, and a protected route without a provider. Each setup error has a test too.
+- The compiler checks what the program hands the module: `on_...` arguments of standard library functions, and functions such as `auth.protect(handler)`, must be shareable (`tests/ui/auth_sharing.vi`). `http.Request` gained `query_string()`.
+- The tests are `tests/run/auth_google_flow.vi` and `tests/run/auth_setup.vi`. The fake Google is a server in the same program that the client calls; the app is driven with `server.handle`. They cover everything listed, plus a wrong PKCE verifier, `alg: none`, a failing token endpoint, the `hd` and email policies, a cookie signed with another key, and a protected route without a provider. Each setup error has a test too.
 
 ### Milestone 4: signatures and the key cache (about 1.5 days)
 
@@ -542,7 +542,7 @@ Each milestone follows docs/11's rules: the gates (`make lint`, `make test`, `ma
   - Two concurrent sign-ins cause one JWKS fetch.
 
 **Done** (D103). Everything listed, with these differences:
-- The fake Google is `crates/lang_cli/tests/oidc.rs`, a threaded `std::net` server in the test with two committed test-only keys (`tests/fixtures/oidc_test_key.pem` and `oidc_test_key_2.pem`). It runs `tests/oidc/signin.wb`, which serves an app that trusts the fake and signs in to it over HTTP. `ring` became a dev-dependency of `lang_cli`; it was already in `Cargo.lock`.
+- The fake Google is `crates/lang_cli/tests/oidc.rs`, a threaded `std::net` server in the test with two committed test-only keys (`tests/fixtures/oidc_test_key.pem` and `oidc_test_key_2.pem`). It runs `tests/oidc/signin.vi`, which serves an app that trusts the fake and signs in to it over HTTP. `ring` became a dev-dependency of `lang_cli`; it was already in `Cargo.lock`.
 - The milestone 3 tests keep their in-program fake, which cannot sign, through `auth.Endpoints(keys="")`. Only `google_for_tests` accepts endpoints, so a real provider always checks signatures.
 - The tests cover everything listed, plus a token signed with the wrong key, and that a cached key is not fetched again. The fake answers with Google's `Cache-Control` (`public, max-age=…, must-revalidate, no-transform`); Google's actual value is still to be seen in milestone 6.
 
@@ -556,11 +556,11 @@ Each milestone follows docs/11's rules: the gates (`make lint`, `make test`, `ma
   - The OpenAPI test in `crates/lang_cli/tests/openapi.rs` extended with a protected route.
 
 **Done** (D104). Everything listed, with these differences:
-- The errors are one new code, E0342 (`tests/ui/auth_route_errors.wb`): `@auth.required` on a function that is not a route, `@auth.required` with arguments, `auth.User` under `@http.ws`, and two `auth.User` parameters. `@auth.required` in a program that does not import `auth` is the existing E0330, with the help "add `import auth`" (`tests/ui/auth_not_imported.wb`).
+- The errors are one new code, E0342 (`tests/ui/auth_route_errors.vi`): `@auth.required` on a function that is not a route, `@auth.required` with arguments, `auth.User` under `@http.ws`, and two `auth.User` parameters. `@auth.required` in a program that does not import `auth` is the existing E0330, with the help "add `import auth`" (`tests/ui/auth_not_imported.vi`).
 - `@auth.required` is allowed on `@http.ws` routes: the guard runs before the upgrade. Only an `auth.User` parameter there is an error.
 - The OpenAPI scheme comes from `install`, through a new `server.security_scheme(name, scheme)`, so it names the real cookie (`session` or `__Host-session`). A protected route on a documented server without a provider panics when the document is built, saying to call `install`.
 - The language server shows a hover's docstring when there is one; only `@auth.required` has one for now.
-- The tests are `tests/run/auth_routes.wb` (each form of protection, on methods, a function and a prefix, signed out as an API client and as a browser, signed in, an ended sign-in, and the guard running before the body is read), the two `tests/ui` programs, `tests/http/secured_docs.wb` with a protected `/me` in `crates/lang_cli/tests/openapi.rs`, and a hover test in `crates/lang_cli/src/lsp.rs`.
+- The tests are `tests/run/auth_routes.vi` (each form of protection, on methods, a function and a prefix, signed out as an API client and as a browser, signed in, an ended sign-in, and the guard running before the body is read), the two `tests/ui` programs, `tests/http/secured_docs.vi` with a protected `/me` in `crates/lang_cli/tests/openapi.rs`, and a hover test in `crates/lang_cli/src/lsp.rs`.
 
 ### Milestone 6: documentation and a real check (about 1 day)
 
@@ -573,7 +573,7 @@ Each milestone follows docs/11's rules: the gates (`make lint`, `make test`, `ma
 
 **Done** (no new decision), except the check with a real Google client:
 - docs/05 has a "Setting it up" part in "Signing in with Google": the console, the redirect URI, `SESSION_SECRET`, proxies and Workspace domains. The site has a "Signing in with Google" section with a protected app (compiled only, since it needs a Google client), a test program that runs, and the proxy notes.
-- The example is `examples/google_login/`, a new top-level folder, since the repository had no examples folder: `app.wb` (a home page, a protected notes page, a protected JSON API under `/api/notes`, `/me` and `/docs`), `main.wb`, which serves it with a real client, `app_test.wb` and a README with the console steps. `crates/lang_cli/tests/oidc.rs` checks that it compiles and that its five tests pass.
+- The example is `examples/google_login/`, a new top-level folder, since the repository had no examples folder: `app.vi` (a home page, a protected notes page, a protected JSON API under `/api/notes`, `/me` and `/docs`), `main.vi`, which serves it with a real client, `app_test.vi` and a README with the console steps. `crates/lang_cli/tests/oidc.rs` checks that it compiles and that its five tests pass.
 - `.gitignore` ignores `client_secret*.json`. The release notes have a section for what came after 1.1.0; the version was not changed.
 - **The manual check with a real Google client was not run.** It needs the owner's Cloud project and credentials file, which were not available to the agent. Still open: whether Google accepts the PKCE verifier from a confidential client (D102), and the `Cache-Control` its key set sends (D103). To run it: follow `examples/google_login/README.md`, sign in at `http://localhost:8080`, open `/notes`, `/me` and `/docs`, sign out, and record the result here.
 

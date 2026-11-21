@@ -1,9 +1,9 @@
 error[E0304]: unknown type `string`
- --> tests/ui/unknown_type.wb:1:21
+ --> tests/ui/unknown_type.vi:1:21
   |
 1 | def test(a: int) -> string:
   |                     ^^^^^^ not a type
   |
   = help: the string type is called `str`, as in Python
 
-error: could not compile `tests/ui/unknown_type.wb` due to 1 error
+error: could not compile `tests/ui/unknown_type.vi` due to 1 error

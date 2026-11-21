@@ -45,7 +45,7 @@ Do them in this order. Milestone 3 uses the method mechanism from milestone 2 fo
 
 ## 2. How the evidence was gathered
 
-Programs in Appendix A were compiled with the release compiler at `8b55b6a` (`target/release/weby run`). Compile times are not a problem: checking any program in the repository takes 15 to 18 ms; building the todo service takes 0.18 s, or 0.29 s with `--release`. A hello-world executable is 5.2 MB, of which 3.8 MB is DWARF (`size -A`): 0.76 MB `.text`, 1.2 MB `.debug_loclists`, 1.1 MB `.debug_str`, 0.86 MB `.debug_info`. The diagnostics are already good in most places: typos get "did you mean", type mismatches point at the hint or parameter that set the expectation, and missing returns and unhashable keys are explained. The items below are the exceptions.
+Programs in Appendix A were compiled with the release compiler at `8b55b6a` (`target/release/viper run`). Compile times are not a problem: checking any program in the repository takes 15 to 18 ms; building the todo service takes 0.18 s, or 0.29 s with `--release`. A hello-world executable is 5.2 MB, of which 3.8 MB is DWARF (`size -A`): 0.76 MB `.text`, 1.2 MB `.debug_loclists`, 1.1 MB `.debug_str`, 0.86 MB `.debug_info`. The diagnostics are already good in most places: typos get "did you mean", type mismatches point at the hint or parameter that set the expectation, and missing returns and unhashable keys are explained. The items below are the exceptions.
 
 ## 3. Conventions the new features must follow
 
@@ -132,7 +132,7 @@ A compound statement after the colon stays an error, with help to put it on the 
 
 **Tests:**
 - parser tests for each statement kind;
-- `tests/run/one_line_blocks.wb`;
+- `tests/run/one_line_blocks.vi`;
 - a `tests/ui/` case for a compound statement after a colon;
 - a formatter case.
 
@@ -152,7 +152,7 @@ A compound statement after the colon stays an error, with help to put it on the 
 
 **Tests:**
 - lexer tests, including the edge cases;
-- `tests/run/raw_strings.wb`, using `re` with a raw pattern;
+- `tests/run/raw_strings.vi`, using `re` with a raw pattern;
 - the existing `tests/ui/` case for unsupported prefixes, updated.
 
 ### 1.3 `del`
@@ -170,7 +170,7 @@ A compound statement after the colon stays an error, with help to put it on the 
 - `check/stmt.rs`;
 - the runtime's dict removal entry point, for a variant that panics (or the code generator panics on an empty result).
 
-**Tests:** `tests/run/del.wb`, and `tests/ui/del_errors.wb`.
+**Tests:** `tests/run/del.vi`, and `tests/ui/del_errors.vi`.
 
 ### 1.4 Constant expressions
 
@@ -191,7 +191,7 @@ Division by zero in a constant is a compile error. A cycle between constants is 
 
 **Where:** the constant collection in `check/items.rs`, where E0312 is reported, and a small folder over the AST. The HIR keeps getting a literal, so code generation does not change.
 
-**Tests:** `tests/run/const_expressions.wb` (including wrap-around and cross-module constants), and `tests/ui/const_errors.wb`.
+**Tests:** `tests/run/const_expressions.vi` (including wrap-around and cross-module constants), and `tests/ui/const_errors.vi`.
 
 ### 1.5 f-string conversions
 
@@ -201,7 +201,7 @@ Division by zero in a constant is a compile error. A cycle between constants is 
 
 **Where:** the f-string lexing and checking. The runtime already has the representation writer (`builder.rs`, `write_str_repr` and the container printing).
 
-**Tests:** `tests/run/fstring_conversions.wb`.
+**Tests:** `tests/run/fstring_conversions.vi`.
 
 ### 1.6 `print` keywords
 
@@ -211,7 +211,7 @@ Division by zero in a constant is a compile error. A cycle between constants is 
 
 **Where:** `check/builtins.rs` and the `print` lowering in the code generator.
 
-**Tests:** extend an existing print test, or add `tests/run/print_keywords.wb`.
+**Tests:** extend an existing print test, or add `tests/run/print_keywords.vi`.
 
 ### 1.7 `match` as an expression
 
@@ -241,8 +241,8 @@ label = match status:
 
 **Tests:**
 - parser tests;
-- `tests/run/match_expression.wb`, with enums, `Result`, literals and guards;
-- `tests/ui/match_expression_errors.wb`: not exhaustive, mismatched case types, and `match` in other expression positions with help.
+- `tests/run/match_expression.vi`, with enums, `Result`, literals and guards;
+- `tests/ui/match_expression_errors.vi`: not exhaustive, mismatched case types, and `match` in other expression positions with help.
 
 ### 1.8 Stale and missing help
 
@@ -304,8 +304,8 @@ Add these, each with a "did you mean" from the Python spelling where the name di
 | built-ins | `ord(c) -> int`, `chr(i) -> str`, `reversed(xs) -> list[T]`, `list(x) -> list[T]` for a list, `str` (its characters), a dict (its keys), `range(...)` and, after milestone 3, a set | `chr` panics outside the Unicode scalar range. `range(...)` outside a `for` loop stays an error, with help that now suggests `list(range(...))`. `for x in reversed(xs)` may iterate backwards without building a list, as a later refinement only if it is a small change |
 
 **Tests:**
-- `tests/run/str_methods.wb`, `tests/run/list_methods.wb`, `tests/run/dict_methods.wb`, each comparing with Python's results for the same inputs (write the expected lines from running the Python equivalent by hand);
-- `tests/ui/builtin_method_hints.wb` for the Python spellings.
+- `tests/run/str_methods.vi`, `tests/run/list_methods.vi`, `tests/run/dict_methods.vi`, each comparing with Python's results for the same inputs (write the expected lines from running the Python equivalent by hand);
+- `tests/ui/builtin_method_hints.vi` for the Python spellings.
 
 **Documents:**
 - the `str`, `list` and `dict` rows of the table in docs/05;
@@ -364,13 +364,13 @@ Carried out on 2026-11-20 as D92 in [08](08-decisions-and-risks.md), by the firs
 
 ### 3.3 Tests
 
-- **Run test.** `tests/run/sets.wb` covers every operation above, sets of `str`, `int`, tuples and a `@derive(Hash, Eq)` struct, a large set that grows through several resizes, and removal during a loop over a copy. It runs in all five modes, including collector stress.
-- **Errors.** `tests/ui/set_errors.wb` covers:
+- **Run test.** `tests/run/sets.vi` covers every operation above, sets of `str`, `int`, tuples and a `@derive(Hash, Eq)` struct, a large set that grows through several resizes, and removal during a loop over a copy. It runs in all five modes, including collector stress.
+- **Errors.** `tests/ui/set_errors.vi` covers:
   - a set of lists (unhashable);
   - `{}` assigned to a `set` hint, with help to write `set()`;
   - a set sent to a task (not shareable);
   - a set used as a dict key.
-- **JSON.** A round trip in `tests/run/json_roundtrip.wb`, or a new file.
+- **JSON.** A round trip in `tests/run/json_roundtrip.vi`, or a new file.
 
 ### Done
 
@@ -400,8 +400,8 @@ Carried out on 2026-11-20 as D93 in [08](08-decisions-and-risks.md), as the plan
 **Where:** `check/generics.rs` and `check/items.rs`. Bound methods used as values (D36) must work for instantiated generic methods, or give a clear error.
 
 **Tests:**
-- `tests/run/generic_methods.wb`: `map`, `fold` and a method using both the impl's and its own parameters;
-- `tests/ui/generic_method_errors.wb`: unsatisfied bound, a trait method with type parameters, and a type argument that cannot be inferred.
+- `tests/run/generic_methods.vi`: `map`, `fold` and a method using both the impl's and its own parameters;
+- `tests/ui/generic_method_errors.vi`: unsatisfied bound, a trait method with type parameters, and a type argument that cannot be inferred.
 
 ### 4.2 Type patterns on trait objects
 
@@ -417,8 +417,8 @@ The type must be a struct or enum that implements the trait (or a trait that req
 **Lowering:** slot 0 of every vtable is the concrete type's descriptor (`traits.rs:219`, `entries = vec![self.desc(ty)]`), and that holds for supertrait vtables too. The test is therefore one load from the vtable and one pointer comparison with `self.desc(Circle)`. The bound value is the trait object's data pointer, retyped. Make sure `desc(ty)` is unique per type across the module, as it is used for this identity. Generic struct instances each have their own descriptor; `case Box(b)` on a generic `Box` needs the type arguments written out (`case Box[int](b)`) or is an error. Decide which and record it.
 
 **Tests:**
-- `tests/run/trait_type_patterns.wb`: several types, a supertrait object, and a guard;
-- `tests/ui/trait_type_pattern_errors.wb`: a type that does not implement the trait, a missing `case _`, and an or-pattern.
+- `tests/run/trait_type_patterns.vi`: several types, a supertrait object, and a guard;
+- `tests/ui/trait_type_pattern_errors.vi`: a type that does not implement the trait, a missing `case _`, and an or-pattern.
 
 ### 4.3 Empty collections typed by their first use (optional)
 
@@ -443,7 +443,7 @@ Once resolved, the local has its real type for the rest of the function, and the
 
 stop. Keep E0315 as it is, and record in D94 why it was left. Do not let a half-working version through: a test program must show that every resolving form and every error case behaves as described.
 
-**Tests:** `tests/run/empty_collection_inference.wb`, and `tests/ui/empty_collection_errors.wb` (used before resolution, never resolved, conflicting resolutions).
+**Tests:** `tests/run/empty_collection_inference.vi`, and `tests/ui/empty_collection_errors.vi` (used before resolution, never resolved, conflicting resolutions).
 
 ### Done
 
@@ -466,13 +466,13 @@ Carried out on 2026-11-20 as D94 in [08](08-decisions-and-risks.md). 4.1 and 4.2
 - the running fiber's guard page (the lowest page of its mapping, `fiber.rs:319` and `:573`);
 - or just below the main thread's or a worker thread's stack (from `pthread_getattr_np`).
 
-**If it is,** the handler writes a message with `write(2)`, which is async-signal-safe. The message is `panic: stack overflow`, followed by `in a task` when on a fiber, and the advice to look for unbounded recursion or to set the fiber stack size (`WEBY_TASK_STACK`, through `lang_names::env_var`). It then exits with status 101, the panic status (D24). Unwinding from a signal handler is not safe, so this ends the process even in a task. Say so in D95; turning it into a task-scoped panic is out of scope.
+**If it is,** the handler writes a message with `write(2)`, which is async-signal-safe. The message is `panic: stack overflow`, followed by `in a task` when on a fiber, and the advice to look for unbounded recursion or to set the fiber stack size (`VIPER_TASK_STACK`, through `lang_names::env_var`). It then exits with status 101, the panic status (D24). Unwinding from a signal handler is not safe, so this ends the process even in a task. Say so in D95; turning it into a task-scoped panic is out of scope.
 
 **If it is not,** the handler restores the previous handler and returns, so the fault happens again and behaves as it does today (a core dump for a real bug).
 
 **Install** the handler after the collector is initialised. Check that Boehm does not rely on its own `SIGSEGV` handler in the configuration used: it uses signals to stop threads, but not `SIGSEGV`, unless incremental mode is on, which it is not.
 
-**Tests:** two `tests/run/` programs with `# expect-exit: 101` and `# expect-stderr:` lines (the harness supports both, `programs.rs:87`): deep recursion on the main thread, and in a spawned task. Make sure they run quickly in debug mode and under collector stress. Use `# env: WEBY_TASK_STACK=...` for a small fiber stack if needed.
+**Tests:** two `tests/run/` programs with `# expect-exit: 101` and `# expect-stderr:` lines (the harness supports both, `programs.rs:87`): deep recursion on the main thread, and in a spawned task. Make sure they run quickly in debug mode and under collector stress. Use `# env: VIPER_TASK_STACK=...` for a small fiber stack if needed.
 
 ### 5.2 Preemption at loop back-edges (optional, measurement-gated)
 
@@ -490,11 +490,11 @@ Carried out on 2026-11-20 as D94 in [08](08-decisions-and-risks.md). 4.1 and 4.2
 
 If it costs more, try reading the flag through a register-pinned or global address rather than thread-local storage. If it still costs more, leave it out and record the measurements in D95.
 
-**Tests:** a `tests/run/` program with `# env: WEBY_WORKERS=1` (the harness supports `# env:` lines, `programs.rs:5`). A spawned task spins in a loop for about a second while another task ticks with `time.sleep`. The ticks must interleave with the spin.
+**Tests:** a `tests/run/` program with `# env: VIPER_WORKERS=1` (the harness supports `# env:` lines, `programs.rs:5`). A spawned task spins in a loop for about a second while another task ticks with `time.sleep`. The ticks must interleave with the spin.
 
 ### 5.3 Completion in the language server
 
-**Evidence:** `weby lsp` offers diagnostics, hover, go to definition and formatting; completion is missing (D70).
+**Evidence:** `viper lsp` offers diagnostics, hover, go to definition and formatting; completion is missing (D70).
 
 **Change:** `completionProvider` with `.` as a trigger character.
 - **After `.`:** the fields and methods of the receiver's type: struct fields, inherent and trait methods, the compiler-defined built-in methods, and milestone 2's prelude methods under their user-facing names. Module members after a module name.
@@ -520,7 +520,7 @@ While typing, the text usually does not parse (`user.` is incomplete). Keep the 
 
 Add `docs/errors.md`. It has one section per code in `crates/lang_diag/src/codes.rs`, each with what it means, a short example taken from `tests/ui/`, and how to fix it. Add a test in `lang_diag` or `lang_cli` that fails when a code has no section, so the reference cannot fall behind.
 
-A `weby explain E0315` command that prints the section is optional. If it is added, embed the file with `include_str!`.
+A `viper explain E0315` command that prints the section is optional. If it is added, embed the file with `include_str!`.
 
 ### 5.6 Executable size (optional)
 
@@ -545,7 +545,7 @@ Panic backtraces must still name the program's functions and lines (there is a t
 
 ### Done
 
-Carried out on 2026-11-20 as D95 in [08](08-decisions-and-risks.md). 5.1, 5.3, 5.4 (the unused import warning), 5.5 (with `weby explain`), 5.6 and 5.7 are done. 5.2 (preemption) was built as a prototype, measured at 25% on `sieve` against a limit of 2%, and dropped; the second warning of 5.4 (unused private functions) was not attempted, because the route adapters call user functions from generated source. The executable size item went further than hoped, 4.4 MB to 0.5 MB, because the program's own debug information is 5 KB and the rest comes from the runtime archive. The two decisions for the owner were then taken: the version became 1.0.0 and `.github/workflows/ci.yml` was added (tests, lints and a short stress run; the benchmark checks compare against numbers recorded on one machine, so they stay a local step).
+Carried out on 2026-11-20 as D95 in [08](08-decisions-and-risks.md). 5.1, 5.3, 5.4 (the unused import warning), 5.5 (with `viper explain`), 5.6 and 5.7 are done. 5.2 (preemption) was built as a prototype, measured at 25% on `sieve` against a limit of 2%, and dropped; the second warning of 5.4 (unused private functions) was not attempted, because the route adapters call user functions from generated source. The executable size item went further than hoped, 4.4 MB to 0.5 MB, because the program's own debug information is 5 KB and the rest comes from the runtime archive. The two decisions for the owner were then taken: the version became 1.0.0 and `.github/workflows/ci.yml` was added (tests, lints and a short stress run; the benchmark checks compare against numbers recorded on one machine, so they stay a local step).
 
 ### Exit criteria
 
@@ -584,7 +584,7 @@ Each of these is real work that a later version could take on. None is a polish 
 
 ## Appendix A: The probes
 
-Compiled with `target/release/weby` at `8b55b6a`. "Today" is the compiler's first error, shortened.
+Compiled with `target/release/viper` at `8b55b6a`. "Today" is the compiler's first error, shortened.
 
 | Program | Today | Milestone |
 |---|---|---|

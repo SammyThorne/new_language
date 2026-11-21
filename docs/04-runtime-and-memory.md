@@ -1,6 +1,6 @@
 # 04 — Runtime and memory
 
-Every Weby executable links `liblang_rt.a`, a Rust static library exposing C-ABI functions prefixed `lrt_`. The runtime owns four things: memory, tasks, I/O, and the native parts of the standard library.
+Every Viper executable links `liblang_rt.a`, a Rust static library exposing C-ABI functions prefixed `lrt_`. The runtime owns four things: memory, tasks, I/O, and the native parts of the standard library.
 
 ## Responsibilities
 
@@ -14,7 +14,7 @@ Every Weby executable links `liblang_rt.a`, a Rust static library exposing C-ABI
 | I/O | Files, sockets, DNS, standard streams |
 | Web | HTTP/1.1 connection handling, router, WebSocket framing, JSON scanner |
 
-The runtime is built with `panic = "abort"`: a Rust panic inside the runtime is a runtime bug and must not unwind into Weby frames.
+The runtime is built with `panic = "abort"`: a Rust panic inside the runtime is a runtime bug and must not unwind into Viper frames.
 
 ## Object model
 
@@ -36,7 +36,7 @@ Layouts:
 | Struct | Header, then fields in declaration order with natural alignment |
 | `str` / `bytes` | The value is a (pointer, length) pair. The bytes live in a pointer-free allocation with no header. String literals point into the executable's read-only data and are never collected |
 | `list[T]` | Header, length, capacity, pointer to a separate element buffer. Elements are stored inline (a `list[int]` is a flat array of `i64`) |
-| `dict[K, V]` | Header, then an open-addressing table plus an insertion-ordered entries array. Prototype: implemented in the runtime, parameterised by key and value size with hash and equality function pointers. Later: rewritten in Weby so it monomorphises and inlines |
+| `dict[K, V]` | Header, then an open-addressing table plus an insertion-ordered entries array. Prototype: implemented in the runtime, parameterised by key and value size with hash and equality function pointers. Later: rewritten in Viper so it monomorphises and inlines |
 | Closure environment | Header, then captured variables. A variable captured by a closure and mutated lives in the environment, not on the stack |
 | Enum (boxed) | Header, tag, payload |
 
@@ -54,23 +54,23 @@ Configuration:
 - Parallel marking enabled.
 - **Pointer-free allocation** for string bytes, `bytes`, and element buffers of lists whose element type contains no references. The collector neither scans these nor mistakes their contents for pointers. For a web server, where most of the heap volume is request and response bytes, this is the most important tuning decision.
 - No finalisers. The language has none, and they slow collection.
-- Initial heap size and growth factor exposed through environment variables (`WEBY_GC_INITIAL_HEAP`, `WEBY_GC_FREE_SPACE_DIVISOR`, `WEBY_GC_MIN_ALLOC`) for tuning without recompiling.
+- Initial heap size and growth factor exposed through environment variables (`VIPER_GC_INITIAL_HEAP`, `VIPER_GC_FREE_SPACE_DIVISOR`, `VIPER_GC_MIN_ALLOC`) for tuning without recompiling.
 - Linking: the system's `libgc.so.1` (Debian package `libgc1`), linked by its full file name so that no development package is needed; the runtime declares the few functions it uses itself. Vendoring and static linking for releases is still the plan, so that binaries are self-contained and the build flags are ours (D21 in [08](08-decisions-and-risks.md)).
-- Stress mode: `WEBY_GC_STRESS=1` collects before every allocation. The end-to-end tests run every program this way. `WEBY_GC_STRESS=cache` keeps the per-thread free lists in use but short and collects before every refill, which catches an object on a list that the collector cannot see; the tests run every program this way too (D89).
+- Stress mode: `VIPER_GC_STRESS=1` collects before every allocation. The end-to-end tests run every program this way. `VIPER_GC_STRESS=cache` keeps the per-thread free lists in use but short and collects before every refill, which catches an object on a list that the collector cannot see; the tests run every program this way too (D89).
 - **Per-thread free lists.** Generated code pops small objects inline from its thread's lists (D83), and the runtime's own small allocations of scanned memory come from a second set of lists, refilled the same way (D89). Unscanned memory goes straight to Boehm, whose thread-local lists for it were measured to be as fast as a runtime cache.
-- **Parallel marking** uses up to four marker threads. They start at the first `spawn`, or, in a program without tasks, once the heap passes 32 MiB (`WEBY_PARALLEL_MARK_HEAP`), so that small single-threaded programs do not pay for the collector's locking (D89).
+- **Parallel marking** uses up to four marker threads. They start at the first `spawn`, or, in a program without tasks, once the heap passes 32 MiB (`VIPER_PARALLEL_MARK_HEAP`), so that small single-threaded programs do not pay for the collector's locking (D89).
 
 ### The Rust heap rule
 
-Boehm scans its own heap, thread stacks and static data. It does **not** scan memory obtained from Rust's allocator. A Weby object referenced only from a Rust `Vec`, `Box` or `HashMap` will be collected while still in use.
+Boehm scans its own heap, thread stacks and static data. It does **not** scan memory obtained from Rust's allocator. A Viper object referenced only from a Rust `Vec`, `Box` or `HashMap` will be collected while still in use.
 
-Rule: the runtime never stores a Weby reference in Rust-allocated memory. It may hold one in exactly three places:
+Rule: the runtime never stores a Viper reference in Rust-allocated memory. It may hold one in exactly three places:
 
 1. On the stack of a running task, for the duration of a runtime call.
 2. Inside another GC-allocated object.
 3. In the **handle table**: a GC-visible, uncollectable array managed by one small module. Long-lived references (registered route handlers, a WebSocket connection's callback, a task's entry closure) are stored there and referred to from Rust by index.
 
-Enforcement: Weby references cross the ABI as a distinct newtype that does not implement the traits needed to be stored in ordinary Rust collections; a GC stress mode (collect at every allocation) runs the whole test suite in CI and turns violations into immediate crashes.
+Enforcement: Viper references cross the ABI as a distinct newtype that does not implement the traits needed to be stored in ordinary Rust collections; a GC stress mode (collect at every allocation) runs the whole test suite in CI and turns violations into immediate crashes.
 
 ### Beyond Boehm
 
@@ -133,7 +133,7 @@ A task becomes a **fiber**: a user-space thread with its own stack, scheduled by
 
 ### Data-race prevention
 
-A data race is two tasks touching the same memory at the same time, at least one of them writing, with no lock. In a language with multi-word values and growable collections a race is not only a logic bug: a reader can see a string pointer with another string's length, or a list whose length exceeds its buffer. Weby prevents the common cases at compile time by controlling what may be shared between tasks.
+A data race is two tasks touching the same memory at the same time, at least one of them writing, with no lock. In a language with multi-word values and growable collections a race is not only a logic bug: a reader can see a string pointer with another string's length, or a list whose length exceeds its buffer. Viper prevents the common cases at compile time by controlling what may be shared between tasks.
 
 #### Shareable types
 
@@ -183,7 +183,7 @@ Not guaranteed:
 - **C code** reached through `@extern`.
 - **Logic races**, such as checking a value under one lock acquisition and acting on it under another. No type system prevents these.
 
-The backstop for what the static rules cannot see is a race-detecting build mode, `weby build --race`, which instruments memory accesses using LLVM's ThreadSanitizer support and reports races when they happen in tests. It is post-prototype, and how well it coexists with a conservative collector has to be confirmed.
+The backstop for what the static rules cannot see is a race-detecting build mode, `viper build --race`, which instruments memory accesses using LLVM's ThreadSanitizer support and reports races when they happen in tests. It is post-prototype, and how well it coexists with a conservative collector has to be confirmed.
 
 #### What the rules cost the programmer
 
@@ -232,9 +232,9 @@ Conventions:
 - Fallible operations return a status and write their result through an out-pointer; the standard library wrapper turns that into a `Result`.
 - The ABI is internal. It is versioned with the compiler and can change freely between releases, because the compiler and runtime always ship together.
 
-## Calling back into Weby
+## Calling back into Viper
 
-The HTTP server, `spawn` and sort comparators need the runtime to call Weby code. A callback is a function value (code pointer and environment pointer). The runtime stores it in the handle table and invokes the code pointer with the environment and arguments using the C calling convention; the compiler emits a C-convention entry stub for every function whose value escapes to the runtime.
+The HTTP server, `spawn` and sort comparators need the runtime to call Viper code. A callback is a function value (code pointer and environment pointer). The runtime stores it in the handle table and invokes the code pointer with the environment and arguments using the C calling convention; the compiler emits a C-convention entry stub for every function whose value escapes to the runtime.
 
 ## Platform support
 

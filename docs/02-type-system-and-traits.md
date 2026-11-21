@@ -13,7 +13,7 @@
 
 ## Typing rules
 
-Weby is statically typed and uses Python's type-hint syntax. Every expression has a type known at compile time. A missing type where one is required, or a mismatch anywhere, is a compile error; there are no runtime type errors, no `Any`, and no `isinstance`.
+Viper is statically typed and uses Python's type-hint syntax. Every expression has a type known at compile time. A missing type where one is required, or a mismatch anywhere, is a compile error; there are no runtime type errors, no `Any`, and no `isinstance`.
 
 ### Where a type hint is required
 

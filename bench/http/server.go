@@ -1,5 +1,5 @@
 // The HTTP benchmark server in Go: net/http and encoding/json, with the same endpoints as
-// server.wb.
+// server.vi.
 package main
 
 import (

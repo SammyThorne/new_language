@@ -1,4 +1,4 @@
-//! HTTPS and secure WebSockets: `tests/http/tls.wb` driven by a rustls client that trusts the
+//! HTTPS and secure WebSockets: `tests/http/tls.vi` driven by a rustls client that trusts the
 //! test authority in `tests/data/tls`.
 
 mod common;

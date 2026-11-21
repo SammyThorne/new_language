@@ -1,9 +1,9 @@
 [package]
-name = "zed_weby"
+name = "zed_viper"
 version = "1.1.0"
 edition = "2021"
 publish = false
-description = "The Zed extension for Weby: starts `weby lsp`"
+description = "The Zed extension for Viper: starts `viper lsp`"
 
 # Built by Zed to WebAssembly; not part of the compiler's workspace.
 [workspace]

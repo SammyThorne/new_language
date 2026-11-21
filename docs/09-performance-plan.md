@@ -2,13 +2,13 @@
 
 All five phases are done. The last round of work after them is planned in the [final optimisation plan](10-final-optimization-plan.md).
 
-An analysis of where Weby's time goes today and a plan to close the remaining gaps to Go. Measured on 2026-11-19, after milestone 12's second part, on the machine in [bench/README.md](../bench/README.md) (Ryzen AI 5 340, 12 threads, LLVM 19.1.7, Boehm 8.2.8, Go 1.27.4).
+An analysis of where Viper's time goes today and a plan to close the remaining gaps to Go. Measured on 2026-11-19, after milestone 12's second part, on the machine in [bench/README.md](../bench/README.md) (Ryzen AI 5 340, 12 threads, LLVM 19.1.7, Boehm 8.2.8, Go 1.27.4).
 
-`perf` is not installed on this machine, so the evidence below comes from reading the optimised IR and machine code (`weby build --release --emit llvm-ir`, `llvm-objdump`), Boehm's own statistics (`GC_PRINT_STATS=1`), and small experiments that change one thing at a time. Times are the best of 5 runs.
+`perf` is not installed on this machine, so the evidence below comes from reading the optimised IR and machine code (`viper build --release --emit llvm-ir`, `llvm-objdump`), Boehm's own statistics (`GC_PRINT_STATS=1`), and small experiments that change one thing at a time. Times are the best of 5 runs.
 
 ## Where things stand
 
-| Benchmark | Weby | Go | Weby vs Go | Gap is mostly |
+| Benchmark | Viper | Go | Viper vs Go | Gap is mostly |
 |---|---|---|---|---|
 | fib | 0.019 s | 0.030 s | 1.62x faster | — |
 | sort | 0.707 s | 1.112 s | 1.57x faster | — |
@@ -150,7 +150,7 @@ These are small code-generation changes with no change to layouts or the runtime
 
 1. **Allocator attributes.** Add a runtime function `lrt_alloc_zeroed(size)` returning zeroed, scanned memory; generated code then stores the descriptor itself. Declare it with:
    - `noalias nonnull align 16` on the result;
-   - `allockind("alloc,zeroed")`, `allocsize(0)`, `"alloc-family"="weby_gc"`;
+   - `allockind("alloc,zeroed")`, `allocsize(0)`, `"alloc-family"="viper_gc"`;
    - `nounwind willreturn`.
 
    Do the same for `lrt_alloc_raw` (closure environments and captured variables) and the atomic allocation used by strings.
@@ -217,7 +217,7 @@ All four items are done, plus one the plan did not have; see D84 in [08](08-deci
    - Build a segment tree when `serve` starts.
    - Match the request path by walking it in place, without splitting it into a list.
    - Allocate the parameters dict only for routes that have parameters, and only once the route has matched.
-   - Move the router into the runtime or keep it in Weby; either way it must not allocate per route tried.
+   - Move the router into the runtime or keep it in Viper; either way it must not allocate per route tried.
 4. **Response headers** written straight into the response buffer by `respond_raw` from the response's header dict, instead of concatenating a string per header in `serve_one`.
 
 Exit: `spawn` within 2x of Go. HTTP p99 at 256 connections no worse than now, with higher throughput.
@@ -262,7 +262,7 @@ This is the largest and riskiest item, which is why it comes last and is decided
 ## Measurement work to do alongside
 
 - **Install `perf`** (the `linux-perf` package). This is a download, so it needs your approval. With frame pointers and line tables already in generated code (D67), it gives function-level profiles and flame graphs. It is needed to measure finding 7 and to confirm the rest.
-- **Allocation counters:** a `WEBY_ALLOC_STATS=1` mode that prints, at exit, the number of allocations and bytes by kind (struct, list, string, builder, closure). Phases 1 and 2 are judged by these numbers, not only by time.
+- **Allocation counters:** a `VIPER_ALLOC_STATS=1` mode that prints, at exit, the number of allocations and bytes by kind (struct, list, string, builder, closure). Phases 1 and 2 are judged by these numbers, not only by time.
 - **Microbenchmarks** in `bench/` for the operations above, each with a Go twin:
   - `append` into a fresh list;
   - a temporary struct in a loop;

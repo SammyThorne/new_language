@@ -4,7 +4,7 @@
 # expect: 2
 # expect-exit: 101
 # expect-stderr: panic: index(): the substring is not in the string
-# expect-stderr: builtin_method_panics.wb:13:
+# expect-stderr: builtin_method_panics.vi:13:
 def main():
     print("before")
     text = "abc"

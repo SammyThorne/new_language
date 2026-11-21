@@ -1,26 +1,26 @@
 {
-  "name": "weby-language",
-  "displayName": "Weby",
-  "description": "Syntax highlighting, brackets and indentation for Weby (.wb) files",
+  "name": "viper-language",
+  "displayName": "Viper",
+  "description": "Syntax highlighting, brackets and indentation for Viper (.vi) files",
   "version": "1.1.0",
-  "publisher": "weby",
+  "publisher": "viper",
   "license": "MIT",
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Programming Languages"],
   "contributes": {
     "languages": [
       {
-        "id": "weby",
-        "aliases": ["Weby", "weby"],
-        "extensions": [".wb"],
+        "id": "viper",
+        "aliases": ["Viper", "viper"],
+        "extensions": [".vi"],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "weby",
-        "scopeName": "source.weby",
-        "path": "./syntaxes/weby.tmLanguage.json"
+        "language": "viper",
+        "scopeName": "source.viper",
+        "path": "./syntaxes/viper.tmLanguage.json"
       }
     ]
   }

@@ -1,5 +1,5 @@
 error[E0201]: `helper` is defined more than once
- --> tests/ui/definition_errors.wb:6:5
+ --> tests/ui/definition_errors.vi:6:5
   |
 3 | def helper() -> int:
   |     ------ first defined here
@@ -8,25 +8,25 @@ error[E0201]: `helper` is defined more than once
   |     ^^^^^^ defined again here
 
 error[E0310]: parameter `x` cannot have type `None`
- --> tests/ui/definition_errors.wb:9:19
+ --> tests/ui/definition_errors.vi:9:19
   |
 9 | def takes_none(x: None):
   |                   ^^^^ a `None` parameter carries no information
 
 error[E0306]: `main` cannot take parameters
-  --> tests/ui/definition_errors.wb:12:5
+  --> tests/ui/definition_errors.vi:12:5
    |
 12 | def main(args: list[str]) -> int:
    |     ^^^^ defined with parameters
 
 error[E0306]: `main` cannot return a value
-  --> tests/ui/definition_errors.wb:12:30
+  --> tests/ui/definition_errors.vi:12:30
    |
 12 | def main(args: list[str]) -> int:
    |                              ^^^ remove this return type
 
 error[E0307]: `count` already has a type
-  --> tests/ui/definition_errors.wb:14:12
+  --> tests/ui/definition_errors.vi:14:12
    |
 13 |     count: int = 1
    |     ----- `count` was declared as `int` here
@@ -36,11 +36,11 @@ error[E0307]: `count` already has a type
    = help: remove the type hint
 
 error[E0308]: `nothing` would have type `None`
-  --> tests/ui/definition_errors.wb:15:15
+  --> tests/ui/definition_errors.vi:15:15
    |
 15 |     nothing = None
    |               ^^^^ the type cannot be inferred from `None`
    |
    = help: give it an optional type: `nothing: int? = None`
 
-error: could not compile `tests/ui/definition_errors.wb` due to 6 errors
+error: could not compile `tests/ui/definition_errors.vi` due to 6 errors

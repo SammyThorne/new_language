@@ -1,8 +1,8 @@
 # Build, test and install the compiler and its runtime library.
 #
 #   make                          build the compiler and runtime, optimised
-#   make run FILE=app.wb          compile a program and run it
-#   make install                  install the `weby` command into ~/.local (PREFIX=... to change)
+#   make run FILE=app.vi          compile a program and run it
+#   make install                  install the `viper` command into ~/.local (PREFIX=... to change)
 #   make link                     the same, but the command follows this checkout's builds
 #   make help                     list every target
 #
@@ -10,7 +10,7 @@
 
 # The command's name. It is also set in crates/lang_cli/Cargo.toml and crates/lang_names; see
 # "Renaming the language" in docs/03-compiler-architecture.md.
-CLI := weby
+CLI := viper
 
 CARGO      ?= cargo
 # Extra arguments for every cargo command, for example CARGOFLAGS=--offline.
@@ -51,24 +51,24 @@ debug: ## Build the unoptimised compiler and runtime into target/debug (quicker 
 
 ## Programs
 
-run: build ## Compile a program and run it: make run FILE=app.wb [ARGS="arguments"]
-	@test -n "$(FILE)" || { echo "usage: make run FILE=path/to/app.wb [ARGS=\"...\"]" >&2; exit 2; }
+run: build ## Compile a program and run it: make run FILE=app.vi [ARGS="arguments"]
+	@test -n "$(FILE)" || { echo "usage: make run FILE=path/to/app.vi [ARGS=\"...\"]" >&2; exit 2; }
 	$(COMPILER) run $(RELEASE_FLAG) $(FILE) $(ARGS)
 
-program: build ## Compile a program to an executable: make program FILE=app.wb [OUT=app]
-	@test -n "$(FILE)" || { echo "usage: make program FILE=path/to/app.wb [OUT=path]" >&2; exit 2; }
+program: build ## Compile a program to an executable: make program FILE=app.vi [OUT=app]
+	@test -n "$(FILE)" || { echo "usage: make program FILE=path/to/app.vi [OUT=path]" >&2; exit 2; }
 	$(COMPILER) build $(RELEASE_FLAG) $(FILE) $(if $(OUT),-o $(OUT))
 
 ## Installing
 
-install: build ## Build, then install the `weby` command into PREFIX (default ~/.local)
+install: build ## Build, then install the `viper` command into PREFIX (default ~/.local)
 	install -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(LIBDIR)
 	install -m 755 $(COMPILER) $(DESTDIR)$(LIBDIR)/$(CLI)
 	install -m 644 $(RUNTIME) $(DESTDIR)$(LIBDIR)/liblang_rt.a
 	ln -sf $(LIBDIR)/$(CLI) $(DESTDIR)$(BINDIR)/$(CLI)
 	@$(path-hint)
 
-link: build ## Build, then make `weby` run this checkout's build, so every rebuild updates it
+link: build ## Build, then make `viper` run this checkout's build, so every rebuild updates it
 	install -d $(BINDIR)
 	ln -sf $(CURDIR)/$(COMPILER) $(BINDIR)/$(CLI)
 	@$(path-hint)
@@ -80,7 +80,7 @@ uninstall: ## Remove what `make install` or `make link` put in PREFIX
 # After installing: say how to run the command, or how to put BINDIR on the PATH if it is not.
 define path-hint
 case ":$$PATH:" in \
-	*":$(BINDIR):"*) echo "Installed. Run: $(CLI) app.wb -o app" ;; \
+	*":$(BINDIR):"*) echo "Installed. Run: $(CLI) app.vi -o app" ;; \
 	*) echo "Installed $(BINDIR)/$(CLI), but $(BINDIR) is not on your PATH. Add this line to ~/.bashrc or ~/.profile:"; \
 	   echo "    export PATH=\"$(BINDIR):\$$PATH\"" ;; \
 esac
@@ -95,7 +95,7 @@ stress: release ## Run the concurrency programs many times: make stress [RUNS=10
 	sh tests/stress.sh $(RUNS)
 
 site-check: build ## Compile and run the documentation site's examples, and compare their output
-	$(PYTHON) site/check_examples.py --weby $(COMPILER)
+	$(PYTHON) site/check_examples.py --viper $(COMPILER)
 
 lint: clippy fmt-check ## Run clippy and check the Rust formatting
 

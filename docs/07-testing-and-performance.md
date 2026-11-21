@@ -8,9 +8,9 @@
 |---|---|---|
 | Lexer | Token streams, especially layout tokens and f-strings | Snapshot tests: source in, token dump out |
 | Parser | AST shape, precedence, error recovery | Snapshot tests of an AST dump |
-| Diagnostics | Message text, spans, codes | "UI" tests: a `.wb` file that must fail, with the rendered error stored next to it |
+| Diagnostics | Message text, spans, codes | "UI" tests: a `.vi` file that must fail, with the rendered error stored next to it |
 | Type checker | Accepts valid programs, rejects invalid ones | UI tests plus HIR snapshots for desugaring |
-| End to end | The whole pipeline and runtime | `.wb` programs with expected standard output, exit code, or panic message in header comments. Run in debug and release modes |
+| End to end | The whole pipeline and runtime | `.vi` programs with expected standard output, exit code, or panic message in header comments. Run in debug and release modes |
 | Runtime | Strings, collections, channels, HTTP parsing, WebSocket framing | Ordinary Rust unit tests inside `lang_rt` |
 | Services | HTTP and WebSocket behaviour | Start the compiled server on an ephemeral port and drive it with a scripted client |
 | Benchmarks | Performance does not regress | Recorded per milestone; later checked automatically with a tolerance |
@@ -26,7 +26,7 @@ The end-to-end layer carries the most weight. A language feature is not done unt
 | AddressSanitizer on the runtime and generated code | Out-of-bounds and use-after-free in native code | CI job from M2 |
 | ThreadSanitizer on the runtime | Races in channels, scheduler, poller | CI job from M6 |
 | "Must not compile" programs | The sharing, visibility, frozen and route-signature checks reject what they should, with the expected message | From the milestone that adds each check |
-| Race-detecting build mode (`weby build --race`) | Races in user programs that the compile-time rules cannot see | Post-prototype |
+| Race-detecting build mode (`viper build --race`) | Races in user programs that the compile-time rules cannot see | Post-prototype |
 | Fuzzing the lexer and parser (`cargo-fuzz`) | Compiler crashes on arbitrary input | From M3; the property is "never panics" |
 | Fuzzing the HTTP parser, WebSocket framer and JSON scanner | Crashes and hangs on hostile input | From M7–M9; these face the network |
 | Differential testing against CPython | Arithmetic, string methods and formatting that are meant to match Python | Small generated programs, from M2 |
@@ -41,7 +41,7 @@ Results (2026-11-19, milestone 12; how to run them is in `tests/conformance/READ
 
 | Suite | Result |
 |---|---|
-| Autobahn 0.8.2, fuzzing client against `tests/conformance/ws_echo.wb` | 301 cases: 296 OK, 3 informational (close codes the suite only records), 2 non-strict, **0 failed**. Sections 12 and 13 (compression, 216 cases) excluded: not offered |
+| Autobahn 0.8.2, fuzzing client against `tests/conformance/ws_echo.vi` | 301 cases: 296 OK, 3 informational (close codes the suite only records), 2 non-strict, **0 failed**. Sections 12 and 13 (compression, 216 cases) excluded: not offered |
 | JSONTestSuite (commit 1ef36fa), `json.parse` | 95 of 95 `y_` accepted, 188 of 188 `n_` rejected, no crashes. Of the 35 `i_` files, 6 accepted (out-of-range numbers, 500 nested arrays) and 29 rejected (non-UTF-8 and UTF-16 input among them) |
 
 The two non-strict Autobahn cases, 6.4.3 and 6.4.4, send invalid UTF-8 in one frame delivered in pieces; the server fails the connection when the frame is complete rather than at the first bad byte. Invalid UTF-8 split across frames (6.4.1, 6.4.2) fails at the frame that has it. Section 9 (large messages and many small ones) took 156 ms for one 16 MiB text message and 73 ms for 1,000 round trips of 4 KiB messages.
@@ -71,14 +71,14 @@ On every change: build, compiler unit and snapshot tests, end-to-end suite in de
 | Garbage collection (Boehm) | The largest known gap to Go on allocation-heavy code | Pointer-free allocation, fewer allocations, then precise GC ([04](04-runtime-and-memory.md#beyond-boehm)) |
 | Every struct on the heap | Significant for small short-lived values | Escape analysis (done for structs, D83); optional value structs |
 | Thread-per-task (stage 1) | Dominant at high connection counts | Fibers (M10) |
-| Runtime calls not inlined | Small per call, adds up in collection-heavy loops | Inline fast paths; move collections into Weby |
+| Runtime calls not inlined | Small per call, adds up in collection-heavy loops | Inline fast paths; move collections into Viper |
 | Bounds checks | Usually a few percent | LLVM removes many; iteration emits none |
 | Dynamic dispatch | A few nanoseconds per call, blocks inlining | Prefer generics in hot paths; devirtualise when the type is known |
 | Object header | Eight bytes per object | Accepted |
 
 ### Benchmark suite
 
-Each benchmark exists in Weby, Go and Python, doing the same work the idiomatic way in each language. Programs live in `bench/`.
+Each benchmark exists in Viper, Go and Python, doing the same work the idiomatic way in each language. Programs live in `bench/`.
 
 | Group | Benchmarks | What it isolates |
 |---|---|---|
@@ -132,7 +132,7 @@ Ordered by expected payoff for web workloads. None of this is prototype work exc
 6. Devirtualisation: when a trait object's concrete type is known at the call site, call directly; speculative devirtualisation for traits with one implementor in the program. Done for traits with up to four implementing types: a vtable compare and a direct call (D85).
 7. Small-string optimisation: strings up to 15 bytes stored inline in the (pointer, length) pair.
 8. String builder elision: f-strings and concatenation chains sized once and written once. Done (D82 for f-strings, D85 for chains).
-9. Collections in Weby: monomorphised `dict` with an open-addressing table, so hashing and comparison inline. Done in part: dicts with `str` keys hash and compare in the runtime without indirect calls (D85).
+9. Collections in Viper: monomorphised `dict` with an open-addressing table, so hashing and comparison inline. Done in part: dicts with `str` keys hash and compare in the runtime without indirect calls (D85).
 10. Loop yield checks that cost one predictable branch.
 11. ThinLTO across the runtime boundary, if LLVM versions of `rustc` and the compiler can be aligned.
 12. Profile-guided optimisation as a build option.

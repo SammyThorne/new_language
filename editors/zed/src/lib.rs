@@ -1,14 +1,14 @@
-//! Starts `weby lsp` for Weby files. The binary is the one named in Zed's settings
-//! (`lsp.weby.binary.path`, with optional `arguments`), or else `weby` from the project's `PATH`.
+//! Starts `viper lsp` for Viper files. The binary is the one named in Zed's settings
+//! (`lsp.viper.binary.path`, with optional `arguments`), or else `viper` from the project's `PATH`.
 
 use zed_extension_api::settings::LspSettings;
 use zed_extension_api::{self as zed, LanguageServerId, Result};
 
-struct WebyExtension;
+struct ViperExtension;
 
-impl zed::Extension for WebyExtension {
+impl zed::Extension for ViperExtension {
     fn new() -> Self {
-        WebyExtension
+        ViperExtension
     }
 
     fn language_server_command(
@@ -21,9 +21,9 @@ impl zed::Extension for WebyExtension {
         let configured_path = binary.as_ref().and_then(|b| b.path.clone());
         let command = match configured_path {
             Some(path) => path,
-            None => worktree.which("weby").ok_or_else(|| {
-                "`weby` is not on PATH. Build it with `cargo build --release` in the Weby repository and add \
-                 target/release to PATH, or set `lsp.weby.binary.path` in Zed's settings."
+            None => worktree.which("viper").ok_or_else(|| {
+                "`viper` is not on PATH. Build it with `cargo build --release` in the Viper repository and add \
+                 target/release to PATH, or set `lsp.viper.binary.path` in Zed's settings."
                     .to_string()
             })?,
         };
@@ -32,4 +32,4 @@ impl zed::Extension for WebyExtension {
     }
 }
 
-zed::register_extension!(WebyExtension);
+zed::register_extension!(ViperExtension);
