@@ -1195,6 +1195,19 @@ The dashboard of docs/14, section 4.8, with `METRICS_PASSWORD_HASH`, the lock-ou
 - **`hash-password` is a compiler command**, so the hash is made where the program is built, with no network. It reads the password from the terminal with `stty -echo` (twice, to catch typos), or one line from standard input in scripts.
 - **Data is pulled.** The page polls `data.json?since=<last sample>` at the sampling interval and keeps up to 720 samples itself, so a poll carries one new sample plus the totals, routes and events. Milestone 15 adds a live mode over Server-Sent Events.
 
+### D115. Traces (production web plan, milestone 10)
+
+The `trace` module of docs/14, section 4.9: OTLP export, W3C trace context, and spans of requests, fetches and queries:
+
+- **OTLP/JSON, not protobuf.** The exporter writes the JSON form of the OTLP trace request by hand (hex IDs, 64-bit integers as strings, as the spec requires) and posts it with the runtime's own HTTP client, so tracing adds no dependency. Every collector that takes OTLP over HTTP takes JSON.
+- **The server span is the runtime's, not middleware's.** `serve_connection` starts a span before the program's handler chain when a flag is set, and ends it after the metrics are recorded, naming it by the route's pattern from the metrics' route table. So a service is traced without code, panics and the server's own errors are in their spans, and with tracing off a request pays one flag load. Routes marked as the metrics' and health checks' are discarded, as they are left out of the metrics and the access log.
+- **The current span lives with the task.** The log module's per-task context, which already carries the request ID to spawned tasks, now also holds the current span (trace ID, span ID, sampled flag and `tracestate`). A span saves the previous context and puts it back when it ends, so `with trace.span` nests and log lines get `trace_id` and `span_id` without any lookup by the program.
+- **IDs are random, sampling is parent-based.** IDs come from a splitmix64 generator per thread seeded from `ring`'s system random source; they need to be unique, not secret. A new trace is recorded when its trace ID's low 64 bits fall under the ratio's threshold, so every service with the same ratio agrees; a trace that arrives with `traceparent` keeps its sampled flag. Unrecorded spans still pass their IDs on, and cost no allocation for attributes.
+- **Dropping, not retrying.** Ended spans go to a queue of at most 2048, which a `trace-export` thread sends in batches of 512 every 5 s (or sooner when a batch is full) with a 10 s timeout. A full queue or a failed send drops spans, counted in `trace_spans_dropped_total`; one warning is logged when sending fails and one line when it works again. A trace collector being down must not slow or grow the service.
+- **Ended at exit, and linked only when used.** The runtime flushes the queue after `main` returns and in `os.exit`, waiting up to 5 s, so a short program's spans are sent. It does so through a function pointer that `trace.init` sets, so that a program that never turns tracing on does not link the exporter, nor the HTTP client and TLS it sends with: calling the flush directly made every program, even one that prints Fibonacci numbers, 4 MB larger.
+- **`trace.init` reads the standard variables** (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER_ARG`), so the service runs under the same configuration as others in a deployment; `http.request_log(trace=True)` calls it, for services with no code of their own about tracing. Only one configuration per process: a second call keeps the first.
+- **Query spans name the operation only.** A PostgreSQL span is named by the statement's first word and never records the statement, whose literals might be personal data.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

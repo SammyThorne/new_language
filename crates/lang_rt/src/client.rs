@@ -232,7 +232,33 @@ pub unsafe extern "C-unwind" fn lrt_http_client(
     let headers = unsafe { Str::from_raw(headers, headers_len) };
     let body = unsafe { Str::from_raw(body, body_len) }.as_bytes();
     let timeout = if timeout_ns > 0 { Duration::from_nanos(timeout_ns as u64) } else { TIMEOUT };
-    match request(&method, url, headers, body, timeout) {
+    let span = trace_start(&method, url);
+    let mut traced = String::new();
+    let headers = match (&span, crate::log::current_trace()) {
+        (Some(_), Some(context)) if !headers.to_ascii_lowercase().contains("traceparent:") => {
+            traced.push_str(headers);
+            traced.push_str(&format!("traceparent: {}\r\n", crate::trace::traceparent(&context)));
+            if let Some(state) = &context.state {
+                traced.push_str(&format!("tracestate: {state}\r\n"));
+            }
+            traced.as_str()
+        }
+        _ => headers,
+    };
+    let result = request(&method, url, headers, body, timeout);
+    if let Some(mut span) = span {
+        match &result {
+            Ok((status, _)) => {
+                span.set("http.response.status_code", crate::trace::Value::Int(*status));
+                if *status >= 400 {
+                    span.fail(&status.to_string());
+                }
+            }
+            Err(message) => span.fail(message),
+        }
+        crate::trace::end(span);
+    }
+    match result {
         Ok((status, response)) => {
             LAST.with(|last| *last.borrow_mut() = response);
             status
@@ -242,6 +268,30 @@ pub unsafe extern "C-unwind" fn lrt_http_client(
             -1
         }
     }
+}
+
+/// Start the span of an outgoing request, named by its method: the URL without its query
+/// (which often carries tokens), and the server's address and port.
+fn trace_start(method: &str, url: &str) -> Option<Box<crate::trace::Open>> {
+    use crate::trace::{Kind, Value};
+    if !crate::trace::on() {
+        return None;
+    }
+    let mut open = crate::trace::start(method, Kind::Client, None)?;
+    open.set("http.request.method", Value::Text(method.to_string()));
+    let bare = url.split(['?', '#']).next().unwrap_or(url);
+    open.set("url.full", Value::Text(bare.to_string()));
+    if let Ok(parsed) = parse_url(url) {
+        open.set("server.address", Value::Text(parsed.host));
+        open.set("server.port", Value::Int(i64::from(parsed.port)));
+    }
+    Some(open)
+}
+
+/// Send a request and read its status, for the runtime's own use (the trace exporter): no
+/// span, and the response is not kept.
+pub(crate) fn send(method: &str, url: &str, headers: &str, body: &[u8], timeout: Duration) -> Result<i64, String> {
+    request(method, url, headers, body, timeout).map(|(status, _)| status)
 }
 
 /// The last response's headers: lower-case `name: value` lines.

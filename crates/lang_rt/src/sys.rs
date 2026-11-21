@@ -381,6 +381,7 @@ pub unsafe extern "C-unwind" fn lrt_os_setenv(name: *const u8, name_len: i64, va
 /// End the program with an exit status, after flushing standard output.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_os_exit(code: i64) {
+    crate::trace::at_exit();
     out::flush();
     std::process::exit(code as i32)
 }

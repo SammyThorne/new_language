@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 9 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 10 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1076,6 +1076,14 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - Assertions: parent and child links across `http.fetch`; attributes; the sampling ratio of 0 and 1; dropping when the collector is down; a flush at shutdown.
   - Log lines carry `trace_id`.
 - **Docs:** docs/05, and a site section.
+
+**Done** (D115). Everything listed, with these differences:
+- The server span is started by the runtime around the handler chain, not by middleware, so every request of a server is traced once `trace.init` has run; `http.request_log(trace=True)` is a way to turn it on from the environment alone. The metrics' and health checks' routes are left out, as they are of the metrics.
+- `tracestate` is passed through with the trace, to fetches and back out, unchanged.
+- The exporter's health is on `/metrics` as `trace_spans_exported_total` and `trace_spans_dropped_total`, and a failing collector is logged once, then once more when it recovers.
+- The 5 s interval can be shortened with `VIPER_TRACE_INTERVAL_MS` (at least 10 ms), for tests.
+- PostgreSQL spans are covered by a unit test of how statements are named only: no database was available where this milestone was built. The existing postgres tests run through the wrapped functions when one is.
+- Tests: `crates/lang_cli/tests/trace.rs` runs `tests/http/trace_server.vi` against a fake collector that parses the OTLP/JSON: a server span continuing an incoming `traceparent`, a fetch to the server's own route as a client span whose `traceparent` names it and whose server span is its child, nested `trace.span` blocks with attributes and a failure, a panic's span, the route's pattern as the name, `trace_id` and `span_id` in the handler's and the access log's lines, a ratio of 0 recording nothing but passing the trace on, spans held until the server stops and then flushed, spans dropped and counted while the collector answers 503 (with the warning and the recovery line), and the queue's cap. Runtime unit tests cover parsing `traceparent`, naming statements, the JSON encoding, and the endpoint and ratio settings; a log unit test covers the IDs in text and JSON lines.
 
 ### Track D: handling requests
 

@@ -324,7 +324,7 @@ def remove(self, id: int): ...
 | `server.route(method, path, handler)` | General form |
 | `server.group(prefix)` | Returns a sub-router sharing a prefix and its own middleware |
 | `server.use(middleware)` | Middleware has the type `def(http.Request, http.Handler) -> Result[http.Response]` |
-| `http.request_log(skip=[])` | Middleware that gives each request an ID and logs one line when it is answered: `GET /photos/7 200` with the fields `method`, `path` (without the query string), `status`, `ms`, `route` (the pattern of the route that took it, when one did) and, for a request from a connection, `client` (`req.client_ip()`); `error` for a 5xx, otherwise `info`. The ID is the client's `X-Request-Id` when it is 1 to 128 ASCII letters, digits, `.`, `_` and `-`, otherwise a new one; it is sent back in `X-Request-Id` (error responses included), kept as the request local `"request_id"`, and carried by log lines (see "Logging"). Paths in `skip` get neither, and nor do `server.health`'s routes. Add it first, so it times the other middleware too. A handler that panics gets no line: the panic is reported instead |
+| `http.request_log(skip=[], trace=False)` | Middleware that gives each request an ID and logs one line when it is answered: `GET /photos/7 200` with the fields `method`, `path` (without the query string), `status`, `ms`, `route` (the pattern of the route that took it, when one did) and, for a request from a connection, `client` (`req.client_ip()`); `error` for a 5xx, otherwise `info`. The ID is the client's `X-Request-Id` when it is 1 to 128 ASCII letters, digits, `.`, `_` and `-`, otherwise a new one; it is sent back in `X-Request-Id` (error responses included), kept as the request local `"request_id"`, and carried by log lines (see "Logging"). Paths in `skip` get neither, and nor do `server.health`'s routes. Add it first, so it times the other middleware too. A handler that panics gets no line: the panic is reported instead. With `trace=True`, it also turns tracing on from the environment (see "Traces"), and its lines carry `trace_id` and `span_id` |
 | `http.cors(origins=[], allow=None, methods=[GET, HEAD, POST, PUT, PATCH, DELETE], headers=["Content-Type", "Authorization"], expose=[], credentials=False, max_age=600)` | Middleware for cross-origin requests from browsers. `origins` lists allowed origins exactly as browsers send them (`"https://app.example.com"`, no path) or is `["*"]`; `allow`, a `def(str) -> bool`, decides for the others. A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) gets a 204 here, allowing `methods`, the requested headers in `headers` (`["*"]` for any) and caching for `max_age` seconds; a refused origin's preflight gets a 204 without them. Other requests from an allowed origin get `Access-Control-Allow-Origin` (the origin with `Vary: Origin`, or `*` for `["*"]` without credentials), `Access-Control-Expose-Headers` for `expose` and, with `credentials=True`, `Access-Control-Allow-Credentials`, on error responses too. Panics at setup for no origins, an origin with a path, or credentials with `*`. On a group (`api.use(http.cors(...))`) it covers that group's routes and their preflights |
 | `http.compress(min_size=1024, level=6, types=["text/*", "application/json", "application/javascript", "image/svg+xml"])` | Middleware that gzips response bodies for clients whose `Accept-Encoding` allows `gzip` (q-values read): bodies of at least `min_size` bytes whose content type matches `types` (`"text/*"` for every `text/` type) and that have no `Content-Encoding`. A client that refuses uncompressed bodies (`identity;q=0` or `*;q=0`) gets gzip for any non-empty body. Leaves alone 1xx, 204, 206 and 304 responses, `Cache-Control: no-transform`, errors returned as `Err`, and `server.static` files (which use `.gz` files instead). Compressed responses get `Content-Encoding: gzip` and a weak `ETag`; every response that could be compressed gets `Vary: Accept-Encoding`. `level` is 0 (stored) to 9 (smallest); panics at setup outside that or for a negative `min_size` |
 | `server.trusted_proxies` | `list[str]` of addresses and networks (`"10.0.0.0/8"`, `"::1"`) whose `X-Forwarded-For` header is believed, for `req.client_ip()`; empty by default. Set it before `bind`. It applies to every server in the process |
@@ -868,6 +868,48 @@ What is recorded:
 - `ready` runs the checks, `dict[str, def() -> Result[None]]`, at once, each in a task of its own, and waits up to two seconds in all. It answers 200 with `{"cache":"ok","database":"ok"}` when every check passes, otherwise 503 with each failure's message in place of `"ok"` (`"did not answer within 2 s"` for one too slow). The checks are run in other tasks, so the compiler checks that they are shareable; write the dict in the call.
 - **On SIGTERM** (or `server.stop()`), `ready` answers 503 `{"server":"draining"}` at once, and the server goes on serving everything for `server.drain_delay` seconds before it stops accepting, so that a load balancer has stopped sending requests before connections close. SIGINT stops at once.
 - Neither route is in the access log, the metrics or the API documentation. Both send `Cache-Control: no-store`.
+
+## Traces (docs/14, milestone 10)
+
+```python
+import http
+import trace
+
+def main():
+    trace.init("photos")      # or from OTEL_EXPORTER_OTLP_ENDPOINT alone, with http.request_log(trace=True)
+    server = http.Server()
+    server.use(http.request_log())
+    server.get("/photos/{id}", photo)
+    ...
+
+def resize(photo: Photo, width: int) -> Photo:
+    with trace.span("resize image", {"width": str(width)}) as span:
+        span.set("photo.id", str(photo.id))
+        ...
+```
+
+Spans go to an OpenTelemetry collector (Jaeger, Tempo, Honeycomb and others take OTLP) as OTLP/JSON over HTTP, `POST <endpoint>/v1/traces`. Once tracing is on:
+
+- **Every request a server answers is a span** named `GET /photos/{id}` (the route's pattern, or the method alone when no route took it), of kind server, with `http.request.method`, `http.route`, `url.path`, `http.response.status_code` and `client.address`; a 5xx or a panic marks it failed. A request with a valid W3C `traceparent` header continues that trace, as a child of the caller's span, and its `tracestate` is kept. The metrics' and health checks' routes are left out.
+- **Every `http.fetch` is a client span** of the current one, named by its method, with `url.full` (without the query string), `server.address` and `server.port`, failed on a status of 400 or more or an error. It sends `traceparent` (and `tracestate`) on, unless the call set one itself.
+- **Every PostgreSQL query is a client span** named by the statement's first word (`SELECT`, `INSERT`), with `db.system` and `db.operation.name`; never the statement's values.
+- **`trace.span(name, attributes={})`** in a `with` statement is a span of the program's own around the block, ended however the block is left. Spans nest through the task: a span started in a handler is a child of the request's, and a task spawned in one starts with its parent's span.
+- **Log lines** written during a span carry `trace_id` and `span_id` after the `request_id`, in text and JSON alike, so a collector's trace leads to its lines and back.
+
+| Item | Shape |
+|---|---|
+| `trace.init(service="", endpoint=None, ratio=None) -> bool` | Turns tracing on and returns `True`. The endpoint is the collector's base URL (`http://localhost:4318`), else `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (the full URL) or `OTEL_EXPORTER_OTLP_ENDPOINT`; without one, tracing stays off and it returns `False`. The service is `OTEL_SERVICE_NAME`, else `service`, else the program's file name. `ratio` (0 to 1, else `OTEL_TRACES_SAMPLER_ARG`, else 1) is the share of new traces recorded; a trace that arrives with a request keeps its caller's choice. Once per process. Panics on a ratio outside 0 to 1 or a URL that is not `http://` or `https://` |
+| `trace.span(name, attributes={}) -> trace.Span` | For `with`; `set(key, value)` and `fail(message)` |
+| `trace.trace_id() -> str` | The current trace's 32 hex digits, `""` outside one |
+| `trace.traceparent() -> str` | The current span as a `traceparent` value, for passing a trace on by other means (a queue message) |
+| `trace.flush()` | Sends what is waiting now, waiting up to 5 s. The program does this itself when it ends, as `os.exit` does |
+| `http.request_log(trace=True)` | Turns tracing on from the environment, as `trace.init()` would, so a service needs no code to be traced |
+
+- **Sampling.** A trace that is not recorded still has IDs, and still passes them on with its `sampled` flag clear, so that the services after this one make the same choice.
+- **Exporting.** Ended spans wait in a queue of at most 2048 and are sent by a thread of their own in batches of up to 512, every 5 s or sooner when 512 are waiting, with a 10 s timeout. When the queue is full, or the collector cannot be reached or refuses a batch, spans are dropped, not retried: one `warn` line says so (`could not send 12 spans to http://...: connection refused; dropping them until it works`), and an `info` line says when sending works again. Requests never wait for the collector.
+- **On `/metrics`**, while tracing is on: `trace_spans_exported_total` and `trace_spans_dropped_total`.
+- **Cost.** With tracing off, a request, a fetch and a query each pay one load of a flag.
+- For tests, `TRACE_INTERVAL_MS` with the language's prefix shortens the 5 s interval (to at least 10 ms).
 
 ## Tasks and synchronisation
 

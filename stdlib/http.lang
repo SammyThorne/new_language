@@ -180,6 +180,9 @@ def metrics_credentials_raw(user: str, password: str, hashed: int) -> int
 @extern("lrt_metrics_authorized")
 def metrics_authorized_raw(id: int, header: str, client: str, handle: int) -> int
 
+@extern("lrt_trace_init")
+def trace_init_raw(service: str, endpoint: str, ratio: float) -> int
+
 @extern("lrt_dashboard_asset")
 def dashboard_asset_raw(index: int) -> str
 
@@ -942,7 +945,7 @@ def wrap(middleware: Middleware, next: Handler) -> Handler:
 # The request local that holds the request's ID.
 const REQUEST_ID = "request_id"
 
-pub def request_log(skip: list[str] = []) -> Middleware:
+pub def request_log(skip: list[str] = [], trace: bool = False) -> Middleware:
     """
     Middleware that gives each request an ID and logs one line for it when it is answered:
 
@@ -954,7 +957,13 @@ pub def request_log(skip: list[str] = []) -> Middleware:
     log line written while the request is handled, including by tasks the handler spawns. The path is logged without its query
     string, which often holds tokens. Requests for the paths in `skip` (exactly) are passed
     on without an ID or a line. Add it first, so that it times the other middleware too.
+
+    With `trace=True`, tracing is turned on from the environment as `trace.init()` would
+    (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER_ARG`), and the
+    lines carry `trace_id` and `span_id`.
     """
+    if trace and trace_init_raw("", "", -1.0) < 0:
+        panic(f"http.request_log: {last_error()}")
     skipped: tuple[str, ...] = tuple(skip)
     return lambda req, next: log_request(req, next, skipped)
 

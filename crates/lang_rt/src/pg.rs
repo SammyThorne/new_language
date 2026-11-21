@@ -1007,7 +1007,10 @@ pub unsafe extern "C-unwind" fn lrt_pg_arg(ptr: *const u8, len: i64, null: i64) 
 pub unsafe extern "C-unwind" fn lrt_pg_query(pool: i64, tx: i64, sql: *const u8, sql_len: i64) -> i64 {
     let sql = unsafe { Str::from_raw(sql, sql_len) };
     let args = take_args();
-    run(pool, tx, |conn| conn.query(sql, &args))
+    let span = crate::trace::query_start(sql);
+    let handle = run(pool, tx, |conn| conn.query(sql, &args));
+    crate::trace::query_end(span, handle >= 0);
+    handle
 }
 
 /// Run several statements, without parameters. Returns a result handle for the last one.
@@ -1018,7 +1021,10 @@ pub unsafe extern "C-unwind" fn lrt_pg_query(pool: i64, tx: i64, sql: *const u8,
 pub unsafe extern "C-unwind" fn lrt_pg_script(pool: i64, tx: i64, sql: *const u8, sql_len: i64) -> i64 {
     let sql = unsafe { Str::from_raw(sql, sql_len) };
     take_args();
-    run(pool, tx, |conn| conn.script(sql))
+    let span = crate::trace::query_start(sql);
+    let handle = run(pool, tx, |conn| conn.script(sql));
+    crate::trace::query_end(span, handle >= 0);
+    handle
 }
 
 /// Start a transaction on a connection of its own. Returns its id, or -1.

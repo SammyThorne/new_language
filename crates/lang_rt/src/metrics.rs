@@ -875,6 +875,17 @@ fn write_process(out: &mut String) {
     sample(out, "runtime_tasks", "", None, crate::fiber::live_tasks() as f64);
     family(out, "runtime_worker_threads", "gauge", "Threads that run tasks.");
     sample(out, "runtime_worker_threads", "", None, crate::fiber::worker_threads() as f64);
+    if crate::trace::on() {
+        family(out, "trace_spans_exported_total", "counter", "Spans the trace collector has taken.");
+        sample(out, "trace_spans_exported_total", "", None, crate::trace::exported() as f64);
+        family(
+            out,
+            "trace_spans_dropped_total",
+            "counter",
+            "Spans dropped: the queue was full, or the collector did not take them.",
+        );
+        sample(out, "trace_spans_dropped_total", "", None, crate::trace::dropped() as f64);
+    }
     family(out, "build_info", "gauge", "The version of the language the program was built with.");
     sample(out, "build_info", "", Some(("version", env!("CARGO_PKG_VERSION"))), 1.0);
 }

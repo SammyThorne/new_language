@@ -40,6 +40,7 @@ pub mod strings;
 pub mod sys;
 pub mod tasks;
 pub mod tls;
+pub mod trace;
 pub mod uuid;
 pub mod ws;
 
@@ -57,6 +58,7 @@ pub extern "C-unwind" fn main(argc: std::ffi::c_int, argv: *const *const std::ff
     // SAFETY: the code generator always defines `lang_user_main` as `void(void)` with the C
     // calling convention.
     unsafe { lang_user_main() };
+    trace::at_exit();
     out::flush();
     0
 }

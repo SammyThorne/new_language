@@ -1,0 +1,122 @@
+"""
+Traces for an OpenTelemetry collector (Jaeger, Tempo, Honeycomb, ...): what each request did and
+how long each part took, across services.
+
+    import trace
+
+    def main():
+        trace.init("photos")       # OTEL_EXPORTER_OTLP_ENDPOINT, or trace.init("photos", endpoint="http://localhost:4318")
+        server = http.Server()
+        ...
+
+    def resize(photo: Photo, width: int) -> Photo:
+        with trace.span("resize image", {"width": str(width)}):
+            ...
+
+Once it is on, every request a server answers is a span named `METHOD route`, continuing the
+trace in its `traceparent` header if it has one; every `http.fetch` is a span of that one and
+sends `traceparent` on; every PostgreSQL query is a span named by its first word (`SELECT`),
+never its values. Log lines written during a span carry `trace_id` and `span_id`. Spans are sent
+in batches, every 5 s, as OTLP/JSON over HTTP; at most 2048 wait, and the rest are dropped and
+counted in `trace_spans_dropped_total` on `/metrics`.
+"""
+
+@extern("lrt_trace_init")
+def init_raw(service: str, endpoint: str, ratio: float) -> int
+
+@extern("lrt_trace_start")
+def start_raw(name: str) -> int
+
+@extern("lrt_trace_set")
+def set_raw(handle: int, key: str, value: str)
+
+@extern("lrt_trace_fail")
+def fail_raw(handle: int, message: str)
+
+@extern("lrt_trace_end")
+def end_raw(handle: int)
+
+@extern("lrt_trace_id")
+def trace_id_raw() -> str
+
+@extern("lrt_trace_traceparent")
+def traceparent_raw() -> str
+
+@extern("lrt_trace_flush")
+def flush_raw()
+
+@extern("lrt_io_error")
+def last_error() -> str
+
+pub def init(service: str = "", endpoint: str? = None, ratio: float? = None) -> bool:
+    """
+    Turn tracing on, sending spans to the collector at `endpoint` (its base URL, such as
+    `http://localhost:4318`; `/v1/traces` is added), else the environment's
+    `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (the full URL) or `OTEL_EXPORTER_OTLP_ENDPOINT`.
+    Without one, tracing stays off and this returns `False`. The service is named
+    `OTEL_SERVICE_NAME` if set, else `service`, else the program's file name. A share `ratio`
+    of new traces is recorded (from 0 to 1), else `OTEL_TRACES_SAMPLER_ARG`, else all; a trace
+    that came with a request keeps the caller's choice. Once per process: later calls keep the
+    first's settings. Panics on a bad ratio or a URL that is not http:// or https://.
+    """
+    url = ""
+    match endpoint:
+        case Some(given):
+            url = given
+        case None:
+            pass
+    share = -1.0
+    match ratio:
+        case Some(chosen):
+            share = chosen
+            if share < 0.0 or share > 1.0:
+                panic(f"trace.init: the ratio must be from 0 to 1, not {share}")
+        case None:
+            pass
+    on = init_raw(service, url, share)
+    if on < 0:
+        panic(f"trace.init: {last_error()}")
+    return on == 1
+
+pub struct Span:
+    """A span of the program's own, from `trace.span`, for a `with` statement."""
+    priv handle: int
+
+impl Span:
+    def set(self, key: str, value: str):
+        """Set an attribute, such as `span.set("photo.id", str(id))`."""
+        set_raw(self.handle, key, value)
+
+    def fail(self, message: str):
+        """Mark the span as failed, with a message the collector shows."""
+        fail_raw(self.handle, message)
+
+    def exit(self):
+        end_raw(self.handle)
+        self.handle = 0
+
+pub def span(name: str, attributes: dict[str, str] = {}) -> Span:
+    """
+    A span around the block of a `with` statement, as a child of the current one:
+    `with trace.span("resize image", {"width": "800"}) as s:`. It ends when the block is left,
+    however it is left. Nothing is recorded while tracing is off.
+    """
+    handle = start_raw(name)
+    if handle != 0:
+        for key, value in attributes.items():
+            set_raw(handle, key, value)
+    return Span(handle)
+
+pub def trace_id() -> str:
+    """The current trace's ID, 32 hex digits, or `""` outside a trace."""
+    return trace_id_raw()
+
+pub def traceparent() -> str:
+    """The current span as a W3C `traceparent` header value, or `""` outside a trace: for
+    passing the trace on by something other than `http.fetch`, such as a queue message."""
+    return traceparent_raw()
+
+pub def flush():
+    """Send the spans that are waiting now, waiting up to 5 s for the collector. The program
+    does this itself when it ends."""
+    flush_raw()

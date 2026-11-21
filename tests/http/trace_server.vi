@@ -1,0 +1,44 @@
+# Traces (docs/14, milestone 10). Run by crates/lang_cli/tests/trace.rs, which starts a fake
+# OpenTelemetry collector, sets OTEL_EXPORTER_OTLP_ENDPOINT to it, sends requests and reads the
+# spans the server sends.
+
+import http
+import io
+import log
+import trace
+
+def hello(req: http.Request) -> Result[http.Response]:
+    log.info("saying hello")
+    return http.text(f"hello {req.header('traceparent').unwrap_or('-')}")
+
+def chain(req: http.Request) -> Result[http.Response]:
+    # A request to this server's own /hello, as a child of this request's span.
+    host = req.header("Host").unwrap_or("")
+    answer = http.fetch("GET", f"http://{host}/hello?token=secret")?
+    return http.text(f"chain {trace.trace_id()} {answer.text()?}")
+
+def work(req: http.Request) -> Result[http.Response]:
+    with trace.span("resize image", {"width": "800"}) as outer:
+        outer.set("photo.id", "7")
+        with trace.span("encode") as inner:
+            inner.fail("out of colours")
+    return http.text("worked")
+
+def boom(req: http.Request) -> Result[http.Response]:
+    panic("boom")
+
+def main():
+    on = trace.init("trace-test")
+    server = http.Server()
+    server.use(http.request_log())
+    server.get("/hello", hello)
+    server.get("/chain", chain)
+    server.get("/work", work)
+    server.get("/boom", boom)
+    server.get("/items/{id}", lambda req: http.text(f"item {req.param('id')}"))
+    server.metrics(public=True, dashboard=False)
+    port = server.bind("127.0.0.1:0").unwrap()
+    if not on:
+        io.eprint("tracing is off")
+    io.eprint(f"listening on {port}")
+    server.serve()

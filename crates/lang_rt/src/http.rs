@@ -1337,11 +1337,15 @@ fn serve_connection(
             metrics::request_started();
             Instant::now()
         });
+        let span = if crate::trace::on() { start_span(&request) } else { None };
         // A panicking handler ends only this request, with a 500; the panic was reported
         // where it happened. Mutexes it held are released.
         let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(code, env, handle)));
         if let Some(started) = started {
             record(&request, started, handled.is_err());
+        }
+        if let Some(span) = span {
+            end_span(span, &request, handled.is_err());
         }
         if handled.is_err() {
             if let Some(me) = fiber::current() {
@@ -1412,6 +1416,44 @@ fn record(request: &Request, started: Instant, panicked: bool) {
         }
     }
     metrics::request_finished(request.route, method, status, elapsed, bytes);
+}
+
+/// The status a request was answered with, as the client saw it: a handler that panicked or
+/// gave no response sent a 500, and a WebSocket a 101.
+fn final_status(request: &Request, panicked: bool) -> i64 {
+    if request.upgraded.is_some() {
+        101
+    } else if panicked || !request.responded {
+        500
+    } else {
+        request.status
+    }
+}
+
+/// Start the span of a request (`trace.rs`), continuing the caller's trace.
+#[cold]
+#[inline(never)]
+fn start_span(request: &Request) -> Option<Box<crate::trace::Open>> {
+    crate::trace::server_start(
+        request.method(),
+        request.path(),
+        request.header("traceparent"),
+        request.header("tracestate"),
+    )
+}
+
+/// End the span of a request, named by its route. The metrics' and health checks' routes are
+/// left out of traces, as they are of the metrics and the access log.
+#[cold]
+#[inline(never)]
+fn end_span(span: Box<crate::trace::Open>, request: &Request, panicked: bool) {
+    if request.route_flags != 0 {
+        crate::trace::discard(span);
+        return;
+    }
+    let route = (request.route != metrics::UNMATCHED).then(|| metrics::route_pattern(request.route)).flatten();
+    let client = client_address(request).to_string();
+    crate::trace::server_end(span, request.method(), route, final_status(request, panicked), Some(client));
 }
 
 /// Keep a server error or slow request for the dashboard, with its request ID: from the
@@ -1581,13 +1623,18 @@ pub unsafe extern "C-unwind" fn lrt_http_req_body_bytes(handle: i64) -> Str {
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn lrt_http_req_client_ip(handle: i64) -> Str {
     let request = unsafe { request(handle) };
+    Str::from_bytes(client_address(request).to_string().as_bytes())
+}
+
+/// The client's address, through the trusted proxies.
+fn client_address(request: &Request) -> std::net::IpAddr {
     let peer = request.connection().peer.ip().to_canonical();
     let trusted = TRUSTED_PROXIES.read().unwrap_or_else(|p| p.into_inner());
     let forwarded = request
         .header_list()
         .filter(|h| request.bytes(h.name).eq_ignore_ascii_case(b"x-forwarded-for"))
         .map(|h| request.text(h.value));
-    Str::from_bytes(client_ip(peer, forwarded, &trusted).to_string().as_bytes())
+    client_ip(peer, forwarded, &trusted)
 }
 
 /// Whether what this request carries stayed off the open network: it came over TLS, from this

@@ -56,27 +56,47 @@ fn json_format() -> bool {
 /// The longest request ID kept; `http.request_log` accepts no longer one from a client.
 pub(crate) const MAX_REQUEST_ID: usize = 128;
 
-/// What a task carries for its log lines: the ID of the request it is handling, if any. It is a
-/// counted string, not a collected one, so that a thread outside the fiber runtime can hold it
-/// in a thread-local, which the collector does not scan; and one word plus a length, so that a
-/// task without a request costs nothing more. Tasks start with (a reference to) their parent's.
-pub(crate) struct Context(Cell<Option<Arc<str>>>);
+/// What a task carries for its log lines: the ID of the request it is handling, and the trace
+/// and span it is in (`trace.rs`), if any. They are counted, not collected, so that a thread
+/// outside the fiber runtime can hold them in a thread-local, which the collector does not
+/// scan; and three words, so that a task without a request costs little more. Tasks start with
+/// (references to) their parent's.
+pub(crate) struct Context {
+    request_id: Cell<Option<Arc<str>>>,
+    trace: Cell<Option<Arc<TraceContext>>>,
+}
+
+/// Where a task is in a trace: the trace, the current span, whether the trace is recorded, and
+/// the caller's `tracestate`, passed on as it came.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TraceContext {
+    pub(crate) trace_id: u128,
+    pub(crate) span_id: u64,
+    pub(crate) sampled: bool,
+    pub(crate) state: Option<Arc<str>>,
+}
 
 impl Context {
     /// The running task's context, for a task it spawns.
     pub(crate) fn inherited() -> Context {
-        Context(Cell::new(with_current(Context::request_id)))
+        with_current(|c| Context { request_id: Cell::new(c.request_id()), trace: Cell::new(c.trace()) })
     }
 
     fn request_id(&self) -> Option<Arc<str>> {
-        let id = self.0.take();
-        self.0.set(id.clone());
+        let id = self.request_id.take();
+        self.request_id.set(id.clone());
         id
+    }
+
+    fn trace(&self) -> Option<Arc<TraceContext>> {
+        let trace = self.trace.take();
+        self.trace.set(trace.clone());
+        trace
     }
 }
 
 thread_local! {
-    static THREAD_CONTEXT: Context = const { Context(Cell::new(None)) };
+    static THREAD_CONTEXT: Context = const { Context { request_id: Cell::new(None), trace: Cell::new(None) } };
 }
 
 fn with_current<R>(f: impl FnOnce(&Context) -> R) -> R {
@@ -86,10 +106,23 @@ fn with_current<R>(f: impl FnOnce(&Context) -> R) -> R {
     }
 }
 
-/// Forget the running task's request ID: after a handler that panicked, so the connection's
-/// next request does not log with it.
+/// Forget the running task's request ID and trace: after a handler that panicked, so the
+/// connection's next request does not log with them.
 pub(crate) fn clear_request_id() {
-    with_current(|c| c.0.set(None));
+    with_current(|c| {
+        c.request_id.set(None);
+        c.trace.set(None);
+    });
+}
+
+/// The running task's trace context, if it is in a trace.
+pub(crate) fn current_trace() -> Option<Arc<TraceContext>> {
+    with_current(Context::trace)
+}
+
+/// Set the running task's trace context.
+pub(crate) fn set_trace(trace: Option<Arc<TraceContext>>) {
+    with_current(|c| c.trace.set(trace));
 }
 
 /// Set the running task's request ID (`""` to clear it). Longer IDs are cut to
@@ -105,7 +138,7 @@ pub unsafe extern "C-unwind" fn lrt_log_set_request_id(ptr: *const u8, len: i64)
         end -= 1;
     }
     let id = (end > 0).then(|| Arc::from(&id[..end]));
-    with_current(|c| c.0.set(id));
+    with_current(|c| c.request_id.set(id));
 }
 
 /// The running task's request ID, if it has one.
@@ -181,8 +214,9 @@ pub(crate) fn write_line(level: &str, message: &str, fields: &str) {
     if number < log_level() {
         return;
     }
-    let id = with_current(Context::request_id);
-    let line = format_line(level, message, id.as_deref().unwrap_or(""), fields, json_format(), now());
+    let (id, trace) = with_current(|c| (c.request_id(), c.trace()));
+    let ids = trace.map(|t| (format!("{:032x}", t.trace_id), format!("{:016x}", t.span_id)));
+    let line = format_line(level, message, id.as_deref().unwrap_or(""), ids.as_ref(), fields, json_format(), now());
     emit(&line, number >= 2);
 }
 
@@ -214,7 +248,15 @@ fn pairs(fields: &str) -> impl Iterator<Item = (&str, &str)> {
     })
 }
 
-fn format_line(level: &str, message: &str, request_id: &str, fields: &str, json: bool, millis: u64) -> Vec<u8> {
+fn format_line(
+    level: &str,
+    message: &str,
+    request_id: &str,
+    trace: Option<&(String, String)>,
+    fields: &str,
+    json: bool,
+    millis: u64,
+) -> Vec<u8> {
     let mut line = String::with_capacity(48 + message.len() + fields.len() + request_id.len());
     if json {
         line.push_str("{\"time\":\"");
@@ -227,10 +269,13 @@ fn format_line(level: &str, message: &str, request_id: &str, fields: &str, json:
             line.push_str(",\"request_id\":");
             push_json_string(&mut line, request_id);
         }
+        if let Some((trace_id, span_id)) = trace {
+            line.push_str(&format!(",\"trace_id\":\"{trace_id}\",\"span_id\":\"{span_id}\""));
+        }
         for (name, value) in pairs(fields) {
             line.push(',');
             // The line's own keys win; a field with one of their names keeps it with a `_`.
-            if matches!(name, "time" | "level" | "msg" | "request_id") {
+            if matches!(name, "time" | "level" | "msg" | "request_id" | "trace_id" | "span_id") {
                 push_json_string(&mut line, &format!("_{name}"));
             } else {
                 push_json_string(&mut line, name);
@@ -247,6 +292,10 @@ fn format_line(level: &str, message: &str, request_id: &str, fields: &str, json:
         line.push_str(message);
         if !request_id.is_empty() {
             push_text_field(&mut line, "request_id", request_id);
+        }
+        if let Some((trace_id, span_id)) = trace {
+            push_text_field(&mut line, "trace_id", trace_id);
+            push_text_field(&mut line, "span_id", span_id);
         }
         for (name, value) in pairs(fields) {
             push_text_field(&mut line, name, value);
@@ -346,7 +395,8 @@ mod tests {
     use super::*;
 
     fn line(json: bool, request_id: &str, fields: &str) -> String {
-        String::from_utf8(format_line("info", "saved \"a\"", request_id, fields, json, 1_795_000_000_123)).unwrap()
+        String::from_utf8(format_line("info", "saved \"a\"", request_id, None, fields, json, 1_795_000_000_123))
+            .unwrap()
     }
 
     #[test]
@@ -363,6 +413,20 @@ mod tests {
         assert_eq!(
             line(true, "ab12", "user\x0042\0msg\0line\nbreak\0"),
             "{\"time\":\"2026-11-18T11:06:40.123Z\",\"level\":\"info\",\"msg\":\"saved \\\"a\\\"\",\"request_id\":\"ab12\",\"user\":\"42\",\"_msg\":\"line\\nbreak\"}\n"
+        );
+    }
+    #[test]
+    fn lines_in_a_trace_carry_its_ids() {
+        let ids = ("4bf92f3577b34da6a3ce929d0e0e4736".to_string(), "00f067aa0ba902b7".to_string());
+        let text = format_line("warn", "slow", "r1", Some(&ids), "span_id\0mine\0", false, 1_795_000_000_123);
+        assert_eq!(
+            String::from_utf8(text).unwrap(),
+            "2026-11-18T11:06:40.123Z WARN  slow request_id=r1 trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7 span_id=mine\n"
+        );
+        let json = format_line("warn", "slow", "", Some(&ids), "span_id\0mine\0", true, 1_795_000_000_123);
+        assert_eq!(
+            String::from_utf8(json).unwrap(),
+            "{\"time\":\"2026-11-18T11:06:40.123Z\",\"level\":\"warn\",\"msg\":\"slow\",\"trace_id\":\"4bf92f3577b34da6a3ce929d0e0e4736\",\"span_id\":\"00f067aa0ba902b7\",\"_span_id\":\"mine\"}\n"
         );
     }
 }
