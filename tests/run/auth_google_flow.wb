@@ -1,7 +1,8 @@
 # Sign-in with Google against a fake Google in the same program (docs/13, milestone 3): the
 # whole flow, each way the callback refuses, the policies, `on_login`, open redirects, session
-# cookies, protection and logout. The fake's ID tokens are not signed; milestone 4 checks
-# signatures.
+# cookies, protection and logout. The fake cannot sign its ID tokens, so the provider is told
+# not to check signatures (`keys=""`); crates/lang_cli/tests/oidc.rs tests them with a fake
+# Google that signs.
 # expect: signed out: 401 {"error":"sign-in required"} | Cookie realm="sign-in"
 # expect: browser: 302 /auth/google/login?next=%2Fnotes%3Fpage%3D2
 # expect: home: Hello, guest
@@ -182,7 +183,7 @@ def main():
     ports: Channel[int] = Channel(1)
     task = spawn fake_google(ports)
     base = f"http://127.0.0.1:{ports.recv().unwrap()}"
-    endpoints = auth.Endpoints(authorize=base + "/authorize", token=base + "/token", keys=base + "/keys")
+    endpoints = auth.Endpoints(authorize=base + "/authorize", token=base + "/token", keys="")
     google = auth.google_for_tests(endpoints=endpoints)
     server = app(google)
 

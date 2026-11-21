@@ -189,6 +189,7 @@ dependencies = [
  "lang_names",
  "lang_sema",
  "lang_syntax",
+ "ring",
  "rustls",
 ]
 

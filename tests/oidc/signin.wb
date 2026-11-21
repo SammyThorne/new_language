@@ -1,0 +1,87 @@
+# Sign-in with Google against a fake Google that signs its ID tokens (docs/13, milestone 4).
+# crates/lang_cli/tests/oidc.rs runs the fake and passes its address; this program serves an app
+# that trusts it, and signs in to the app over HTTP as a browser would. The fake's accounts are
+# named for what it does to their tokens.
+# expect: together: 302 302 | key fetches: 1
+# expect: signed: 302 | me: Ann Lee (ann@example.com)
+# expect: tampered: 401 Sign-in failed
+# expect: alg none: 401 Sign-in failed
+# expect: alg HS256: 401 Sign-in failed
+# expect: wrong key: 401 Sign-in failed
+# expect: key fetches: 1
+# expect: unknown key: 401 Sign-in failed | key fetches: 2
+# expect: rotated: 302 | key fetches: 3
+# expect: rotated again: 302 | key fetches: 3
+
+import http
+import auth
+import os
+
+def me(req: http.Request) -> Result[http.Response]:
+    user = auth.user(req).unwrap()
+    return http.text(f"{user.name} ({user.email})")
+
+def app(google: str, ports: Channel[int]):
+    server = http.Server()
+    port = server.bind("127.0.0.1:0").unwrap()
+    endpoints = auth.Endpoints(authorize=google + "/authorize", token=google + "/token", keys=google + "/keys")
+    provider = auth.google_for_tests(endpoints=endpoints, redirect_uri=f"http://127.0.0.1:{port}/auth/google/callback")
+    provider.install(server)
+    server.get("/me", auth.protect(me))
+    ports.send(port)
+    server.serve()
+
+# ---- a browser ----------------------------------------------------------------------------
+
+def cookie(response: http.ClientResponse, name: str) -> str:
+    """`name=value`, from the response's `Set-Cookie` headers."""
+    for line in response.header("Set-Cookie").unwrap_or("").split("\n"):
+        if line.starts_with(name + "="):
+            return line.partition(";")[0]
+    return ""
+
+def sign_in(site: str, scenario: str) -> http.ClientResponse:
+    """The app's login page, Google's, and back to the app's callback."""
+    login = http.get(site + "/auth/google/login").unwrap()
+    at_google = http.get(login.header("Location").unwrap() + "&login_hint=" + scenario).unwrap()
+    return http.fetch("GET", at_google.header("Location").unwrap(), headers={"Cookie": cookie(login, "oauth")}).unwrap()
+
+def signer(site: str, scenario: str, statuses: Channel[int]):
+    statuses.send(sign_in(site, scenario).status)
+
+def title(response: http.ClientResponse) -> str:
+    return response.text().unwrap().partition("<h1>")[2].partition("</h1>")[0]
+
+def fetches(google: str) -> str:
+    return "key fetches: " + http.get(google + "/fetches").unwrap().text().unwrap()
+
+def main():
+    google = os.args()[1]
+    ports: Channel[int] = Channel(1)
+    spawn app(google, ports)
+    site = f"http://127.0.0.1:{ports.recv().unwrap()}"
+
+    # Two sign-ins at once, before the keys are cached: the second waits for the first's fetch.
+    statuses: Channel[int] = Channel(2)
+    spawn signer(site, "ok", statuses)
+    spawn signer(site, "ok", statuses)
+    print("together:", statuses.recv().unwrap(), statuses.recv().unwrap(), "|", fetches(google))
+
+    r = sign_in(site, "ok")
+    me = http.fetch("GET", site + "/me", headers={"Cookie": cookie(r, "session")}).unwrap()
+    print("signed:", r.status, "| me:", me.text().unwrap())
+
+    # Tokens the provider refuses, all with the cached keys.
+    for label, scenario in [("tampered", "tampered"), ("alg none", "none"), ("alg HS256", "hs256"), ("wrong key", "wrong_key")]:
+        r = sign_in(site, scenario)
+        print(f"{label}:", r.status, title(r))
+    print(fetches(google))
+
+    # A key the set does not have: fetched again, and still refused.
+    r = sign_in(site, "unknown_kid")
+    print("unknown key:", r.status, title(r), "|", fetches(google))
+
+    # Google starts signing with a new key: the first sign-in fetches it.
+    http.get(google + "/rotate").unwrap()
+    print("rotated:", sign_in(site, "ok").status, "|", fetches(google))
+    print("rotated again:", sign_in(site, "ok").status, "|", fetches(google))

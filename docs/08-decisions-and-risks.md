@@ -1039,6 +1039,16 @@ Milestone 3 of the [Google sign-in plan](13-google-oauth-plan.md): `stdlib/auth.
 
 **PKCE is sent though Google's web-server page does not describe it.** Read again on 2026-11-20, the page's token exchange lists no `code_verifier`, and the authorization response it shows has no `iss`. Google's discovery document advertises `S256` and the `iss` parameter. So the code sends PKCE as the plan says and checks `iss` only when present. If Google ever refused a verifier from a confidential client, the symptom would be `invalid_grant` on every sign-in, and the fix is to stop sending it. Milestone 6's check with a real client settles it.
 
+### D103. ID token signatures and the key cache (Google sign-in plan, milestone 4)
+
+Milestone 4 of the [Google sign-in plan](13-google-oauth-plan.md). The callback now checks the ID token's RS256 signature with `crypto.verify_rs256`, against the key its header's `kid` names in Google's JSON Web Key Set.
+
+**The key cache.** A provider holds `Mutex[KeyCache]`: the keys by ID, frozen, and when they expire. A lookup takes the lock; the set is fetched when it has expired, or when it lacks the `kid`, since Google publishes a key before signing with it. A `kid` still missing after that fetch refuses the token. The lock is held across the fetch, which is safe because the runtime's `Mutex` parks the waiting tasks rather than blocking their threads, and it makes sign-ins that arrive together fetch once. The keys are kept for the response's `Cache-Control: max-age`, at least an hour and at most a day, or an hour without one. Only keys with `kty` RSA, `alg` RS256 (or none) and `use` sig (or none) are kept.
+
+**Fetching again for each unknown `kid` is not rate-limited.** The ID token comes from Google's token endpoint over TLS, in answer to a code only Google issued, so nobody else chooses its `kid`. A cool-down would also delay the first sign-in after Google rotates its keys.
+
+**Fakes that cannot sign.** `auth.Endpoints(keys="")` skips the signature check, and its docstring says it is for fakes. Only `google_for_tests` takes endpoints, so a provider made by `auth.google` always checks. The signing tests are in Rust (`crates/lang_cli/tests/oidc.rs`, with `ring`, already in `Cargo.lock`, as a dev-dependency), since `crypto` has no RSA signing and the plan rejected adding it for tests alone.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

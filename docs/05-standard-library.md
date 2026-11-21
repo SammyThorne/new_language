@@ -469,7 +469,7 @@ def main():
 | `provider.login_url(next="/") -> str` | The login route's URL, for links |
 | `provider.logout_response(location="/") -> http.Response` | For an app's own logout route |
 | `provider.test_cookie(user, expires_in=None) -> str` | A `Cookie` header value signing a test request in |
-| `auth.google_for_tests(secret=..., endpoints=None, ...) -> auth.Provider` | A provider without a credentials file; `endpoints=auth.Endpoints(...)` points it at a fake Google |
+| `auth.google_for_tests(secret=..., endpoints=None, ...) -> auth.Provider` | A provider without a credentials file; `endpoints=auth.Endpoints(...)` points it at a fake Google; `keys=""` there skips the signature check, for a fake that cannot sign |
 | `auth.user(req) -> auth.User?` | The signed-in user |
 | `auth.required` | Middleware refusing signed-out requests |
 | `auth.protect(handler) -> http.Handler` | One handler, protected |
@@ -478,7 +478,7 @@ def main():
 
 A signed-out request to a protected route is refused in one of two ways. A browser opening a page (a `GET` or `HEAD` whose `Accept` names `text/html`) is redirected to the login route, with `next` set to the page and its query. Anything else gets `401 {"error": "sign-in required"}`. `next` must be a path on the site; anything else becomes `/`. A protected route on a server without a provider is a 500, with the reason logged.
 
-The session cookie is `session`, or `__Host-session` when the redirect URI is `https`, and it is `HttpOnly` and `SameSite=Lax`. Its value is the JSON of the user and its times, signed with HMAC-SHA256. The key is derived from the secret, so the cookie holds no tokens and needs no database. Changing `SESSION_SECRET` signs everyone out. Without a secret, `http://localhost` development gets a key made for the run, with a warning, and an `https` setup is an error. The callback refuses an expired or missing flow cookie, a wrong `state`, an `error` from Google, a refused code, and an ID token whose header is not RS256 or whose issuer, audience, times (60 seconds of leeway) or nonce are wrong. Each refusal shows a short page with a link to try again, and the reason for a refused token is logged as a warning. Milestone 4 of docs/13 adds the token's signature check.
+The session cookie is `session`, or `__Host-session` when the redirect URI is `https`, and it is `HttpOnly` and `SameSite=Lax`. Its value is the JSON of the user and its times, signed with HMAC-SHA256. The key is derived from the secret, so the cookie holds no tokens and needs no database. Changing `SESSION_SECRET` signs everyone out. Without a secret, `http://localhost` development gets a key made for the run, with a warning, and an `https` setup is an error. The callback refuses an expired or missing flow cookie, a wrong `state`, an `error` from Google, a refused code, and an ID token whose header is not RS256 or whose issuer, audience, times (60 seconds of leeway) or nonce are wrong. Each refusal shows a short page with a link to try again, and the reason for a refused token is logged as a warning. The token's RS256 signature is checked against Google's published keys (D103). The provider caches them for the `max-age` Google sends, from an hour to a day, fetches them again for a key it does not have, and holds a lock while it fetches, so sign-ins arriving together fetch once.
 
 A test signs a request in without Google:
 

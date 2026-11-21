@@ -97,7 +97,9 @@ fields changed but `id`, to sign them in, or an error (`http.Error(403, "...")`)
 @frozen
 pub struct Endpoints:
     """Where sign-in sends users and requests: Google's, unless a test points a provider at a
-    fake Google with `auth.google_for_tests(endpoints=...)`."""
+    fake Google with `auth.google_for_tests(endpoints=...)`. `keys` is the JSON Web Key Set the
+    ID tokens' signatures are checked with; a test provider with `keys=""` does not check them,
+    for a fake Google that cannot sign."""
     authorize: str = "https://accounts.google.com/o/oauth2/v2/auth"
     token: str = "https://oauth2.googleapis.com/token"
     keys: str = "https://www.googleapis.com/oauth2/v3/certs"
@@ -129,6 +131,18 @@ pub struct Provider:
     priv flow_cookie: str
     priv secure: bool
     priv endpoints: Endpoints
+    priv key_cache: Mutex[KeyCache]
+
+@frozen
+struct Key:
+    """An RSA public key of the JSON Web Key Set: its modulus and exponent."""
+    n: bytes
+    e: bytes
+
+struct KeyCache:
+    keys: frozendict[str, Key]
+    # When to fetch the keys again (seconds since 1970); 0 before the first fetch.
+    expires: float
 
 pub def google(
     credentials: str = "",
@@ -307,6 +321,7 @@ def make_provider(
     if callback_path == login_path or callback_path == logout_path:
         return Err(AuthError(f"the redirect URI's path {callback_path} is also the login or logout route; register another, such as /auth/google/callback"))
     master = session_secret(secret, secure)?
+    no_keys: dict[str, Key] = {}
     domains = tuple([domain.lower() for domain in allowed_domains])
     emails = tuple([email.lower() for email in allowed_emails])
     session_cookie = "__Host-session" if secure else "session"
@@ -331,6 +346,7 @@ def make_provider(
         flow_cookie,
         secure,
         endpoints,
+        Mutex(KeyCache(frozendict(no_keys), 0.0)),
     )
 
 def split_redirect_uri(uri: str) -> Result[tuple[bool, str], AuthError]:
@@ -618,6 +634,11 @@ impl Provider:
         claims = decode_part(parts[1])
         if header["alg"].as_str() != Some("RS256"):
             return Err(f"its algorithm is {header['alg']}, not RS256")
+        if self.endpoints.keys != "":
+            key = self.key(header["kid"].as_str().unwrap_or(""))?
+            signature = crypto.base64url_decode(parts[2]).unwrap_or("".encode())
+            if not crypto.verify_rs256(key.n, key.e, (parts[0] + "." + parts[1]).encode(), signature):
+                return Err("its signature is not valid")
         issuer = claims["iss"].as_str().unwrap_or("")
         if issuer != ISSUER and issuer != "accounts.google.com":
             return Err(f"its issuer is {issuer!r}")
@@ -643,6 +664,27 @@ impl Provider:
             return Err("it names no account (`sub`)")
         return claims
 
+    def key(self, id: str) -> Result[Key, str]:
+        """The signing key `id` (a token's `kid`), from the cached key set. The set is fetched
+        when the cache has expired, and once more for a key it does not have, since Google adds
+        keys before signing with them. The lock is held during the fetch, so sign-ins arriving
+        together fetch once."""
+        with self.key_cache.lock() as cache:
+            if time.now() < cache.expires:
+                match cache.keys.get(id):
+                    case Some(found):
+                        return found
+                    case None:
+                        pass
+            fetched, max_age = fetch_keys(self.endpoints.keys)?
+            cache.keys = fetched
+            cache.expires = time.now() + max_age
+            match fetched.get(id):
+                case Some(found):
+                    return found
+                case None:
+                    return Err(f"its key {id!r} is not one of Google's")
+
     def logout(self, req: http.Request) -> Result[http.Response]:
         match req.header("Origin"):
             case Some(origin):
@@ -660,6 +702,43 @@ impl Provider:
             link = f"<p><a href=\"{escape(self.login_path)}\">Sign in again</a></p>"
         body = f"<!doctype html><meta charset=\"utf-8\"><title>{escape(title)}</title><h1>{escape(title)}</h1><p>{escape(message)}</p>{link}"
         return http.html(body, status)
+
+def fetch_keys(url: str) -> Result[tuple[frozendict[str, Key], float], str]:
+    """The RSA signing keys at `url`, by ID, and how long to keep them: the response's
+    `max-age`, from one hour to a day, or an hour if it gives none."""
+    match http.get(url):
+        case Ok(response):
+            if not response.ok():
+                return Err(f"fetching the signing keys from {url} gave {response.status}")
+            match response.json():
+                case Ok(body):
+                    keys: dict[str, Key] = {}
+                    match body["keys"]:
+                        case json.Value.Array(items):
+                            for item in items:
+                                kty = item["kty"].as_str().unwrap_or("")
+                                alg = item["alg"].as_str().unwrap_or("RS256")
+                                use = item["use"].as_str().unwrap_or("sig")
+                                id = item["kid"].as_str().unwrap_or("")
+                                n = crypto.base64url_decode(item["n"].as_str().unwrap_or(""))
+                                e = crypto.base64url_decode(item["e"].as_str().unwrap_or(""))
+                                if kty == "RSA" and alg == "RS256" and use == "sig" and n != None and e != None:
+                                    keys[id] = Key(n.unwrap(), e.unwrap())
+                        case _:
+                            return Err(f"the signing keys from {url} are not a JSON Web Key Set")
+                    return (frozendict(keys), max_age(response.header("Cache-Control").unwrap_or("")))
+                case Err(problem):
+                    return Err(f"the signing keys from {url} are not JSON: {problem.message()}")
+        case Err(problem):
+            return Err(f"cannot fetch the signing keys: {problem.message()}")
+
+def max_age(cache_control: str) -> float:
+    seconds = 3600
+    for part in cache_control.split(","):
+        name, equals, value = part.strip().partition("=")
+        if name.lower() == "max-age" and equals == "=":
+            seconds = int.parse(value.strip()).unwrap_or(3600)
+    return float(min(max(seconds, 3600), 86400))
 
 def decode_part(text: str) -> json.Value:
     match crypto.base64url_decode(text):

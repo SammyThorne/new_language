@@ -1,6 +1,6 @@
 # Sign in with Google: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 3 are built; the decisions (section 5) are confirmed.** Each milestone in section 6 ends with a "Done" note once built. It adds a standard library module, `auth`, that lets a program sign its users in with their Google accounts. The program points it at the credentials file it downloaded from the Google Cloud console. It marks the routes that need a signed-in user with `@auth.required`, or by giving the handler a parameter of type `auth.User`. The module provides the login, callback and logout routes, the session cookie, and the checks of Google's tokens. The program writes none of the OAuth flow itself.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 4 are built; the decisions (section 5) are confirmed.** Each milestone in section 6 ends with a "Done" note once built. It adds a standard library module, `auth`, that lets a program sign its users in with their Google accounts. The program points it at the credentials file it downloaded from the Google Cloud console. It marks the routes that need a signed-in user with `@auth.required`, or by giving the handler a parameter of type `auth.User`. The module provides the login, callback and logout routes, the session cookie, and the checks of Google's tokens. The program writes none of the OAuth flow itself.
 
 It mirrors what web developers get elsewhere:
 - Flask: Flask-Login's `@login_required` on top of Authlib or Flask-Dance.
@@ -540,6 +540,11 @@ Each milestone follows docs/11's rules: the gates (`make lint`, `make test`, `ma
   - `alg: none` and `alg: HS256`, both rejected.
   - An unknown `kid`, then a refetch and success after the fake rotates keys.
   - Two concurrent sign-ins cause one JWKS fetch.
+
+**Done** (D103). Everything listed, with these differences:
+- The fake Google is `crates/lang_cli/tests/oidc.rs`, a threaded `std::net` server in the test with two committed test-only keys (`tests/fixtures/oidc_test_key.pem` and `oidc_test_key_2.pem`). It runs `tests/oidc/signin.wb`, which serves an app that trusts the fake and signs in to it over HTTP. `ring` became a dev-dependency of `lang_cli`; it was already in `Cargo.lock`.
+- The milestone 3 tests keep their in-program fake, which cannot sign, through `auth.Endpoints(keys="")`. Only `google_for_tests` accepts endpoints, so a real provider always checks signatures.
+- The tests cover everything listed, plus a token signed with the wrong key, and that a cached key is not fetched again. The fake answers with Google's `Cache-Control` (`public, max-age=…, must-revalidate, no-transform`); Google's actual value is still to be seen in milestone 6.
 
 ### Milestone 5: the compiler (about 2 days)
 
