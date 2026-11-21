@@ -11,7 +11,7 @@ repository = "https://github.com/SammyThorne/new_language"
 # that points at your checkout instead.
 [grammars.viper]
 repository = "https://github.com/SammyThorne/new_language"
-rev = "702a1b8be63c8c3bf9355339929c5d4507da363f"
+rev = "d8661c26334942b8cdb79ef8ce4d47ec57016416"
 path = "editors/tree-sitter-viper"
 
 [language_servers.viper]
