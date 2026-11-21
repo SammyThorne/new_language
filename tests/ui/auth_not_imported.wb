@@ -1,0 +1,11 @@
+# `@auth.required` in a program that does not import `auth`.
+import http
+
+@auth.required
+@http.get("/notes")
+def notes() -> str:
+    return "notes"
+
+def main():
+    server = http.Server()
+    server.mount(notes)

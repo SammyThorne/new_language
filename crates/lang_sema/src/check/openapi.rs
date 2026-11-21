@@ -309,7 +309,7 @@ impl Checker<'_, '_> {
                     can_fail = true;
                     body = Some(*ty);
                 }
-                Binding::Request | Binding::Socket => {}
+                Binding::Request | Binding::Socket | Binding::User { .. } => {}
             }
         }
         if !parameters.is_empty() {

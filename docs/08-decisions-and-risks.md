@@ -1049,6 +1049,18 @@ Milestone 4 of the [Google sign-in plan](13-google-oauth-plan.md). The callback 
 
 **Fakes that cannot sign.** `auth.Endpoints(keys="")` skips the signature check, and its docstring says it is for fakes. Only `google_for_tests` takes endpoints, so a provider made by `auth.google` always checks. The signing tests are in Rust (`crates/lang_cli/tests/oidc.rs`, with `ring`, already in `Cargo.lock`, as a dev-dependency), since `crypto` has no RSA signing and the plan rejected adding it for tests alone.
 
+### D104. Routes protected by the compiler (Google sign-in plan, milestone 5)
+
+Milestone 5 of the [Google sign-in plan](13-google-oauth-plan.md). When a program imports `auth`, `@auth.required` on an `@http` route, or a parameter of type `auth.User`, protects the route: `server.mount`'s generated adapter starts with `match __auth.guard(__req)`, which returns the refusal (a 401, or a redirect for a browser) before any parameter is read. An `auth.User` parameter is bound by `auth.user_param(req)?` after the guard, and an `auth.User?` one by `auth.user(req)`, without a guard.
+
+**The user binding comes before the JSON body.** `auth.User` derives `Json`, so without its own rule it would be read from the request body. The compiler checks for it right after `http.Request`.
+
+**One new code.** The misuses (`@auth.required` off a route or with arguments, `auth.User` under `@http.ws`, two `auth.User` parameters) are E0342, a code of their own rather than E0340, since they are about signing in, not the route's shape. Using the annotation without importing `auth` is an unknown annotation (E0330) whose help says to import it; the routes are then not protected, since the program does not compile.
+
+**`@auth.required` is allowed on WebSocket routes.** The guard runs on the upgrade request like on any other. An `auth.User` parameter there is still an error, as the plan says, though the adapter could hand the user to the connection's task; that is left for when WebSocket handlers get other bindings.
+
+**The documentation names the real cookie.** `install` registers the `googleSession` scheme with `server.security_scheme`, a new public method for libraries, rather than the compiler writing a fixed cookie name, which would be wrong for `https` (`__Host-session`). The compiler adds `googleSession` to each protected route's `security` and a `401` to its responses. `docs(security=...)` overrides a scheme of the same name.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

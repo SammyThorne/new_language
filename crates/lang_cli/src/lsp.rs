@@ -384,11 +384,13 @@ impl Analysis {
         } else {
             entry.ty.clone().unwrap_or_default()
         };
+        let mut value = format!("```\n{shown}\n```");
+        if let Some(doc) = &entry.doc {
+            value.push_str("\n\n");
+            value.push_str(doc);
+        }
         obj(vec![
-            (
-                "contents",
-                obj(vec![("kind", Json::Str("markdown".into())), ("value", Json::Str(format!("```\n{shown}\n```")))]),
-            ),
+            ("contents", obj(vec![("kind", Json::Str("markdown".into())), ("value", Json::Str(value))])),
             ("range", range(text, entry.span)),
         ])
     }
@@ -875,6 +877,24 @@ mod tests {
             assert!(labels(4).contains(&name), "{name} in {:?}", labels(4));
         }
         assert!(!labels(4).iter().any(|l| l.starts_with("__")));
+    }
+
+    /// Hovering over `@auth.required` shows `auth.required` and its docstring, and its
+    /// definition is in the standard library.
+    #[test]
+    fn hover_over_auth_required() {
+        let dir = std::env::temp_dir().join(format!("lsp-hover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("app.{}", lang_names::SOURCE_EXTENSION));
+        let source = "import http\nimport auth\n\n@auth.required\n@http.get(\"/me\")\ndef me() -> str:\n    return \"me\"\n\ndef main():\n    server = http.Server()\n    auth.google_for_tests().install(server)\n    server.mount(me)\n";
+        let analysis = analyze(&path, source);
+        assert!(!analysis.diagnostics.has_errors());
+        let at = source.find("auth.required").unwrap() + 6;
+        let hover = analysis.hover(at);
+        let value = hover.get("contents").get("value").str().unwrap();
+        assert!(value.contains("auth.required: def(Request, "), "{value}");
+        assert!(value.contains("Refuses signed-out requests."), "{value}");
+        assert!(analysis.entry_at(at, |e| e.definition.is_some()).is_some());
     }
 
     #[test]

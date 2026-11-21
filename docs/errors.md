@@ -1083,6 +1083,23 @@ error[E0341]: two schemas are both called `Box_Item` in the API documentation
 
 **What to do.** Rename one of the types. The check happens only in programs that call `docs` or `openapi_json`.
 
+### E0342: a sign-in annotation or parameter that does not fit
+
+`@auth.required` and parameters of type `auth.User` protect `@http` routes (docs/05, "Signing in with Google"). The error is `@auth.required` on a function that is not a route or with arguments, an `auth.User` parameter in a WebSocket handler, or two of them in one handler.
+
+From `tests/ui/auth_route_errors.wb`:
+
+```text
+error[E0342]: `@auth.required` is on `helper`, which is not a route
+ --> tests/ui/auth_route_errors.wb:5:1
+  |
+5 | @auth.required
+  | ^^^^^^^^^^^^^^ no `@http` annotation
+  |
+  = help: `@auth.required` protects a route; for a call-style handler use `auth.protect(handler)`
+```
+
+**What to do.** Put `@auth.required` on a route, or wrap a call-style handler with `auth.protect(handler)`. To limit who may sign in, give `auth.google` `allowed_domains=` or `allowed_emails=`, or check the user in the handler. In a WebSocket handler, take an `http.Request` and call `auth.user(req)`. One `auth.User` parameter is enough.
 
 ## Warnings
 

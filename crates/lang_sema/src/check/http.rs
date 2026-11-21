@@ -44,6 +44,16 @@ pub(super) struct HttpTypes {
     cookie: Ty,
 }
 
+/// The `auth` module's types, when the program imports it (docs/13).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AuthTypes {
+    module: usize,
+    user: Ty,
+}
+
+/// The security scheme protected routes name in the API documentation; `auth` registers it.
+const SIGN_IN_SCHEME: &str = "googleSession";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Scalar {
     Int,
@@ -93,6 +103,10 @@ pub(super) enum Binding {
         kind: Scalar,
     },
     Body(Ty),
+    /// `user: auth.User`, or `auth.User?`: the signed-in user.
+    User {
+        optional: bool,
+    },
     /// `default` is the literal default value's source text.
     Query {
         name: String,
@@ -126,6 +140,8 @@ pub(super) struct Route {
     pub fallible: bool,
     /// An `@http.ws` endpoint.
     pub ws: bool,
+    /// Refuses signed-out requests: `@auth.required`, or an `auth.User` parameter.
+    pub protected: bool,
     pub span: Span,
     /// What the documentation says about it (docs/12): `tags=`, `deprecated=`, `errors=`, and
     /// the handler's docstring split into a summary line and the rest.
@@ -170,6 +186,84 @@ impl<'m> Checker<'_, 'm> {
         self.http = Some(HttpTypes { module, server, group, request, response, websocket, header, cookie });
     }
 
+    /// Find the `auth` module's types if the program imports it.
+    pub(super) fn find_auth_types(&mut self) {
+        let Some(module) = self.module_names.iter().position(|n| n == "auth") else { return };
+        if let Some((Global::Struct(id), _, _)) = self.exports[module].get("User") {
+            self.auth = Some(AuthTypes { module, user: self.structs[id.0].ty });
+        }
+    }
+
+    /// Whether `annotation` is `@auth.required`, after reporting what is wrong with it.
+    pub(super) fn auth_annotation(&mut self, annotation: &ast::Annotation) -> bool {
+        if annotation.name.name != "auth.required" {
+            return false;
+        }
+        if self.auth.is_none() {
+            self.error(
+                Diagnostic::error(
+                    codes::BAD_ANNOTATION,
+                    "`@auth.required` needs the `auth` module",
+                    annotation.name.span,
+                    "not imported",
+                )
+                .with_help("add `import auth`"),
+            );
+        } else if !annotation.args.is_empty() {
+            self.error(
+                Diagnostic::error(codes::BAD_SIGN_IN, "`@auth.required` takes no arguments", annotation.span, "arguments given")
+                    .with_help("restrict who can sign in with `auth.google(allowed_domains=..., allowed_emails=...)`, or check `user` in the handler"),
+            );
+        }
+        self.record_required(annotation);
+        true
+    }
+
+    /// For the language server: hovering over `@auth.required` shows `auth.required`.
+    fn record_required(&mut self, annotation: &ast::Annotation) {
+        let Some(auth) = self.auth else { return };
+        if self.index.is_none() {
+            return;
+        }
+        let func = match self.exports[auth.module].get("required") {
+            Some((Global::Function(func), _, _)) => *func,
+            _ => return,
+        };
+        let (params, ret, definition) = {
+            let signature = &self.signatures[func.0];
+            (signature.params.iter().map(|p| p.ty).collect(), signature.ret, signature.name_span)
+        };
+        let ty = self.types.func(params, ret);
+        let doc = self
+            .fn_items
+            .iter()
+            .find(|(_, slot)| matches!(slot, super::FnSlot::Plain(id) if *id == func))
+            .and_then(|(f, _)| docstring(f))
+            .map(|text| {
+                let (summary, description) = split_docstring(text);
+                if description.is_empty() { summary } else { format!("{summary}\n\n{description}") }
+            });
+        self.record_with_doc(annotation.name.span, Some(ty), Some(definition), doc);
+    }
+
+    /// The sign-in errors of a function marked `@auth.required` without a route.
+    fn required_without_route(&mut self, function: &ast::Function) {
+        if function.annotations.iter().any(|a| a.name.name.starts_with("http.")) {
+            return;
+        }
+        if let Some(annotation) = function.annotations.iter().find(|a| a.name.name == "auth.required") {
+            self.error(
+                Diagnostic::error(
+                    codes::BAD_SIGN_IN,
+                    format!("`@auth.required` is on `{}`, which is not a route", function.name.name),
+                    annotation.span,
+                    "no `@http` annotation",
+                )
+                .with_help("`@auth.required` protects a route; for a call-style handler use `auth.protect(handler)`"),
+            );
+        }
+    }
+
     pub(super) fn in_http_module(&self) -> bool {
         self.http.is_some_and(|h| h.module == self.current_module)
     }
@@ -196,6 +290,9 @@ impl<'m> Checker<'_, 'm> {
     /// Check every `@http.*` annotation and record the routes.
     pub(super) fn check_routes(&mut self) {
         for (function, slot) in self.fn_items.clone() {
+            if self.auth.is_some() {
+                self.required_without_route(function);
+            }
             if !function.annotations.iter().any(|a| a.name.name.starts_with("http.")) {
                 continue;
             }
@@ -217,6 +314,9 @@ impl<'m> Checker<'_, 'm> {
             };
             let mut seen: Vec<(String, String, Span)> = Vec::new();
             for method in &imp.methods {
+                if self.auth.is_some() {
+                    self.required_without_route(method);
+                }
                 if !method.annotations.iter().any(|a| a.name.name.starts_with("http.")) {
                     continue;
                 }
@@ -405,8 +505,45 @@ impl<'m> Checker<'_, 'm> {
         let mut used_names = Vec::new();
         for (index, param) in signature.params.iter().enumerate() {
             let ast_param = &function.params[index];
+            let user = self.auth.and_then(|a| {
+                if param.ty == a.user {
+                    Some(false)
+                } else if self.types.option_inner(param.ty) == Some(a.user) {
+                    Some(true)
+                } else {
+                    None
+                }
+            });
             let binding = if Some(param.ty) == self.http.map(|h| h.request) {
                 Binding::Request
+            } else if let Some(optional) = user {
+                if ws {
+                    let mut diagnostic = Diagnostic::error(
+                        codes::BAD_SIGN_IN,
+                        format!(
+                            "parameter `{}` is the signed-in user, which a WebSocket handler cannot have yet",
+                            param.name
+                        ),
+                        param.hint_span,
+                        "in a WebSocket handler",
+                    );
+                    diagnostic = diagnostic.with_help("take an `http.Request` parameter as well, and call `auth.user(req)` with it before the handler talks on the socket");
+                    self.error(diagnostic);
+                    return None;
+                }
+                if params.iter().any(|b| matches!(b, Binding::User { .. })) {
+                    self.error(
+                        Diagnostic::error(
+                            codes::BAD_SIGN_IN,
+                            format!("`{}` has two parameters for the signed-in user", function.name.name),
+                            param.hint_span,
+                            "second one",
+                        )
+                        .with_help("one `auth.User` parameter (or `auth.User?`) gets the user"),
+                    );
+                    return None;
+                }
+                Binding::User { optional }
             } else if Some(param.ty) == self.http.map(|h| h.websocket) {
                 if !ws {
                     self.route_error(
@@ -589,8 +726,19 @@ impl<'m> Checker<'_, 'm> {
         if let Some(text) = docstring(function) {
             (doc.summary, doc.description) = split_docstring(text);
         }
+        let protected = (self.auth.is_some() && function.annotations.iter().any(|a| a.name.name == "auth.required"))
+            || params.iter().any(|b| matches!(b, Binding::User { optional: false }));
+        if protected && !ws {
+            if !doc.security.iter().any(|name| name == SIGN_IN_SCHEME) {
+                doc.security.push(SIGN_IN_SCHEME.to_string());
+            }
+            if !doc.errors.contains(&401) {
+                doc.errors.push(401);
+                doc.errors.sort_unstable();
+            }
+        }
         let name = function.name.name.clone();
-        Some(Route { method, path, status, handler, name, params, reply, ok, fallible, ws, span, doc })
+        Some(Route { method, path, status, handler, name, params, reply, ok, fallible, ws, protected, span, doc })
     }
 
     /// The `{name}` segments of a route path, after checking its syntax.
@@ -727,6 +875,11 @@ impl<'m> Checker<'_, 'm> {
 
         // Temporary names for what the generated code refers to.
         let mut aliases: Vec<(String, Global)> = vec![("__http".to_string(), Global::Module(http.module))];
+        if let Some(auth) = self.auth
+            && routes.iter().any(|r| r.protected || r.params.iter().any(|b| matches!(b, Binding::User { .. })))
+        {
+            aliases.push(("__auth".to_string(), Global::Module(auth.module)));
+        }
         let server_name = self.alias_type(server.ty, &mut aliases);
         let request_name = self.alias_type(http.request, &mut aliases);
         let response_name = self.alias_type(http.response, &mut aliases);
@@ -763,6 +916,13 @@ impl<'m> Checker<'_, 'm> {
                 ));
             }
             text.push_str(&format!("    def __route_{index}(__req: {request_name}) -> Result[{response_name}]:\n"));
+            if route.protected {
+                text.push_str("        match __auth.guard(__req):\n");
+                text.push_str("            case Some(__refusal):\n");
+                text.push_str("                return Ok(__refusal)\n");
+                text.push_str("            case None:\n");
+                text.push_str("                pass\n");
+            }
             let mut args = Vec::new();
             for (n, binding) in route.params.iter().enumerate() {
                 let line = match binding {
@@ -786,6 +946,8 @@ impl<'m> Checker<'_, 'm> {
                         let body_name = self.alias_type(*ty, &mut aliases);
                         format!("__http.body[{body_name}](__req)?")
                     }
+                    Binding::User { optional: false } => "__auth.user_param(__req)?".to_string(),
+                    Binding::User { optional: true } => "__auth.user(__req)".to_string(),
                     Binding::Query { name, kind, optional: false, default: None } => {
                         format!("__http.query_{}(__req, {name:?})?", kind.suffix())
                     }

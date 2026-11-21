@@ -741,6 +741,8 @@ pub struct Server:
     priv docs_routes: list[str] = []
     priv docs_json: str = ""
     priv docs_yaml: str = ""
+    # Security schemes that libraries document for every page, such as `auth`'s session cookie.
+    priv security_schemes: dict[str, SecurityScheme] = {}
 
 impl Server:
     def route(self, method: str, path: str, handler: Handler):
@@ -976,6 +978,13 @@ impl Server:
         your own."""
         return self.document(DocsSettings("", title, version, description, servers, tags, security, hide_ws))
 
+    def security_scheme(self, name: str, scheme: SecurityScheme):
+        """Document a security scheme on every documentation page of this server, as if it
+        were given to `docs(security=...)`, which takes precedence. It is for libraries that
+        protect routes: `auth`'s `install` documents the session cookie this way."""
+        self.security_schemes[name] = scheme
+        self.docs_json = ""
+
     def __document(self, method: str, path: str, id: str, operation: str, ws: bool, security: str):
         """Used by the code `server.mount` generates: one documented route."""
         self.doc_operations.append(DocOperation(method, path, id, operation, ws, security))
@@ -1007,6 +1016,11 @@ impl Server:
     def document(self, settings: DocsSettings) -> str:
         """The OpenAPI document, as JSON text, joined from what `mount` recorded. Call-style
         routes are listed with their method, path and path parameters."""
+        schemes: dict[str, SecurityScheme] = {}
+        for name in self.security_schemes.keys():
+            schemes[name] = self.security_schemes[name]
+        for name in settings.security.keys():
+            schemes[name] = settings.security[name]
         documented: dict[str, DocOperation] = {}
         for op in self.doc_operations:
             documented[op.method + " " + op.path] = op
@@ -1028,7 +1042,9 @@ impl Server:
                         continue
                     if op.security != "":
                         for name in op.security.split(" "):
-                            if name not in settings.security:
+                            if name not in schemes:
+                                if name == "googleSession":
+                                    panic(f"the route {op.method} {op.path} needs a signed-in user, but no sign-in provider is installed: call `provider.install(server)`")
                                 panic(f"the route {op.method} {op.path} names the security scheme `{name}`, which `docs` was not given")
                     id = unique_id(op.id, used_ids)
                     operation = "{\"operationId\":" + jsonlib.encode(id) + "," + op.operation[1:]
@@ -1060,10 +1076,10 @@ impl Server:
             names = sorted(self.doc_schemas.keys())
             schemas = [jsonlib.encode(name) + ":" + self.doc_schemas[name] for name in names]
             components.append("\"schemas\":{" + ",".join(schemas) + "}")
-        if len(settings.security) > 0:
-            names = sorted(settings.security.keys())
-            schemes = [jsonlib.encode(name) + ":" + security_scheme_json(settings.security[name]) for name in names]
-            components.append("\"securitySchemes\":{" + ",".join(schemes) + "}")
+        if len(schemes) > 0:
+            names = sorted(schemes.keys())
+            described = [jsonlib.encode(name) + ":" + security_scheme_json(schemes[name]) for name in names]
+            components.append("\"securitySchemes\":{" + ",".join(described) + "}")
         if len(components) > 0:
             parts.append(",\"components\":{" + ",".join(components) + "}")
         parts.append("}")

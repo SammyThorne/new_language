@@ -1,6 +1,6 @@
 # Sign in with Google: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 4 are built; the decisions (section 5) are confirmed.** Each milestone in section 6 ends with a "Done" note once built. It adds a standard library module, `auth`, that lets a program sign its users in with their Google accounts. The program points it at the credentials file it downloaded from the Google Cloud console. It marks the routes that need a signed-in user with `@auth.required`, or by giving the handler a parameter of type `auth.User`. The module provides the login, callback and logout routes, the session cookie, and the checks of Google's tokens. The program writes none of the OAuth flow itself.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 5 are built; the decisions (section 5) are confirmed.** Each milestone in section 6 ends with a "Done" note once built. It adds a standard library module, `auth`, that lets a program sign its users in with their Google accounts. The program points it at the credentials file it downloaded from the Google Cloud console. It marks the routes that need a signed-in user with `@auth.required`, or by giving the handler a parameter of type `auth.User`. The module provides the login, callback and logout routes, the session cookie, and the checks of Google's tokens. The program writes none of the OAuth flow itself.
 
 It mirrors what web developers get elsewhere:
 - Flask: Flask-Login's `@login_required` on top of Authlib or Flask-Dance.
@@ -554,6 +554,13 @@ Each milestone follows docs/11's rules: the gates (`make lint`, `make test`, `ma
   - `tests/run` programs for a mounted app with each form of protection.
   - Signed-out API and browser requests to each.
   - The OpenAPI test in `crates/lang_cli/tests/openapi.rs` extended with a protected route.
+
+**Done** (D104). Everything listed, with these differences:
+- The errors are one new code, E0342 (`tests/ui/auth_route_errors.wb`): `@auth.required` on a function that is not a route, `@auth.required` with arguments, `auth.User` under `@http.ws`, and two `auth.User` parameters. `@auth.required` in a program that does not import `auth` is the existing E0330, with the help "add `import auth`" (`tests/ui/auth_not_imported.wb`).
+- `@auth.required` is allowed on `@http.ws` routes: the guard runs before the upgrade. Only an `auth.User` parameter there is an error.
+- The OpenAPI scheme comes from `install`, through a new `server.security_scheme(name, scheme)`, so it names the real cookie (`session` or `__Host-session`). A protected route on a documented server without a provider panics when the document is built, saying to call `install`.
+- The language server shows a hover's docstring when there is one; only `@auth.required` has one for now.
+- The tests are `tests/run/auth_routes.wb` (each form of protection, on methods, a function and a prefix, signed out as an API client and as a browser, signed in, an ended sign-in, and the guard running before the body is read), the two `tests/ui` programs, `tests/http/secured_docs.wb` with a protected `/me` in `crates/lang_cli/tests/openapi.rs`, and a hover test in `crates/lang_cli/src/lsp.rs`.
 
 ### Milestone 6: documentation and a real check (about 1 day)
 

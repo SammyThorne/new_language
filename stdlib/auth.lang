@@ -41,6 +41,9 @@ const SKEW = 60
 # The request locals the session middleware sets.
 const USER_KEY = "auth.user"
 const LOGIN_KEY = "auth.login"
+# The security scheme of protected routes in the API documentation (docs/12). The compiler
+# names it too, in `check/http.rs`.
+const SCHEME = "googleSession"
 
 # ---- errors -------------------------------------------------------------------------------
 
@@ -444,6 +447,7 @@ impl Provider:
         (`POST`), and the middleware that reads the session cookie on every request, which
         `auth.user`, `auth.required` and `auth.protect` rely on."""
         provider = self
+        server.security_scheme(SCHEME, http.api_key(self.session_cookie, cookie=True, description=f"The session cookie. Sign in at {self.login_path}."))
         server.use(lambda req, next: provider.middleware(req, next))
         server.get(self.login_path, lambda req: provider.login(req))
         server.get(self.callback_path, lambda req: provider.callback(req))
@@ -801,9 +805,11 @@ pub def user(req: http.Request) -> User?:
             return None
 
 pub def required(req: http.Request, next: http.Handler) -> Result[http.Response]:
-    """Middleware that refuses signed-out requests: `server.use(auth.required)` or
-    `group.use(auth.required)`. A browser opening a page is redirected to the login route,
-    and anything else gets a 401."""
+    """Refuses signed-out requests. As an annotation, `@auth.required` protects one `@http`
+    route; as middleware, `server.use(auth.required)` or `group.use(auth.required)` protects
+    them all. A browser opening a page is redirected to the login route, and anything else
+    gets a 401. A handler parameter of type `auth.User` protects its route too, and gets the
+    signed-in user."""
     match guard(req):
         case Some(refusal):
             return refusal
@@ -829,6 +835,15 @@ pub def guard(req: http.Request) -> http.Response?:
         case None:
             log.error(f"{req.method} {req.path} needs a signed-in user, but no sign-in provider is installed: call `provider.install(server)`")
             return http.error(500, "internal server error")
+
+pub def user_param(req: http.Request) -> Result[User, http.HttpError]:
+    """The signed-in user, for an `auth.User` parameter of a mounted route. It is for the code
+    `server.mount` generates, which calls `guard` first."""
+    match user(req):
+        case Some(found):
+            return found
+        case None:
+            return Err(http.HttpError(401, "sign-in required"))
 
 def refusal(req: http.Request, login_path: str) -> http.Response:
     if (req.method == "GET" or req.method == "HEAD") and "text/html" in req.header("Accept").unwrap_or(""):

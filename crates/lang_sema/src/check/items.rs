@@ -623,6 +623,9 @@ impl<'m> Checker<'_, 'm> {
                 self.check_test_signature(function, signature);
                 continue;
             }
+            if self.auth_annotation(annotation) {
+                continue;
+            }
             if annotation.name.name != "extern" && !annotation.name.name.starts_with("http.") {
                 self.error(
                     Diagnostic::error(
@@ -631,7 +634,7 @@ impl<'m> Checker<'_, 'm> {
                         annotation.name.span,
                         "not a known annotation",
                     )
-                    .with_help("functions can have `@test`, `@extern(\"c_name\")` and the `@http` route annotations"),
+                    .with_help("functions can have `@test`, `@extern(\"c_name\")`, the `@http` route annotations and `@auth.required`"),
                 );
             }
         }
@@ -813,7 +816,13 @@ impl<'m> Checker<'_, 'm> {
             let mut signature = self.signature(method, &format!("{type_name}.{name}"), receiver);
             signature.private = method.visibility == ast::Visibility::Priv;
             self.self_ty = None;
-            if let Some(annotation) = method.annotations.iter().find(|a| !a.name.name.starts_with("http.")) {
+            let mut other = None;
+            for annotation in &method.annotations {
+                if !annotation.name.name.starts_with("http.") && !self.auth_annotation(annotation) && other.is_none() {
+                    other = Some(annotation);
+                }
+            }
+            if let Some(annotation) = other {
                 self.error(Diagnostic::error(
                     codes::BAD_ANNOTATION,
                     format!("annotation `@{}` is not allowed on a method", annotation.name.name),

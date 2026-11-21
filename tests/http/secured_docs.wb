@@ -1,9 +1,11 @@
 # The API documentation's security schemes and tags (docs/12, milestone 5). The middleware
 # enforces what the documentation says: writes need a bearer token, the report an API key.
+# `/me` needs a signed-in user (docs/13, milestone 5), which the compiler documents itself.
 # crates/lang_cli/tests/openapi.rs checks the document against what the service answers.
 
 import http
 import io
+import auth
 
 @derive(Json)
 @frozen
@@ -34,6 +36,11 @@ impl Notes:
         self.count.increment()
         return note
 
+    @http.get("/me", tags=["notes"])
+    def me(self, user: auth.User) -> str:
+        """Who is signed in."""
+        return user.email
+
     @http.get("/report", tags=["admin"], security=["key", "token"], errors=[401])
     def report(self) -> Report:
         """How many notes were added, for an API key or a token."""
@@ -51,6 +58,11 @@ def authenticate(req: http.Request, next: http.Handler) -> Result[http.Response]
 
 def main():
     server = http.Server()
+    google = auth.google_for_tests()
+    google.install(server)
+    # For the test only: a cookie that signs a request in.
+    cookie = google.test_cookie(auth.User(id="7", email="ann@example.com", email_verified=True))
+    server.get("/test/cookie", lambda req: Ok(http.text(cookie)))
     server.use(authenticate)
     server.mount(Notes(Atomic(0)))
     server.docs(

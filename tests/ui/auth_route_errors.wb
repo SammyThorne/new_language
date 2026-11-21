@@ -1,0 +1,26 @@
+# `@auth.required` and `auth.User` parameters where they do not fit (docs/13, E0342).
+import http
+import auth
+
+@auth.required
+def helper(req: http.Request) -> str:
+    return "not a route"
+
+@auth.required(domain="example.com")
+@http.get("/admin")
+def admin() -> str:
+    return "admin"
+
+@http.ws("/chat")
+def chat(ws: http.WebSocket, user: auth.User):
+    _ = ws.send(user.name)
+
+@http.get("/swap")
+def swap(user: auth.User, other: auth.User?) -> str:
+    return user.name
+
+def main():
+    server = http.Server()
+    auth.google_for_tests().install(server)
+    server.mount(admin)
+    server.serve()

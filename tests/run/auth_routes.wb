@@ -1,0 +1,88 @@
+# Routes protected by the compiler (docs/13, milestone 5): `@auth.required`, an `auth.User`
+# parameter, and an `auth.User?` one, on mounted methods and functions. Signed-out API calls get
+# a 401, browsers are redirected to sign in, and the guard runs before the body is read.
+# expect: /notes: 401 | 302 /auth/google/login?next=%2Fnotes | 200 notes of Ann Lee
+# expect: /stats: 401 | 302 /auth/google/login?next=%2Fstats | 200 stats
+# expect: /hello: 200 Hello, guest | 200 Hello, guest | 200 Hello, Ann Lee
+# expect: /me: 401 | 302 /auth/google/login?next=%2Fme | 200 1001 ann@example.com
+# expect: /api/notes/7?full=true: 401 | 302 /auth/google/login?next=%2Fapi%2Fnotes%2F7%3Ffull%3Dtrue | 200 note 7 (full) of 1001
+# expect: post signed out: 401 {"error":"sign-in required"}
+# expect: post bad body: 401
+# expect: post: 201 {"title":"milk","author":"ann@example.com"}
+# expect: ended sign-in: 401
+
+import http
+import auth
+
+@derive(Json)
+struct Note:
+    title: str
+    author: str = ""
+
+@frozen
+struct Notes:
+    shelf: str
+
+impl Notes:
+    @http.get("/notes")
+    def list(self, user: auth.User) -> str:
+        return f"notes of {user.name}"
+
+    @auth.required
+    @http.get("/stats")
+    def stats(self) -> str:
+        return "stats"
+
+    @http.get("/hello")
+    def hello(self, user: auth.User?) -> str:
+        match user:
+            case Some(someone):
+                return f"Hello, {someone.name}"
+            case None:
+                return "Hello, guest"
+
+    @http.post("/notes", status=201)
+    def add(self, note: Note, user: auth.User) -> Note:
+        return Note(note.title, user.email)
+
+    @auth.required
+    @http.get("/notes/{id}")
+    def one(self, id: int, full: bool = False, req: http.Request) -> str:
+        detail = " (full)" if full else ""
+        return f"note {id}{detail} of {auth.user(req).unwrap().id}"
+
+@auth.required
+@http.get("/me")
+def me(user: auth.User) -> str:
+    return f"{user.id} {user.email}"
+
+def show(r: http.Response) -> str:
+    if r.status == 302:
+        return f"302 {r.headers['Location']}"
+    if r.status == 401:
+        return "401"
+    return f"{r.status} {r.body}"
+
+def main():
+    google = auth.google_for_tests()
+    server = http.Server()
+    google.install(server)
+    server.mount(Notes("home"))
+    server.mount(Notes("api"), prefix="/api")
+    server.mount(me)
+    ann = auth.User(id="1001", email="ann@example.com", email_verified=True, name="Ann Lee")
+    cookie = google.test_cookie(ann)
+    for path in ["/notes", "/stats", "/hello", "/me", "/api/notes/7?full=true"]:
+        api = server.handle(http.test_request("GET", path))
+        browser = server.handle(http.test_request("GET", path, headers={"Accept": "text/html,application/xhtml+xml"}))
+        signed = server.handle(http.test_request("GET", path, headers={"Cookie": cookie}))
+        print(f"{path}:", show(api), "|", show(browser), "|", show(signed))
+
+    r = server.handle(http.test_request("POST", "/notes", body="{\"title\":\"milk\"}"))
+    print("post signed out:", r.status, r.body)
+    r = server.handle(http.test_request("POST", "/notes", body="not json"))
+    print("post bad body:", r.status)
+    r = server.handle(http.test_request("POST", "/notes", body="{\"title\":\"milk\"}", headers={"Cookie": cookie}))
+    print("post:", r.status, r.body)
+    ended = google.test_cookie(ann, expires_in=-1)
+    print("ended sign-in:", server.handle(http.test_request("GET", "/me", headers={"Cookie": ended})).status)

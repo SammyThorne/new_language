@@ -267,7 +267,11 @@ fn security_schemes_and_tags_match_the_service() {
         other => panic!("tags: {other:?}"),
     };
     assert_eq!(tags, ["notes", "admin"]);
-    assert_eq!(doc.at(&["components", "securitySchemes"]).keys(), ["key", "login", "session", "token"]);
+    assert_eq!(
+        doc.at(&["components", "securitySchemes"]).keys(),
+        ["googleSession", "key", "login", "session", "token"]
+    );
+    assert_eq!(doc.at(&["components", "securitySchemes", "googleSession", "name"]).as_str(), Some("session"));
     assert_eq!(doc.at(&["components", "securitySchemes", "session", "in"]).as_str(), Some("cookie"));
     assert!(doc.at(&["paths", "/notes", "get"]).get("security").is_none(), "reading is open");
     let needs = |path: &str, method: &str| -> Vec<String> {
@@ -278,19 +282,24 @@ fn security_schemes_and_tags_match_the_service() {
     };
     assert_eq!(needs("/notes", "post"), ["token"]);
     assert_eq!(needs("/report", "get"), ["key", "token"]);
+    assert_eq!(needs("/me", "get"), ["googleSession"], "an `auth.User` parameter protects the route");
 
     // The service does what the document says, with each status declared.
     let token = [("Authorization", "Bearer secret")];
     let key = [("X-API-Key", "k123")];
     let note = Some(r#"{"text": "hi"}"#);
+    let cookie = request(&mut stream, &mut reader, "GET", "/test/cookie", None).body;
+    let signed_in = [("Cookie", cookie.as_str())];
     type Headers<'a> = &'a [(&'a str, &'a str)];
-    let cases: [(&str, &str, Option<&str>, Headers, u16); 6] = [
+    let cases: [(&str, &str, Option<&str>, Headers, u16); 8] = [
         ("GET", "/notes", None, &[], 200),
         ("POST", "/notes", note, &[], 401),
         ("POST", "/notes", note, &token, 201),
         ("GET", "/report", None, &[], 401),
         ("GET", "/report", None, &key, 200),
         ("GET", "/report", None, &token, 200),
+        ("GET", "/me", None, &[], 401),
+        ("GET", "/me", None, &signed_in, 200),
     ];
     for (method, path, body, headers, status) in cases {
         let response = request_with(&mut stream, &mut reader, method, path, body, headers);

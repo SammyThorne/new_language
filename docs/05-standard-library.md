@@ -167,9 +167,9 @@ Each parameter is matched against these rules in order, at compile time. A param
 | 4 | Name equals a `{name}` in the path | That path segment, parsed as the parameter's type: `int`, `float`, `bool` or `str` | 400 |
 | 5 | Type derives `Json`, or is a `list` or `dict` of such | The JSON request body. At most one per handler | 400, with the JSON path of the problem |
 | 6 | `int`, `float`, `bool` or `str` whose name is not in the path | The query parameter of that name. Required unless the type is `T?` or the parameter has a default | 400 |
-
 | 7 | Type `http.Header` or `http.Header?` (M12) | The request header named after the parameter: `user_agent` is `User-Agent` | 400 if missing, unless `T?` |
 | 8 | Type `http.Cookie` or `http.Cookie?` (M12) | The cookie with the parameter's name | 400 if missing, unless `T?` |
+| 9 | Type `auth.User` or `auth.User?` (D104), matched before rule 5 although `auth.User` derives `Json` | The signed-in user. At most one per handler, and not under `@http.ws` | `auth.User` protects the route: signed out is a 401, or a redirect to sign in for a browser. `auth.User?` is `None` |
 
 `http.Header` and `http.Cookie` are frozen structs with a `value: str` field and `Display`. Other request details are read from an `http.Request` parameter; `req.cookie(name)` reads a cookie.
 
@@ -270,7 +270,7 @@ server.docs(
 def remove(self, id: int): ...
 ```
 
-**Security schemes** describe how clients authenticate: `http.bearer(format="", description="")` (`Authorization: Bearer ...`), `http.basic_auth(description="")`, and `http.api_key(name, cookie=False, description="")` (a header, or a cookie). A route names the schemes it accepts with `security=[...]`; a route that names a scheme `docs` was not given is a bug, and building the document panics with both names. The page has an "Authorize" box where a reader enters credentials, kept in the page's memory only, and "Try it out" adds them to its requests. The documentation does not check anything: authenticate requests in middleware, as with any route, and list `401` in `errors=`.
+**Security schemes** describe how clients authenticate: `http.bearer(format="", description="")` (`Authorization: Bearer ...`), `http.basic_auth(description="")`, and `http.api_key(name, cookie=False, description="")` (a header, or a cookie). A route names the schemes it accepts with `security=[...]`; a route that names a scheme `docs` was not given is a bug, and building the document panics with both names. A library can document a scheme on every page with `server.security_scheme(name, scheme)`, which `docs(security=...)` overrides; `auth`'s `install` documents its session cookie as `googleSession`, which protected routes name on their own (D104). The page has an "Authorize" box where a reader enters credentials, kept in the page's memory only, and "Try it out" adds them to its requests. The documentation does not check anything: authenticate requests in middleware, as with any route, and list `401` in `errors=`.
 
 **Other arguments.** `ui=False` serves only the document; `try_it_out=False` makes the page read-only. `server.openapi_json(...)` takes the same arguments (except the path and the page's) and returns the document as text: for a test, a file, or a route of your own.
 
@@ -297,6 +297,7 @@ def remove(self, id: int): ...
 | `server.openapi_json(title, version, description, servers, tags, security, hide_ws)` | The OpenAPI document as JSON text |
 | `http.Tag(name, description="")` | A tag's description, for `docs(tags=...)` |
 | `http.bearer(...)`, `http.basic_auth(...)`, `http.api_key(name, cookie=False, ...)` | `http.SecurityScheme` values, for `docs(security=...)` |
+| `server.security_scheme(name, scheme)` | A scheme documented on every page of the server, for libraries |
 | `server.listen(addr)` | Blocks, serving until shutdown. Options: read and write timeouts, maximum header and body sizes, graceful shutdown on SIGTERM |
 | `http.Handler` | `def(http.Request) -> Result[http.Response]` |
 | `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `query_string() -> str` (as sent, without `?`), `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes`, `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr`; `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13) |
@@ -471,10 +472,35 @@ def main():
 | `provider.test_cookie(user, expires_in=None) -> str` | A `Cookie` header value signing a test request in |
 | `auth.google_for_tests(secret=..., endpoints=None, ...) -> auth.Provider` | A provider without a credentials file; `endpoints=auth.Endpoints(...)` points it at a fake Google; `keys=""` there skips the signature check, for a fake that cannot sign |
 | `auth.user(req) -> auth.User?` | The signed-in user |
+| `@auth.required` | On an `@http` route: refuses signed-out requests (D104) |
 | `auth.required` | Middleware refusing signed-out requests |
 | `auth.protect(handler) -> http.Handler` | One handler, protected |
 | `auth.User` | `id` (Google's `sub`: key records on it), `email`, `email_verified`, `name`, `given_name`, `family_name`, `picture`, `domain` (the Workspace domain, or `""`), `provider` |
 | `auth.Tokens`, `auth.LoginHook` | `on_login(user, tokens) -> Result[auth.User, http.HttpError]` may change the user (not its `id`) or refuse with an error's status; the module keeps no tokens |
+
+Routes that `server.mount` serves are protected by the compiler (D104). `@auth.required` protects a route, and so does a parameter of type `auth.User`, which also gets the user; an `auth.User?` parameter is `None` for a signed-out request, which is not refused:
+
+```python
+@frozen
+struct Notes:
+    db: Pool
+
+impl Notes:
+    @http.get("/notes")
+    def list(self, user: auth.User) -> list[Note]:           # protected
+        return self.db.notes_of(user.id)
+
+    @auth.required
+    @http.get("/stats")
+    def stats(self) -> Stats:                                 # protected, without the user
+        return self.db.stats()
+
+    @http.get("/")
+    def home(self, user: auth.User?) -> str:                  # open
+        return f"Hello, {user.unwrap().name}" if user != None else "Hello, guest"
+```
+
+The generated code checks the sign-in before it reads any parameter, so a signed-out request with a bad body gets the 401, not a 400. In the API documentation (docs/12), a protected route needs the security scheme `googleSession`, the session cookie, which `install` documents, and lists a 401 response. `@auth.required` on a function that is not a route, with arguments, or an `auth.User` parameter under `@http.ws` or twice, is error E0342.
 
 A signed-out request to a protected route is refused in one of two ways. A browser opening a page (a `GET` or `HEAD` whose `Accept` names `text/html`) is redirected to the login route, with `next` set to the page and its query. Anything else gets `401 {"error": "sign-in required"}`. `next` must be a path on the site; anything else becomes `/`. A protected route on a server without a provider is a 500, with the reason logged.
 

@@ -216,6 +216,7 @@ fn run(
     checker.import_all(&modules);
     checker.find_json_types();
     checker.find_http_types();
+    checker.find_auth_types();
     checker.uses_docs = checker.http.is_some() && openapi::program_uses_docs(inputs, checker.sources);
     checker.resolve_declarations();
     checker.check_consts();
@@ -447,6 +448,8 @@ pub struct IndexEntry {
     pub span: Span,
     pub ty: Option<String>,
     pub definition: Option<Span>,
+    /// Text shown under the type on hover, such as an annotation's docstring.
+    pub doc: Option<String>,
 }
 
 struct Checker<'a, 'm> {
@@ -530,6 +533,7 @@ struct Checker<'a, 'm> {
     stdlib_modules: Vec<bool>,
     /// The `http` module's types, when the program imports it.
     http: Option<http::HttpTypes>,
+    auth: Option<http::AuthTypes>,
     /// The `@http` routes of each type's methods, and of annotated functions.
     routes: HashMap<Ty, Vec<http::Route>>,
     function_routes: HashMap<FuncId, http::Route>,
@@ -784,6 +788,7 @@ impl<'a, 'm> Checker<'a, 'm> {
             sources,
             stdlib_modules: Vec::new(),
             http: None,
+            auth: None,
             routes: HashMap::new(),
             function_routes: HashMap::new(),
             generated: 0,
@@ -880,12 +885,16 @@ impl<'a, 'm> Checker<'a, 'm> {
 
     /// Add to the language server's index, when there is one.
     fn record(&mut self, span: Span, ty: Option<Ty>, definition: Option<Span>) {
+        self.record_with_doc(span, ty, definition, None);
+    }
+
+    fn record_with_doc(&mut self, span: Span, ty: Option<Ty>, definition: Option<Span>, doc: Option<String>) {
         if self.index.is_none() || self.diags.speculative {
             return;
         }
         let ty = ty.filter(|t| *t != Ty::ERROR).map(|t| self.display(t));
         if let Some(index) = self.index.as_mut() {
-            index.push(IndexEntry { span, ty, definition });
+            index.push(IndexEntry { span, ty, definition, doc });
         }
     }
 

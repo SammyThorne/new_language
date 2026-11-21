@@ -14,6 +14,42 @@
     }
   ],
   "paths": {
+    "/auth/google/login": {
+      "get": {
+        "responses": {
+          "default": {
+            "description": "Response"
+          }
+        }
+      }
+    },
+    "/auth/google/callback": {
+      "get": {
+        "responses": {
+          "default": {
+            "description": "Response"
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "responses": {
+          "default": {
+            "description": "Response"
+          }
+        }
+      }
+    },
+    "/test/cookie": {
+      "get": {
+        "responses": {
+          "default": {
+            "description": "Response"
+          }
+        }
+      }
+    },
     "/notes": {
       "get": {
         "operationId": "list",
@@ -89,6 +125,42 @@
         "security": [
           {
             "token": []
+          }
+        ]
+      }
+    },
+    "/me": {
+      "get": {
+        "operationId": "me",
+        "tags": [
+          "notes"
+        ],
+        "summary": "Who is signed in.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "googleSession": []
           }
         ]
       }
@@ -171,6 +243,12 @@
       }
     },
     "securitySchemes": {
+      "googleSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "session",
+        "description": "The session cookie. Sign in at /auth/google/login."
+      },
       "key": {
         "type": "apiKey",
         "in": "header",
