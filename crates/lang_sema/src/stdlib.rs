@@ -15,6 +15,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("http", include_str!("../../../stdlib/http.lang")),
     ("re", include_str!("../../../stdlib/re.lang")),
     ("crypto", include_str!("../../../stdlib/crypto.lang")),
+    ("auth", include_str!("../../../stdlib/auth.lang")),
     ("postgres", include_str!("../../../stdlib/postgres.lang")),
 ];
 

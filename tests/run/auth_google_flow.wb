@@ -1,0 +1,286 @@
+# Sign-in with Google against a fake Google in the same program (docs/13, milestone 3): the
+# whole flow, each way the callback refuses, the policies, `on_login`, open redirects, session
+# cookies, protection and logout. The fake's ID tokens are not signed; milestone 4 checks
+# signatures.
+# expect: signed out: 401 {"error":"sign-in required"} | Cookie realm="sign-in"
+# expect: browser: 302 /auth/google/login?next=%2Fnotes%3Fpage%3D2
+# expect: home: Hello, guest
+# expect: login: 302 S256 openid email profile | oauth Max-Age=600
+# expect: callback: 302 /notes?page=2 | session Max-Age=604800
+# expect: flow cookie deleted: True
+# expect: notes: 200 notes of Ann Lee (ann@example.com)
+# expect: home: Hello, Ann Lee
+# expect: admin: 200 admin 1001
+# expect: admin signed out: 401
+# expect: no flow cookie: 400 Sign-in expired
+# expect: wrong state: 400 Sign-in expired
+# expect: access denied: 401 Sign-in cancelled access_denied
+# expect: code used twice: 400 Sign-in expired
+# expect: wrong verifier: 400 Sign-in expired
+# expect: wrong audience: 401 Sign-in failed
+# expect: expired token: 401 Sign-in failed
+# expect: wrong nonce: 401 Sign-in failed
+# expect: alg none: 401 Sign-in failed
+# expect: token endpoint down: 502 Sign-in failed
+# expect: unverified email: 403 Sign-in refused
+# expect: workspace: 302 /
+# expect: other domain: 403 Sign-in refused
+# expect: allowed email: 302 / | other email: 403
+# expect: on_login: 302 Ann (from the app)
+# expect: on_login refuses: 403 Sign-in refused banned@example.com is banned
+# expect: next //evil.com: /
+# expect: next /\evil.com: /
+# expect: next https://evil.com: /
+# expect: tampered cookie: 401
+# expect: expired cookie: 401
+# expect: other key: 401
+# expect: logout from another site: 403
+# expect: logout: 303 / | session Max-Age=0
+# expect: not installed: 500
+# expect-stderr: it is for another client (someone-else)
+# expect-stderr: its nonce is not the one this sign-in sent
+# expect-stderr: its algorithm is "none"
+# expect-stderr: the token endpoint refused the code: 500 server_error
+
+import http
+import auth
+import crypto
+import json
+import time
+
+const CLIENT = "test-client.apps.googleusercontent.com"
+
+# ---- the fake Google ----------------------------------------------------------------------
+
+def authorize(req: http.Request) -> Result[http.Response]:
+    """Signs in at once as the account the test names in `login_hint`, and sends the browser
+    back with a code that carries what the token endpoint needs to answer."""
+    scenario = req.query("login_hint").unwrap_or("ok")
+    code = scenario + "." + req.query("nonce").unwrap_or("") + "." + req.query("code_challenge").unwrap_or("")
+    back = http.form_encode([("code", code), ("state", req.query("state").unwrap_or("")), ("iss", "https://accounts.google.com")])
+    return http.redirect(req.query("redirect_uri").unwrap_or("") + "?" + back)
+
+def token(req: http.Request) -> Result[http.Response]:
+    fields: dict[str, str] = {}
+    for pair in req.text()?.split("&"):
+        name, _mark, value = pair.partition("=")
+        fields[http.url_decode(name).unwrap()] = http.url_decode(value).unwrap()
+    parts = fields["code"].split(".")
+    scenario = parts[0]
+    nonce = parts[1]
+    challenge = crypto.base64url_encode(crypto.sha256(fields["code_verifier"].encode()))
+    if scenario == "used" or challenge != parts[2] or fields["client_secret"] != "test-secret" or fields["client_id"] != CLIENT:
+        return http.json({"error": "invalid_grant"}, 400)
+    if scenario == "down":
+        return http.json({"error": "server_error"}, 500)
+    now = int(time.now())
+    claims: dict[str, json.Value] = {
+        "iss": json.Value.Str("https://accounts.google.com"),
+        "sub": json.Value.Str("1001"),
+        "aud": json.Value.Str(CLIENT),
+        "iat": json.Value.Int(now),
+        "exp": json.Value.Int(now + 3600),
+        "nonce": json.Value.Str(nonce),
+        "email": json.Value.Str("ann@example.com"),
+        "email_verified": json.Value.Bool(True),
+        "name": json.Value.Str("Ann Lee"),
+    }
+    alg = "RS256"
+    if scenario == "aud":
+        claims["aud"] = json.Value.Str("someone-else")
+    elif scenario == "expired":
+        claims["iat"] = json.Value.Int(now - 7200)
+        claims["exp"] = json.Value.Int(now - 3600)
+    elif scenario == "nonce":
+        claims["nonce"] = json.Value.Str("not-the-nonce")
+    elif scenario == "none":
+        alg = "none"
+    elif scenario == "unverified":
+        claims["email_verified"] = json.Value.Str("false")
+    elif scenario == "workspace":
+        claims["hd"] = json.Value.Str("example.com")
+    elif scenario == "other":
+        claims["hd"] = json.Value.Str("other.com")
+        claims["email"] = json.Value.Str("bob@other.com")
+    elif scenario == "banned":
+        claims["email"] = json.Value.Str("banned@example.com")
+    header = json.encode(json.object({"alg": alg, "kid": "k1", "typ": "JWT"}))
+    id_token = crypto.base64url_encode(header.encode()) + "." + crypto.base64url_encode(json.encode(claims).encode()) + ".unsigned"
+    return http.json(json.object({"access_token": "ya29.access", "expires_in": 3599, "id_token": id_token, "scope": "openid email profile", "token_type": "Bearer"}))
+
+def fake_google(ports: Channel[int]):
+    server = http.Server()
+    server.get("/authorize", authorize)
+    server.post("/token", token)
+    ports.send(server.bind("127.0.0.1:0").unwrap())
+    server.serve()
+
+# ---- the app ------------------------------------------------------------------------------
+
+def home(req: http.Request) -> Result[http.Response]:
+    match auth.user(req):
+        case Some(user):
+            return http.text(f"Hello, {user.name}")
+        case None:
+            return http.text("Hello, guest")
+
+def notes(req: http.Request) -> Result[http.Response]:
+    user = auth.user(req).unwrap()
+    return http.text(f"notes of {user.name} ({user.email})")
+
+def admin(req: http.Request) -> Result[http.Response]:
+    return http.text(f"admin {auth.user(req).unwrap().id}")
+
+def app(google: auth.Provider) -> http.Server:
+    server = http.Server()
+    google.install(server)
+    server.get("/", home)
+    server.get("/notes", auth.protect(notes))
+    group = server.group("/admin")
+    group.use(auth.required)
+    group.get("/stats", admin)
+    return server
+
+def rename(user: auth.User, tokens: auth.Tokens) -> Result[auth.User, http.HttpError]:
+    if user.email == "banned@example.com":
+        return Err(http.Error(403, f"{user.email} is banned"))
+    return auth.User(id="changed", email=user.email, email_verified=True, name=f"{user.given_name}Ann (from the app)")
+
+# ---- driving a browser --------------------------------------------------------------------
+
+def cookie_of(response: http.Response, name: str) -> str:
+    return name + "=" + response.cookie(name).unwrap_or("")
+
+def attributes(response: http.Response, name: str) -> str:
+    """The cookie's name and `Max-Age`."""
+    for line in response.headers.get("Set-Cookie").unwrap_or("").split("\n"):
+        if line.starts_with(name + "="):
+            for part in line.split("; "):
+                if part.starts_with("Max-Age="):
+                    return name + " " + part
+    return name + " ?"
+
+def start(server: http.Server, next: str) -> http.Response:
+    return server.handle(http.test_request("GET", "/auth/google/login?next=" + http.url_encode(next)))
+
+def at_google(login: http.Response, scenario: str) -> str:
+    """What Google sends the browser back to: the callback's path and query."""
+    sent = http.get(login.headers["Location"] + "&login_hint=" + scenario).unwrap()
+    return sent.header("Location").unwrap().replace("http://localhost:8080", "")
+
+def callback(server: http.Server, login: http.Response, back: str) -> http.Response:
+    return server.handle(http.test_request("GET", back, headers={"Cookie": cookie_of(login, "oauth")}))
+
+def sign_in(server: http.Server, scenario: str, next: str = "/") -> http.Response:
+    login = start(server, next)
+    return callback(server, login, at_google(login, scenario))
+
+def title(response: http.Response) -> str:
+    return response.body.partition("<h1>")[2].partition("</h1>")[0]
+
+def main():
+    ports: Channel[int] = Channel(1)
+    task = spawn fake_google(ports)
+    base = f"http://127.0.0.1:{ports.recv().unwrap()}"
+    endpoints = auth.Endpoints(authorize=base + "/authorize", token=base + "/token", keys=base + "/keys")
+    google = auth.google_for_tests(endpoints=endpoints)
+    server = app(google)
+
+    # Signed out.
+    r = server.handle(http.test_request("GET", "/notes"))
+    print("signed out:", r.status, r.body, "|", r.headers["WWW-Authenticate"])
+    r = server.handle(http.test_request("GET", "/notes?page=2", headers={"Accept": "text/html,application/xhtml+xml"}))
+    print("browser:", r.status, r.headers["Location"])
+    print("home:", server.handle(http.test_request("GET", "/")).body)
+
+    # The whole flow, back to the page asked for.
+    login = start(server, "/notes?page=2")
+    location = login.headers["Location"]
+    print("login:", login.status, http.url_decode(location.partition("code_challenge_method=")[2].partition("&")[0]).unwrap(), http.url_decode(location.partition("scope=")[2].partition("&")[0]).unwrap(), "|", attributes(login, "oauth"))
+    back = at_google(login, "ok")
+    r = callback(server, login, back)
+    print("callback:", r.status, r.headers["Location"], "|", attributes(r, "session"))
+    print("flow cookie deleted:", r.cookie("oauth") == Some(""))
+    session = cookie_of(r, "session")
+    r = server.handle(http.test_request("GET", "/notes", headers={"Cookie": session}))
+    print("notes:", r.status, r.body)
+    print("home:", server.handle(http.test_request("GET", "/", headers={"Cookie": session})).body)
+    r = server.handle(http.test_request("GET", "/admin/stats", headers={"Cookie": session}))
+    print("admin:", r.status, r.body)
+    print("admin signed out:", server.handle(http.test_request("GET", "/admin/stats")).status)
+
+    # The callback refuses.
+    r = server.handle(http.test_request("GET", back))
+    print("no flow cookie:", r.status, title(r))
+    login = start(server, "/")
+    back = at_google(login, "ok")
+    state = back.partition("state=")[2].partition("&")[0]
+    r = callback(server, login, back.replace(state, "forged"))
+    print("wrong state:", r.status, title(r))
+    r = callback(server, login, "/auth/google/callback?error=access_denied&state=" + state)
+    print("access denied:", r.status, title(r), r.body.partition("(")[2].partition(")")[0])
+    r = sign_in(server, "used")
+    print("code used twice:", r.status, title(r))
+    # This flow's cookie with another flow's code: the code's PKCE challenge is not this
+    # flow's, so Google refuses the verifier.
+    login = start(server, "/")
+    other = start(server, "/")
+    r = callback(server, login, at_google(other, "ok").replace(other_state(other), other_state(login)))
+    print("wrong verifier:", r.status, title(r))
+    for label, scenario in [("wrong audience", "aud"), ("expired token", "expired"), ("wrong nonce", "nonce"), ("alg none", "none"), ("token endpoint down", "down")]:
+        r = sign_in(server, scenario)
+        print(f"{label}:", r.status, title(r))
+
+    # Policies.
+    r = sign_in(server, "unverified")
+    print("unverified email:", r.status, title(r))
+    workspace = app(auth.google_for_tests(endpoints=endpoints, allowed_domains=["Example.com"]))
+    r = sign_in(workspace, "workspace")
+    print("workspace:", r.status, r.headers["Location"])
+    r = sign_in(workspace, "other")
+    print("other domain:", r.status, title(r))
+    listed = app(auth.google_for_tests(endpoints=endpoints, allowed_emails=["ANN@example.com"]))
+    r = sign_in(listed, "ok")
+    print("allowed email:", r.status, r.headers["Location"], "| other email:", sign_in(listed, "banned").status)
+    hooked = app(auth.google_for_tests(endpoints=endpoints, on_login=rename))
+    r = sign_in(hooked, "ok")
+    user = auth.user(signed_request(hooked, cookie_of(r, "session"))).unwrap()
+    print("on_login:", r.status, user.name if user.id == "1001" else "the id changed")
+    r = sign_in(hooked, "banned")
+    print("on_login refuses:", r.status, title(r), r.body.partition("<p>")[2].partition("</p>")[0])
+
+    # `next` never leaves the site.
+    for target in ["//evil.com", "/\\evil.com", "https://evil.com"]:
+        print(f"next {target}:", sign_in(server, "ok", target).headers["Location"])
+
+    # Session cookies.
+    ann = auth.User(id="1001", email="ann@example.com", email_verified=True, name="Ann Lee")
+    good = google.test_cookie(ann)
+    tampered = good.replace(good.partition("=")[2].partition(".")[0], crypto.base64url_encode("{\"u\":{\"id\":\"1\"},\"iat\":0,\"exp\":9999999999}".encode()))
+    print("tampered cookie:", server.handle(http.test_request("GET", "/notes", headers={"Cookie": tampered})).status)
+    print("expired cookie:", server.handle(http.test_request("GET", "/notes", headers={"Cookie": google.test_cookie(ann, expires_in=-1)})).status)
+    stranger = auth.google_for_tests(secret="another secret, long enough to sign cookies with")
+    print("other key:", server.handle(http.test_request("GET", "/notes", headers={"Cookie": stranger.test_cookie(ann)})).status)
+
+    # Logout.
+    r = server.handle(http.test_request("POST", "/auth/logout", headers={"Cookie": good, "Origin": "https://evil.com", "Host": "localhost:8080"}))
+    print("logout from another site:", r.status)
+    r = server.handle(http.test_request("POST", "/auth/logout", headers={"Cookie": good, "Origin": "http://localhost:8080", "Host": "localhost:8080"}))
+    print("logout:", r.status, r.headers["Location"], "|", attributes(r, "session"))
+
+    # A protected route on a server without a provider.
+    bare = http.Server()
+    bare.get("/notes", auth.protect(notes))
+    print("not installed:", bare.handle(http.test_request("GET", "/notes")).status)
+
+    http.Server().stop()
+    task.join()
+
+def other_state(login: http.Response) -> str:
+    return login.headers["Location"].partition("state=")[2].partition("&")[0]
+
+def signed_request(server: http.Server, cookie: str) -> http.Request:
+    """A request that has been through the server's middleware, for reading its user."""
+    req = http.test_request("GET", "/", headers={"Cookie": cookie})
+    server.handle(req)
+    return req

@@ -786,6 +786,15 @@ impl Checker<'_, '_> {
                 if wants_location {
                     values.push(self.location_arg(span));
                 }
+                // A standard library function's `on_...` callbacks, such as
+                // `auth.google(on_login=...)`, are called by the tasks serving requests.
+                if self.is_stdlib_function(id) && !self.is_stdlib_module(self.current_module) {
+                    for (param, value) in written.iter().zip(&values) {
+                        if param.name.starts_with("on_") {
+                            self.require_shareable(cx, value, "called by the tasks serving requests");
+                        }
+                    }
+                }
                 mk(K::Call { func: id, args: values }, ret, span)
             }
             Global::GenericFunction(index) => self.call_generic(cx, index, args, span, expected),

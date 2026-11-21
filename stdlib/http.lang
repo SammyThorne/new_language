@@ -45,6 +45,9 @@ def req_path(handle: int) -> str
 @extern("lrt_http_req_remote")
 def req_remote(handle: int) -> str
 
+@extern("lrt_http_req_query_string")
+def req_query_string(handle: int) -> str
+
 @extern("lrt_http_req_query")
 def req_query(handle: int, name: str) -> str?
 
@@ -204,6 +207,16 @@ impl Request:
                 case None:
                     return None
         return req_query(self.handle, name)
+
+    def query_string(self) -> str:
+        """The query string as sent, without the `?` and not decoded: `""` if there is none."""
+        if self.handle < 0:
+            match self.test_parts():
+                case Some(parts):
+                    return parts.query
+                case None:
+                    return ""
+        return req_query_string(self.handle)
 
     def header(self, name: str) -> str?:
         """A header's value, or `None`. Header names are case-insensitive."""

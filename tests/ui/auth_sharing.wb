@@ -1,0 +1,16 @@
+# Sign-in callbacks run in the tasks serving requests, so what they capture must be shareable:
+# `on_login=` and the handler given to `auth.protect` are checked where they are given.
+import http
+import auth
+
+def main():
+    seen: list[str] = []
+    def record(user: auth.User, tokens: auth.Tokens) -> Result[auth.User, http.HttpError]:
+        seen.append(user.id)
+        return user
+    google = auth.google_for_tests(on_login=record)
+    def page(req: http.Request) -> Result[http.Response]:
+        return http.text(f"{len(seen)} sign-ins")
+    server = http.Server()
+    google.install(server)
+    server.get("/page", auth.protect(page))

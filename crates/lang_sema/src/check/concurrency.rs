@@ -134,7 +134,48 @@ impl Checker<'_, '_> {
         if self.types.contains_error(value.ty) {
             return true;
         }
-        let problem = match (&value.kind, self.types.kind(value.ty)) {
+        let Some((why, help)) = self.value_not_shareable(cx, value) else { return true };
+        let shown = self.display(value.ty);
+        self.error(
+            Diagnostic::error(
+                codes::NOT_SHAREABLE,
+                format!("a value of type `{shown}` cannot be {what}"),
+                value.span,
+                why,
+            )
+            .with_help(help),
+        );
+        false
+    }
+
+    /// Why this value cannot go to another task, looking into what a function value carries.
+    fn value_not_shareable(&self, cx: &FnCx, value: &hir::Expr) -> Option<(String, String)> {
+        match (&value.kind, self.types.kind(value.ty)) {
+            // A function the standard library makes from other functions, such as
+            // `auth.protect(handler)`, carries only those functions: it is shareable if they are.
+            (K::Call { func, args }, TyKind::Func(..)) if self.is_stdlib_function(*func) => args
+                .iter()
+                .filter(|arg| matches!(self.types.kind(arg.ty), TyKind::Func(..)))
+                .find_map(|arg| self.value_not_shareable(cx, arg)),
+            // `Some(f)` for an optional function.
+            (K::Some(inner), _) => self.value_not_shareable(cx, inner),
+            (K::None, _) => None,
+            _ => self.plain_not_shareable(cx, value),
+        }
+    }
+
+    /// Whether a function is declared in a standard library module.
+    pub(super) fn is_stdlib_function(&self, func: hir::FuncId) -> bool {
+        self.is_stdlib_module(self.module_of(self.signatures[func.0].name_span))
+    }
+
+    /// Whether a module is one of the standard library's (not the prelude).
+    pub(super) fn is_stdlib_module(&self, module: usize) -> bool {
+        module != 0 && self.stdlib_modules.get(module).copied().unwrap_or(false)
+    }
+
+    fn plain_not_shareable(&self, cx: &FnCx, value: &hir::Expr) -> Option<(String, String)> {
+        match (&value.kind, self.types.kind(value.ty)) {
             // A function value is shareable if what it carries is.
             (K::FuncRef(_), TyKind::Func(..)) => None,
             (K::BoundMethod { receiver, .. }, TyKind::Func(..)) => {
@@ -148,19 +189,7 @@ impl Checker<'_, '_> {
                 Some((format!("it captures `{name}`, a `{}`: {why}", self.display(ty)), help))
             }),
             _ => self.why_not_shareable(value.ty, &mut Vec::new()),
-        };
-        let Some((why, help)) = problem else { return true };
-        let shown = self.display(value.ty);
-        self.error(
-            Diagnostic::error(
-                codes::NOT_SHAREABLE,
-                format!("a value of type `{shown}` cannot be {what}"),
-                value.span,
-                why,
-            )
-            .with_help(help),
-        );
-        false
+        }
     }
 
     /// What a mutex may hold: a shareable value, or one mutable layer (a list, dict or ordinary

@@ -1018,6 +1018,27 @@ Milestone 2 of the [Google sign-in plan](13-google-oauth-plan.md): the primitive
 
 **No encryption.** Decision 3 of the plan keeps no tokens, so the session cookie is signed, not sealed, and the AES-GCM functions the plan sketched are left out.
 
+### D102. The `auth` module without signature checks (Google sign-in plan, milestone 3)
+
+Milestone 3 of the [Google sign-in plan](13-google-oauth-plan.md): `stdlib/auth.lang`, written entirely in the language on `http` and `crypto`. It provides `auth.google(...)`, the login, callback and logout routes, the signed session and flow cookies, the policies, `on_login`, `required`, `protect`, `user` and the test helpers. The ID token's claims are checked, and its signature is left to milestone 4.
+
+**The provider is frozen and holds the hook.** `Provider` is a `@frozen` struct of strings, tuples, keys and the optional `on_login` function. A function-typed field makes it unshareable by the usual rule, but nothing needs to share it: `install` registers closures over it. The standard library's own registrations are not checked for sharing, as `http`'s never were. Soundness comes from checking what the program gives the module: a standard library function's `on_...` arguments must be shareable where they are passed, and a function a standard library call makes from other functions (`auth.protect(handler)`) is shareable when the functions it was given are. Both reuse the existing E0338 message.
+
+**The middleware tells the guard where to send browsers.** The session middleware stores the login route's path with every request, and the user's JSON when the cookie verifies (`auth.login` and `auth.user` locals). `auth.required` and `auth.protect` are then plain functions, with no provider to pass. A protected route on a server where no provider was installed finds no login path, and answers 500 with an error logged that says to call `install`. To redirect a browser back to the page it asked for, `http.Request` gained `query_string()`.
+
+**Cookies.** The value is `base64url(json) + "." + base64url(HMAC-SHA256(key, "v1." + base64url(json)))`. The keys are HMACs of the secret with `"auth session v1"` and `"auth flow v1"`, so neither cookie can pass for the other. The names are `session` and `oauth`, or `__Host-session` and `__Host-oauth` for an `https` redirect URI. The flow cookie is deleted on every callback answer, success or not. The callback's refusals are short HTML pages, since only browsers reach it, and a refused ID token's reason is logged at warning level, without the token.
+
+**Differences from the plan's sketch:**
+- `install` takes a `Server`, not a `Group`; a group protects its routes with `group.use(auth.required)`.
+- `logout_response` is a method of the provider, which knows the cookie's name.
+- `test_cookie` takes `expires_in=` to make an ended sign-in for tests.
+- `google_for_tests` takes the policies, `on_login`, the redirect URI and `endpoints=auth.Endpoints(...)` for a fake Google.
+- The credentials file's `auth_uri` and `token_uri` are ignored: the endpoints are built in (decision 6), and the file's `auth_uri` is the older v1 one.
+- An empty `SESSION_SECRET` counts as unset.
+- A redirect URI may have a query; a fragment, a wildcard or a user name is refused, as Google refuses them.
+
+**PKCE is sent though Google's web-server page does not describe it.** Read again on 2026-11-20, the page's token exchange lists no `code_verifier`, and the authorization response it shows has no `iss`. Google's discovery document advertises `S256` and the `iss` parameter. So the code sends PKCE as the plan says and checks `iss` only when present. If Google ever refused a verifier from a confidential client, the symptom would be `invalid_grant` on every sign-in, and the fix is to stop sending it. Milestone 6's check with a real client settles it.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

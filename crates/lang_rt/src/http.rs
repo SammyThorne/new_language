@@ -1307,6 +1307,15 @@ pub unsafe extern "C-unwind" fn lrt_http_req_path(handle: i64) -> Str {
     Str::from_bytes(unsafe { request(handle) }.path().as_bytes())
 }
 
+/// The query string as sent, without the `?`: `""` if there is none.
+///
+/// # Safety
+/// `handle` is a live request.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_req_query_string(handle: i64) -> Str {
+    Str::from_bytes(unsafe { request(handle) }.query().as_bytes())
+}
+
 /// # Safety
 /// `handle` is a live request.
 #[unsafe(no_mangle)]

@@ -1,0 +1,17 @@
+error[E0338]: a value of type `def(User, Tokens) -> Result[User, HttpError]?` cannot be called by the tasks serving requests
+  --> tests/ui/auth_sharing.wb:11:45
+   |
+11 |     google = auth.google_for_tests(on_login=record)
+   |                                             ^^^^^^ a function value might capture variables that can be changed
+   |
+   = help: pass a named function, or the data the function needs
+
+error[E0338]: a value of type `def(Request) -> Result[Response]` cannot be used to serve requests from several tasks
+  --> tests/ui/auth_sharing.wb:16:25
+   |
+16 |     server.get("/page", auth.protect(page))
+   |                         ^^^^^^^^^^^^^^^^^^ a function value might capture variables that can be changed
+   |
+   = help: pass a named function, or the data the function needs
+
+error: could not compile `tests/ui/auth_sharing.wb` due to 2 errors

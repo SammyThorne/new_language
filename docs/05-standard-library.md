@@ -18,8 +18,9 @@ The standard library is what makes Weby a backend language and not a general-pur
 | `re` | Regular expressions | M12 | Weby API over the `regex-lite` crate |
 | `postgres` | PostgreSQL client with a connection pool | M12 | Runtime protocol code; Weby API layer |
 | `crypto` | Secure random values, SHA-256, HMAC, constant-time comparison, base64, RS256 checks | post-prototype (D101) | Weby API over the `ring` crate |
+| `auth` | Sign-in with Google: login, callback and logout routes, a signed session cookie, route protection | post-prototype (D102) | Weby, on `http` and `crypto` |
 
-Not in the prototype: HTTP client, TLS, database drivers, templating, regular expressions, cryptography beyond what the WebSocket handshake needs. An HTTP client and a PostgreSQL driver are the first two additions afterwards, since a backend without them is a toy. Milestone 12 added the client, TLS (server and client, through `rustls`), the PostgreSQL driver and regular expressions. The `crypto` module came with Google sign-in (docs/13, D101).
+Not in the prototype: HTTP client, TLS, database drivers, templating, regular expressions, cryptography beyond what the WebSocket handshake needs. An HTTP client and a PostgreSQL driver are the first two additions afterwards, since a backend without them is a toy. Milestone 12 added the client, TLS (server and client, through `rustls`), the PostgreSQL driver and regular expressions. The `crypto` and `auth` modules came with Google sign-in (docs/13, D101 and D102).
 
 ## `io` and `os` (M5)
 
@@ -298,7 +299,7 @@ def remove(self, id: int): ...
 | `http.bearer(...)`, `http.basic_auth(...)`, `http.api_key(name, cookie=False, ...)` | `http.SecurityScheme` values, for `docs(security=...)` |
 | `server.listen(addr)` | Blocks, serving until shutdown. Options: read and write timeouts, maximum header and body sizes, graceful shutdown on SIGTERM |
 | `http.Handler` | `def(http.Request) -> Result[http.Response]` |
-| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes`, `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr`; `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13) |
+| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `query_string() -> str` (as sent, without `?`), `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes`, `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr`; `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13) |
 | `http.Response` | `status`, `headers`, `body`; built with `http.text`, `http.json`, `http.bytes`, `http.error`, `http.redirect`, `http.no_content`. `with_header(name, value)` sets a header; `add_header(name, value)` adds another value, sent as its own line (in `headers`, the values are joined by newlines) |
 | `response.set_cookie(name, value, max_age=-1, path="/", http_only=True, secure=False, same_site="Lax")` | Adds a `Set-Cookie` header; any number per response. Characters a cookie cannot hold, and `%`, are sent as `%XX`, which `req.cookie` decodes. `__Host-` and `__Secure-` cookies, and `same_site="None"`, are always `Secure`. An invalid name, path or `same_site` is a bug and panics (a 500). `delete_cookie(name, path="/")` expires one; `response.cookie(name) -> str?` reads one back, for tests |
 | `http.url_encode(text)`, `http.url_decode(text, plus_is_space=True) -> str?`, `http.form_encode([(name, value), ...])` | Percent-encoding: everything but ASCII letters, digits and `-._~` as `%XX` of its UTF-8 bytes. `form_encode` makes a query string or an `application/x-www-form-urlencoded` body |
@@ -430,6 +431,65 @@ if not crypto.equal(mac, crypto.base64url_decode(sent).unwrap_or("".encode())):
 | `crypto.verify_rs256(modulus, exponent, message, signature) -> bool` | RSASSA-PKCS1-v1_5 with SHA-256 (JWT `RS256`) by the public key with this big-endian modulus and exponent (a JSON Web Key's `n` and `e`, decoded); keys of 2048 to 8192 bits, anything else is `False` |
 
 Data is `bytes`; `text.encode()` makes some, and passing a `str` instead is a compile error whose help says so. Decoding rejects any text no encoder writes (wrong characters, wrong padding, non-zero left-over bits), so each value has one encoding. There is no encryption: sessions are signed, not sealed (docs/13, decision 3). Everything is on `ring`, which the runtime already used for TLS.
+
+## Signing in with Google (D102)
+
+```python
+import http
+import auth
+import os
+
+def notes(req: http.Request) -> Result[http.Response]:
+    user = auth.user(req).unwrap()                    # `auth.User?`; always `Some` behind `protect`
+    return http.text(f"notes of {user.name}")
+
+def main():
+    server = http.Server()
+    google = auth.google("secrets/client_secret.json", secret=os.getenv("SESSION_SECRET")).unwrap()
+    google.install(server)
+    server.get("/notes", auth.protect(notes))
+    admin = server.group("/admin")
+    admin.use(auth.required)                          # every route of the group
+    server.listen(":8080").unwrap()
+```
+
+`auth.google(...)` reads the OAuth client file the Google Cloud console makes (its `web` or `installed` section: the client ID, the secret and the redirect URIs) and checks the setup, returning an `AuthError` that says what to change. `install(server)` adds:
+
+| Route | What it does |
+|---|---|
+| `GET /auth/google/login?next=/notes` | Sets a signed, ten-minute flow cookie holding the `state`, `nonce`, PKCE verifier and `next`, and redirects to Google |
+| `GET` the redirect URI's path | Checks the flow cookie and `state`, exchanges the code (with the PKCE verifier), checks the ID token's claims, applies the policies and `on_login`, sets the session cookie and redirects to `next` |
+| `POST /auth/logout` | Refused (403) if `Origin` names another site; otherwise deletes the session cookie and redirects (303) to `/` |
+| middleware | Reads and verifies the session cookie on every request |
+
+| Item | Shape |
+|---|---|
+| `auth.google(credentials="", secret=None, redirect_uri="", scopes=["openid", "email", "profile"], allowed_domains=[], allowed_emails=[], require_verified_email=True, session_days=7, login_path=..., logout_path=..., after_logout="/", on_login=None) -> Result[auth.Provider, auth.AuthError]` | `credentials=""` reads `GOOGLE_CLIENT_SECRETS` (a path), or `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`; `secret=None` reads `SESSION_SECRET` |
+| `provider.install(server)` | The routes and the middleware above |
+| `provider.login_url(next="/") -> str` | The login route's URL, for links |
+| `provider.logout_response(location="/") -> http.Response` | For an app's own logout route |
+| `provider.test_cookie(user, expires_in=None) -> str` | A `Cookie` header value signing a test request in |
+| `auth.google_for_tests(secret=..., endpoints=None, ...) -> auth.Provider` | A provider without a credentials file; `endpoints=auth.Endpoints(...)` points it at a fake Google |
+| `auth.user(req) -> auth.User?` | The signed-in user |
+| `auth.required` | Middleware refusing signed-out requests |
+| `auth.protect(handler) -> http.Handler` | One handler, protected |
+| `auth.User` | `id` (Google's `sub`: key records on it), `email`, `email_verified`, `name`, `given_name`, `family_name`, `picture`, `domain` (the Workspace domain, or `""`), `provider` |
+| `auth.Tokens`, `auth.LoginHook` | `on_login(user, tokens) -> Result[auth.User, http.HttpError]` may change the user (not its `id`) or refuse with an error's status; the module keeps no tokens |
+
+A signed-out request to a protected route is refused in one of two ways. A browser opening a page (a `GET` or `HEAD` whose `Accept` names `text/html`) is redirected to the login route, with `next` set to the page and its query. Anything else gets `401 {"error": "sign-in required"}`. `next` must be a path on the site; anything else becomes `/`. A protected route on a server without a provider is a 500, with the reason logged.
+
+The session cookie is `session`, or `__Host-session` when the redirect URI is `https`, and it is `HttpOnly` and `SameSite=Lax`. Its value is the JSON of the user and its times, signed with HMAC-SHA256. The key is derived from the secret, so the cookie holds no tokens and needs no database. Changing `SESSION_SECRET` signs everyone out. Without a secret, `http://localhost` development gets a key made for the run, with a warning, and an `https` setup is an error. The callback refuses an expired or missing flow cookie, a wrong `state`, an `error` from Google, a refused code, and an ID token whose header is not RS256 or whose issuer, audience, times (60 seconds of leeway) or nonce are wrong. Each refusal shows a short page with a link to try again, and the reason for a refused token is logged as a warning. Milestone 4 of docs/13 adds the token's signature check.
+
+A test signs a request in without Google:
+
+```python
+google = auth.google_for_tests()
+google.install(server)
+cookie = google.test_cookie(auth.User(id="1", email="a@example.com", email_verified=True))
+response = server.handle(http.test_request("GET", "/notes", headers={"Cookie": cookie}))
+```
+
+What `on_login` and `auth.protect` are given is called by the tasks serving requests, so it must be shareable, as route handlers must.
 
 ## PostgreSQL (M12)
 
@@ -567,6 +627,7 @@ Cancellation is not in the prototype. The intended design is a deadline carried 
 | HTTP, WebSocket | | protocol, router, I/O | `Server`, `Request`, `Response`, helpers |
 | TLS | | `rustls` | `bind_tls`, `listen_tls` |
 | `crypto` | | `ring` digests, HMAC, RSA; base64 | API |
+| `auth` | `on_login` and `protect` checked shareable | | everything |
 | PostgreSQL | | protocol, pool | `Db`, `Row`, `query_as` |
 | `log`, `time`, `io`, `os` | | system calls | API |
 

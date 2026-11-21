@@ -954,7 +954,7 @@ error[E0334]: cannot find module `lib.nowhere`
 2 | import lib.nowhere
   |        ^^^^^^^^^^^ no such module
   |
-  = help: looked for `tests/ui/lib/nowhere.wb` and for a standard library module; the standard library has `io`, `os`, `time`, `json`, `log`, `http`, `re`, `crypto`, `postgres`
+  = help: looked for `tests/ui/lib/nowhere.wb` and for a standard library module; the standard library has `io`, `os`, `time`, `json`, `log`, `http`, `re`, `crypto`, `auth`, `postgres`
 ```
 
 **What to do.** Check the module name and that its file is in the project directory or a dependency. Standard modules are `io`, `os`, `json`, `http`, `re`, `time`, `log` and `postgres`.

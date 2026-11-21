@@ -658,8 +658,13 @@ impl<'m> Checker<'_, 'm> {
     /// After a call to a `Server` or `Group` method that registers handlers: the handlers serve
     /// requests from several tasks at once, so they must be shareable.
     pub(super) fn check_registration(&mut self, cx: &FnCx, method: &str, call: &hir::Expr) {
-        // Generated adapters capture only the mounted value, which `mount` checks.
-        if self.in_http_module() || !REGISTRATION.contains(&method) || self.generated_files.contains(&call.span.file) {
+        // Generated adapters capture only the mounted value, which `mount` checks. The standard
+        // library's own handlers (`auth`'s routes) capture only values it checks where they are
+        // given to it, such as `auth.google(on_login=...)`.
+        if self.is_stdlib_module(self.current_module)
+            || !REGISTRATION.contains(&method)
+            || self.generated_files.contains(&call.span.file)
+        {
             return;
         }
         let K::Call { args, .. } = &call.kind else { return };

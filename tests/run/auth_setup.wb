@@ -1,0 +1,91 @@
+# Setting up sign-in with Google (docs/13, milestone 3): the credentials file the Cloud console
+# makes, the environment, and an error message for each mistake.
+# env: GOOGLE_CLIENT_ID=env-client.apps.googleusercontent.com
+# env: GOOGLE_CLIENT_SECRET=env-secret
+# env: SESSION_SECRET=
+# expect: web: /auth/google/login?next=%2Fnotes
+# expect: installed: ok
+# expect: query kept: ok
+# expect: environment: ok
+# expect: cannot read the Google credentials file: /nowhere/client_secret.json: No such file or directory
+# expect: text.json is not JSON (unexpected text after the JSON value)
+# expect: other.json is not a Google OAuth client file: it has no "web" section
+# expect: nosecret.json has no client_secret
+# expect: nouri.json has no redirect URI: add one to the client in the Google Cloud console, such as http://localhost:8080/auth/google/callback, and download the file again
+# expect: two.json has several redirect URIs (http://localhost:8080/a/cb, http://localhost:8080/b/cb): choose one with `redirect_uri=`
+# expect: the redirect URI http://localhost:9999/cb is not one of those registered in two.json (http://localhost:8080/a/cb, http://localhost:8080/b/cb): add it to the client in the Google Cloud console and download the file again
+# expect: the redirect URI must use https, except on localhost: http://example.com/cb
+# expect: the redirect URI needs a path for the callback route, such as https://example.com/auth/google/callback: https://example.com
+# expect: the redirect URI cannot have a fragment, a wildcard or a user name: https://example.com/cb#x
+# expect: no session secret: set SESSION_SECRET, or pass `secret=`, to at least 32 random characters (`openssl rand -base64 32` makes some). With an https redirect URI it is required, so that sign-ins survive restarts and every instance accepts the others' cookies
+# expect: the session secret must be at least 32 bytes, not 5: `openssl rand -base64 32` makes one
+# expect: the scopes must include "openid", which asks Google who the user is
+# expect: `require_verified_email` needs the "email" scope; add it, or pass `require_verified_email=False`
+# expect: `login_path` must be a path on this site, starting with one `/`: 'https://evil.com/login'
+# expect: the redirect URI's path /auth/google/login is also the login or logout route; register another, such as /auth/google/callback
+# expect: with GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, give `redirect_uri=`: the one registered for the client in the Google Cloud console
+
+import auth
+import crypto
+import io
+
+const SECRET = "0123456789abcdef0123456789abcdef"
+
+def client(kind: str, uris: str, secret: str = "\"client_secret\": \"GOCSPX-x\",") -> str:
+    return "{\"" + kind + "\": {\"client_id\": \"1-abc.apps.googleusercontent.com\", \"project_id\": \"p\", " + secret + " \"redirect_uris\": [" + uris + "], \"javascript_origins\": [\"http://localhost:8080\"]}}"
+
+struct Files:
+    """Credentials files in /tmp, named apart from those of any other run of this test."""
+    prefix: str
+    paths: list[str] = []
+
+impl Files:
+    def file(self, name: str, text: str) -> str:
+        path = f"{self.prefix}{name}.json"
+        io.write_file(path, text).unwrap()
+        self.paths.append(path)
+        return path
+
+    def remove(self):
+        for path in self.paths:
+            io.remove(path).unwrap()
+
+    def report(self, result: Result[auth.Provider, auth.AuthError]):
+        match result:
+            case Ok(_):
+                print("ok")
+            case Err(problem):
+                print(problem.message.replace(self.prefix, "").partition("; download")[0])
+
+def main():
+    files = Files(f"/tmp/auth_setup_{crypto.token(9)}_")
+    one = "\"http://localhost:8080/auth/google/callback\""
+    web = files.file("web", client("web", one))
+    print("web:", auth.google(web, secret=SECRET).unwrap().login_url("/notes"))
+    print("installed:", end=" ")
+    files.report(auth.google(files.file("installed", client("installed", one)), secret=SECRET))
+    print("query kept:", end=" ")
+    files.report(auth.google(files.file("query", client("web", "\"http://127.0.0.1:8080/cb?x=1\"")), secret=SECRET))
+    print("environment:", end=" ")
+    files.report(auth.google(secret=SECRET, redirect_uri="http://localhost:8080/cb"))
+
+    files.report(auth.google("/nowhere/client_secret.json", secret=SECRET))
+    files.report(auth.google(files.file("text", "not json"), secret=SECRET))
+    files.report(auth.google(files.file("other", "{\"type\": \"service_account\"}"), secret=SECRET))
+    files.report(auth.google(files.file("nosecret", client("web", one, "")), secret=SECRET))
+    files.report(auth.google(files.file("nouri", client("web", "")), secret=SECRET))
+    two = files.file("two", client("web", "\"http://localhost:8080/a/cb\", \"http://localhost:8080/b/cb\""))
+    files.report(auth.google(two, secret=SECRET))
+    files.report(auth.google(two, secret=SECRET, redirect_uri="http://localhost:9999/cb"))
+    files.report(auth.google(files.file("plain", client("web", "\"http://example.com/cb\"")), secret=SECRET))
+    files.report(auth.google(files.file("nopath", client("web", "\"https://example.com\"")), secret=SECRET))
+    files.report(auth.google(files.file("fragment", client("web", "\"https://example.com/cb#x\"")), secret=SECRET))
+    https = files.file("https", client("web", "\"https://example.com/auth/google/callback\""))
+    files.report(auth.google(https))
+    files.report(auth.google(https, secret="short"))
+    files.report(auth.google(web, secret=SECRET, scopes=["email"]))
+    files.report(auth.google(web, secret=SECRET, scopes=["openid", "profile"]))
+    files.report(auth.google(web, secret=SECRET, login_path="https://evil.com/login"))
+    files.report(auth.google(files.file("clash", client("web", "\"http://localhost:8080/auth/google/login\"")), secret=SECRET))
+    files.report(auth.google(secret=SECRET))
+    files.remove()

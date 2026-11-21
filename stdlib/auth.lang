@@ -1,0 +1,761 @@
+"""
+Sign-in with Google: the login, callback and logout routes, a signed session cookie, and the
+checks of Google's tokens. The program points it at the credentials file it downloaded from the
+Google Cloud console and marks the routes that need a signed-in user.
+
+    import http
+    import auth
+    import os
+
+    def notes(req: http.Request) -> Result[http.Response]:
+        user = auth.user(req).unwrap()                  # always `Some` behind `auth.protect`
+        return http.text(f"notes of {user.name}")
+
+    def main():
+        server = http.Server()
+        google = auth.google("secrets/client_secret.json", secret=os.getenv("SESSION_SECRET")).unwrap()
+        google.install(server)                          # /auth/google/login, the callback, /auth/logout
+        server.get("/notes", auth.protect(notes))
+        server.listen(":8080").unwrap()
+
+A signed-out request to a protected route is refused: a browser opening a page is sent to the
+login route, which brings it back after signing in, and anything else gets
+`401 {"error": "sign-in required"}`. The session is a cookie signed with the session secret; it
+holds the `User` and nothing else, so no database is needed and Google's tokens are not kept.
+"""
+
+import http
+import crypto
+import json
+import time
+import log
+import os
+import io
+
+# Google's issuer; ID tokens may also give it without the scheme.
+const ISSUER = "https://accounts.google.com"
+# How long a sign-in may take, from the login route to the callback, in seconds.
+const FLOW_SECONDS = 600
+# The clock difference allowed when checking a token's times, in seconds.
+const SKEW = 60
+# The request locals the session middleware sets.
+const USER_KEY = "auth.user"
+const LOGIN_KEY = "auth.login"
+
+# ---- errors -------------------------------------------------------------------------------
+
+pub struct AuthError:
+    """Why sign-in could not be set up: the credentials, the redirect URI or the session
+    secret. The message says what to change."""
+    message: str
+
+impl Error for AuthError:
+    def message(self) -> str:
+        return self.message
+
+impl Display for AuthError:
+    def to_str(self) -> str:
+        return self.message
+
+# ---- users and tokens ---------------------------------------------------------------------
+
+@derive(Json)
+@frozen
+pub struct User:
+    """
+    A signed-in user, from Google's ID token. `id` is Google's account ID (the `sub` claim):
+    key your records on it, not on the email address, which the user can change. The profile
+    fields are `""` when Google does not give them; `domain` is the Google Workspace domain, or
+    `""` for a personal account.
+    """
+    id: str
+    email: str = ""
+    email_verified: bool = False
+    name: str = ""
+    given_name: str = ""
+    family_name: str = ""
+    picture: str = ""
+    domain: str = ""
+    provider: str = "google"
+
+@frozen
+pub struct Tokens:
+    """Google's reply to a sign-in, handed to `on_login`: the access token for calling Google
+    APIs as the user, the refresh token (only with offline access), when the access token
+    expires (seconds since 1970), the scopes granted, and the ID token. The module keeps none
+    of them; store what you need in `on_login`."""
+    access_token: str
+    refresh_token: str?
+    expires_at: float
+    scope: str
+    id_token: str
+
+pub type LoginHook = def(User, Tokens) -> Result[User, http.HttpError]
+"""Called after each sign-in with the user and Google's tokens: return the user, with any
+fields changed but `id`, to sign them in, or an error (`http.Error(403, "...")`) to refuse."""
+
+@frozen
+pub struct Endpoints:
+    """Where sign-in sends users and requests: Google's, unless a test points a provider at a
+    fake Google with `auth.google_for_tests(endpoints=...)`."""
+    authorize: str = "https://accounts.google.com/o/oauth2/v2/auth"
+    token: str = "https://oauth2.googleapis.com/token"
+    keys: str = "https://www.googleapis.com/oauth2/v3/certs"
+
+# ---- the provider -------------------------------------------------------------------------
+
+@frozen
+pub struct Provider:
+    """
+    Sign-in with Google, set up by `auth.google(...)`. `install(server)` adds its routes and the
+    middleware that reads the session cookie.
+    """
+    priv client_id: str
+    priv client_secret: str
+    priv redirect_uri: str
+    priv callback_path: str
+    priv scope: str
+    priv allowed_domains: tuple[str, ...]
+    priv allowed_emails: tuple[str, ...]
+    priv require_verified_email: bool
+    priv session_seconds: int
+    priv login_path: str
+    priv logout_path: str
+    priv after_logout: str
+    priv on_login: LoginHook?
+    priv session_key: bytes
+    priv flow_key: bytes
+    priv session_cookie: str
+    priv flow_cookie: str
+    priv secure: bool
+    priv endpoints: Endpoints
+
+pub def google(
+    credentials: str = "",
+    secret: str? = None,
+    redirect_uri: str = "",
+    scopes: list[str] = ["openid", "email", "profile"],
+    allowed_domains: list[str] = [],
+    allowed_emails: list[str] = [],
+    require_verified_email: bool = True,
+    session_days: int = 7,
+    login_path: str = "/auth/google/login",
+    logout_path: str = "/auth/logout",
+    after_logout: str = "/",
+    on_login: LoginHook? = None,
+) -> Result[Provider, AuthError]:
+    """
+    Set up sign-in with Google.
+
+    - `credentials` is the path of the OAuth client file from the Google Cloud console (APIs &
+      Services > Credentials > your web client > Download JSON). With `""`, the path is read
+      from `GOOGLE_CLIENT_SECRETS`, or the client from `GOOGLE_CLIENT_ID` and
+      `GOOGLE_CLIENT_SECRET` (then give `redirect_uri=`).
+    - `secret` signs the session cookie: at least 32 bytes, the same on every instance. `None`
+      reads `SESSION_SECRET`. Without one, a key is made for this run (sign-ins end when the
+      program stops) on `http://localhost`, and setting up fails for an `https` redirect URI.
+    - `redirect_uri` is the one registered in the console that Google sends users back to; its
+      path becomes the callback route. `""` takes the file's only one.
+    - `allowed_domains` limits sign-in to Google Workspace domains, and `allowed_emails` to
+      addresses; empty allows any account. `require_verified_email` refuses accounts whose
+      address Google has not verified.
+    - `session_days` is how long a sign-in lasts.
+    - `on_login` is called after each sign-in (see `LoginHook`).
+    """
+    client = read_client(credentials, redirect_uri)?
+    return make_provider(
+        client.id,
+        client.secret,
+        client.redirect_uri,
+        secret,
+        scopes,
+        allowed_domains,
+        allowed_emails,
+        require_verified_email,
+        session_days,
+        login_path,
+        logout_path,
+        after_logout,
+        on_login,
+        Endpoints(),
+    )
+
+pub def google_for_tests(
+    secret: str = "a session secret for tests, never for a real program",
+    endpoints: Endpoints? = None,
+    redirect_uri: str = "http://localhost:8080/auth/google/callback",
+    allowed_domains: list[str] = [],
+    allowed_emails: list[str] = [],
+    require_verified_email: bool = True,
+    on_login: LoginHook? = None,
+) -> Provider:
+    """A provider for tests, without a credentials file: its client ID is
+    `test-client.apps.googleusercontent.com` and its secret `test-secret`. Use it with
+    `test_cookie` to sign requests in, or point `endpoints` at a fake Google to test the whole
+    sign-in."""
+    match make_provider(
+        "test-client.apps.googleusercontent.com",
+        "test-secret",
+        redirect_uri,
+        Some(secret),
+        ["openid", "email", "profile"],
+        allowed_domains,
+        allowed_emails,
+        require_verified_email,
+        7,
+        "/auth/google/login",
+        "/auth/logout",
+        "/",
+        on_login,
+        endpoints.unwrap_or(Endpoints()),
+    ):
+        case Ok(provider):
+            return provider
+        case Err(problem):
+            panic(problem.message)
+
+struct Client:
+    id: str
+    secret: str
+    redirect_uri: str
+
+def read_client(credentials: str, redirect_uri: str) -> Result[Client, AuthError]:
+    path = credentials
+    if path == "":
+        match os.getenv("GOOGLE_CLIENT_SECRETS"):
+            case Some(found):
+                path = found
+            case None:
+                id = os.getenv("GOOGLE_CLIENT_ID").unwrap_or("")
+                secret = os.getenv("GOOGLE_CLIENT_SECRET").unwrap_or("")
+                if id == "" or secret == "":
+                    return Err(AuthError("no Google client: give the path of the client_secret.json file from the Google Cloud console, or set GOOGLE_CLIENT_SECRETS to it, or set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET"))
+                if redirect_uri == "":
+                    return Err(AuthError("with GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, give `redirect_uri=`: the one registered for the client in the Google Cloud console"))
+                return Client(id, secret, redirect_uri)
+    match io.read_file(path):
+        case Ok(text):
+            return parse_client(text, path, redirect_uri)
+        case Err(problem):
+            return Err(AuthError(f"cannot read the Google credentials file: {problem.message()}"))
+
+const DOWNLOAD_HELP = "download it from the Google Cloud console: APIs & Services > Credentials > your OAuth client (a web application) > Download JSON"
+
+def parse_client(text: str, path: str, redirect_uri: str) -> Result[Client, AuthError]:
+    match json.parse(text):
+        case Ok(data):
+            section = data["web"]
+            if section == json.Value.Null:
+                section = data["installed"]
+            if section == json.Value.Null:
+                return Err(AuthError(f"{path} is not a Google OAuth client file: it has no \"web\" section; {DOWNLOAD_HELP}"))
+            id = section["client_id"].as_str().unwrap_or("")
+            if id == "":
+                return Err(AuthError(f"{path} has no client_id; {DOWNLOAD_HELP}"))
+            secret = section["client_secret"].as_str().unwrap_or("")
+            if secret == "":
+                return Err(AuthError(f"{path} has no client_secret; {DOWNLOAD_HELP}"))
+            uris: list[str] = []
+            match section["redirect_uris"]:
+                case json.Value.Array(items):
+                    for item in items:
+                        match item.as_str():
+                            case Some(uri):
+                                uris.append(uri)
+                            case None:
+                                pass
+                case _:
+                    pass
+            if redirect_uri != "":
+                if len(uris) > 0 and redirect_uri not in uris:
+                    return Err(AuthError(f"the redirect URI {redirect_uri} is not one of those registered in {path} ({', '.join(uris)}): add it to the client in the Google Cloud console and download the file again"))
+                return Client(id, secret, redirect_uri)
+            if len(uris) == 0:
+                return Err(AuthError(f"{path} has no redirect URI: add one to the client in the Google Cloud console, such as http://localhost:8080/auth/google/callback, and download the file again"))
+            if len(uris) > 1:
+                return Err(AuthError(f"{path} has several redirect URIs ({', '.join(uris)}): choose one with `redirect_uri=`"))
+            return Client(id, secret, uris[0])
+        case Err(problem):
+            return Err(AuthError(f"{path} is not JSON ({problem.message()}); {DOWNLOAD_HELP}"))
+
+def make_provider(
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str,
+    secret: str?,
+    scopes: list[str],
+    allowed_domains: list[str],
+    allowed_emails: list[str],
+    require_verified_email: bool,
+    session_days: int,
+    login_path: str,
+    logout_path: str,
+    after_logout: str,
+    on_login: LoginHook?,
+    endpoints: Endpoints,
+) -> Result[Provider, AuthError]:
+    secure, callback_path = split_redirect_uri(redirect_uri)?
+    if "openid" not in scopes:
+        return Err(AuthError("the scopes must include \"openid\", which asks Google who the user is"))
+    if require_verified_email and "email" not in scopes:
+        return Err(AuthError("`require_verified_email` needs the \"email\" scope; add it, or pass `require_verified_email=False`"))
+    if session_days < 1:
+        return Err(AuthError(f"`session_days` must be at least 1, not {session_days}"))
+    for name, path in [("login_path", login_path), ("logout_path", logout_path), ("after_logout", after_logout)]:
+        if not path.starts_with("/") or path.starts_with("//"):
+            return Err(AuthError(f"`{name}` must be a path on this site, starting with one `/`: {path!r}"))
+    if callback_path == login_path or callback_path == logout_path:
+        return Err(AuthError(f"the redirect URI's path {callback_path} is also the login or logout route; register another, such as /auth/google/callback"))
+    master = session_secret(secret, secure)?
+    domains = tuple([domain.lower() for domain in allowed_domains])
+    emails = tuple([email.lower() for email in allowed_emails])
+    session_cookie = "__Host-session" if secure else "session"
+    flow_cookie = "__Host-oauth" if secure else "oauth"
+    return Provider(
+        client_id,
+        client_secret,
+        redirect_uri,
+        callback_path,
+        " ".join(scopes),
+        domains,
+        emails,
+        require_verified_email,
+        session_days * 86400,
+        login_path,
+        logout_path,
+        after_logout,
+        on_login,
+        crypto.hmac_sha256(master, "auth session v1".encode()),
+        crypto.hmac_sha256(master, "auth flow v1".encode()),
+        session_cookie,
+        flow_cookie,
+        secure,
+        endpoints,
+    )
+
+def split_redirect_uri(uri: str) -> Result[tuple[bool, str], AuthError]:
+    """Whether the redirect URI is `https`, and its path (the callback route)."""
+    secure = uri.starts_with("https://")
+    rest = ""
+    if secure:
+        rest = uri[8:]
+    elif uri.starts_with("http://"):
+        rest = uri[7:]
+    else:
+        return Err(AuthError(f"the redirect URI must start with https:// (or http://localhost for development): {uri!r}"))
+    host, slash, path = rest.partition("/")
+    if not secure:
+        name = host
+        if not host.starts_with("["):
+            name, _colon, _port = host.partition(":")
+        elif "]" in host:
+            name = host[0:host.index("]") + 1]
+        if name != "localhost" and name != "127.0.0.1" and name != "[::1]":
+            return Err(AuthError(f"the redirect URI must use https, except on localhost: {uri}"))
+    if "#" in path or "*" in uri or "@" in host:
+        return Err(AuthError(f"the redirect URI cannot have a fragment, a wildcard or a user name: {uri}"))
+    path = path.partition("?")[0]
+    if slash == "" or path == "":
+        return Err(AuthError(f"the redirect URI needs a path for the callback route, such as {uri.rstrip('/')}/auth/google/callback: {uri}"))
+    return (secure, "/" + path)
+
+def session_secret(secret: str?, secure: bool) -> Result[bytes, AuthError]:
+    text = ""
+    match secret:
+        case Some(given):
+            text = given
+        case None:
+            match os.getenv("SESSION_SECRET"):
+                case Some(found) if found != "":
+                    text = found
+                case _:
+                    if secure:
+                        return Err(AuthError("no session secret: set SESSION_SECRET, or pass `secret=`, to at least 32 random characters (`openssl rand -base64 32` makes some). With an https redirect URI it is required, so that sign-ins survive restarts and every instance accepts the others' cookies"))
+                    log.warn("no SESSION_SECRET: using a key made for this run, so sign-ins end when the program stops")
+                    return crypto.random_bytes(32)
+    if len(text.encode()) < 32:
+        return Err(AuthError(f"the session secret must be at least 32 bytes, not {len(text.encode())}: `openssl rand -base64 32` makes one"))
+    return text.encode()
+
+# ---- signed cookies -----------------------------------------------------------------------
+
+def sign(text: str, key: bytes) -> str:
+    """`text` and its MAC, as `base64url(text).base64url(mac)`."""
+    body = crypto.base64url_encode(text.encode())
+    mac = crypto.hmac_sha256(key, ("v1." + body).encode())
+    return body + "." + crypto.base64url_encode(mac)
+
+def unsign(value: str, key: bytes) -> str?:
+    """The text `sign` signed with `key`, or `None` if the value was changed or signed with
+    another key."""
+    body, dot, mac_text = value.partition(".")
+    if dot == "":
+        return None
+    match crypto.base64url_decode(mac_text):
+        case Some(mac):
+            if not crypto.equal(mac, crypto.hmac_sha256(key, ("v1." + body).encode())):
+                return None
+            match crypto.base64url_decode(body):
+                case Some(data):
+                    return data.decode()
+                case None:
+                    return None
+        case None:
+            return None
+
+@derive(Json)
+struct Session:
+    u: User
+    iat: int
+    exp: int
+
+@derive(Json)
+struct Flow:
+    state: str
+    nonce: str
+    verifier: str
+    next: str
+    exp: int
+
+def now() -> int:
+    return int(time.now())
+
+# ---- routes -------------------------------------------------------------------------------
+
+impl Provider:
+    def install(self, server: http.Server):
+        """Add the login route, the callback route (the redirect URI's path), the logout route
+        (`POST`), and the middleware that reads the session cookie on every request, which
+        `auth.user`, `auth.required` and `auth.protect` rely on."""
+        provider = self
+        server.use(lambda req, next: provider.middleware(req, next))
+        server.get(self.login_path, lambda req: provider.login(req))
+        server.get(self.callback_path, lambda req: provider.callback(req))
+        server.post(self.logout_path, lambda req: provider.logout(req))
+
+    def login_url(self, next: str = "/") -> str:
+        """The login route's URL, which brings the user back to `next` (a path on this site)."""
+        return self.login_path + "?next=" + http.url_encode(next)
+
+    def test_cookie(self, user: User, expires_in: int? = None) -> str:
+        """A `Cookie` header that signs a test request in as `user`:
+        `http.test_request("GET", "/notes", headers={"Cookie": google.test_cookie(user)})`.
+        The sign-in lasts as long as a real one, or `expires_in` seconds; a negative number
+        makes one that has ended."""
+        issued = now()
+        ends = issued + expires_in.unwrap_or(self.session_seconds)
+        return self.session_cookie + "=" + sign(json.encode(Session(user, issued, ends)), self.session_key)
+
+    def logout_response(self, location: str = "/") -> http.Response:
+        """A response that signs the user out and redirects (303) to `location`: for an app
+        that writes its own logout route."""
+        response = http.redirect(location, 303)
+        response.delete_cookie(self.session_cookie)
+        return response
+
+    def session_value(self, user: User) -> str:
+        issued = now()
+        return sign(json.encode(Session(user, issued, issued + self.session_seconds)), self.session_key)
+
+    def middleware(self, req: http.Request, next: http.Handler) -> Result[http.Response]:
+        req.set_local(LOGIN_KEY, self.login_path)
+        match req.cookie(self.session_cookie):
+            case Some(value):
+                match unsign(value, self.session_key):
+                    case Some(text):
+                        match json.decode[Session](text):
+                            case Ok(session):
+                                if session.exp > now():
+                                    req.set_local(USER_KEY, json.encode(session.u))
+                            case Err(_):
+                                pass
+                    case None:
+                        pass
+            case None:
+                pass
+        return next(req)
+
+    def login(self, req: http.Request) -> Result[http.Response]:
+        target = safe_next(req.query("next").unwrap_or("/"))
+        state = crypto.token()
+        nonce = crypto.token()
+        verifier = crypto.token(48)
+        challenge = crypto.base64url_encode(crypto.sha256(verifier.encode()))
+        flow = sign(json.encode(Flow(state, nonce, verifier, target, now() + FLOW_SECONDS)), self.flow_key)
+        params = [
+            ("client_id", self.client_id),
+            ("redirect_uri", self.redirect_uri),
+            ("response_type", "code"),
+            ("scope", self.scope),
+            ("state", state),
+            ("nonce", nonce),
+            ("code_challenge", challenge),
+            ("code_challenge_method", "S256"),
+            ("include_granted_scopes", "true"),
+        ]
+        if len(self.allowed_domains) == 1:
+            params.append(("hd", self.allowed_domains[0]))
+        joiner = "&" if "?" in self.endpoints.authorize else "?"
+        response = http.redirect(self.endpoints.authorize + joiner + http.form_encode(params))
+        response.set_cookie(self.flow_cookie, flow, max_age=FLOW_SECONDS, secure=self.secure)
+        return response
+
+    def callback(self, req: http.Request) -> Result[http.Response]:
+        flow: Flow? = None
+        match req.cookie(self.flow_cookie):
+            case Some(value):
+                match unsign(value, self.flow_key):
+                    case Some(text):
+                        match json.decode[Flow](text):
+                            case Ok(decoded):
+                                if decoded.exp > now():
+                                    flow = Some(decoded)
+                            case Err(_):
+                                pass
+                    case None:
+                        pass
+            case None:
+                pass
+        match flow:
+            case None:
+                return self.page(400, "Sign-in expired", "The sign-in took too long, or did not start here.", True)
+            case Some(started):
+                response = self.finish(req, started)
+                response.delete_cookie(self.flow_cookie)
+                return response
+
+    def finish(self, req: http.Request, flow: Flow) -> http.Response:
+        """The rest of the callback, once the flow cookie is read."""
+        match req.query("error"):
+            case Some(reason):
+                return self.page(401, "Sign-in cancelled", f"Google did not sign you in ({reason}).", True)
+            case None:
+                pass
+        state = req.query("state").unwrap_or("")
+        if not crypto.equal(state.encode(), flow.state.encode()):
+            return self.page(400, "Sign-in expired", "This sign-in does not match the one this browser started.", True)
+        match req.query("iss"):
+            case Some(issuer):
+                if issuer != ISSUER:
+                    log.warn(f"sign-in: the callback names the issuer {issuer!r}")
+                    return self.page(401, "Sign-in failed", "Could not verify the sign-in.", True)
+            case None:
+                pass
+        code = req.query("code").unwrap_or("")
+        if code == "":
+            return self.page(400, "Sign-in failed", "Google sent no authorization code.", True)
+        fields = [
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", self.redirect_uri),
+            ("client_id", self.client_id),
+            ("client_secret", self.client_secret),
+            ("code_verifier", flow.verifier),
+        ]
+        reply: json.Value = json.Value.Null
+        match http.post_form(self.endpoints.token, fields, {"Accept": "application/json"}):
+            case Ok(answer):
+                match answer.json():
+                    case Ok(value):
+                        reply = value
+                    case Err(problem):
+                        log.warn(f"sign-in: the token endpoint answered {answer.status} without JSON: {problem.message()}")
+                        return self.page(502, "Sign-in failed", "Google could not be reached. Try again later.", True)
+                if not answer.ok():
+                    error = reply["error"].as_str().unwrap_or("")
+                    if error == "invalid_grant":
+                        return self.page(400, "Sign-in expired", "The sign-in was already used or took too long.", True)
+                    detail = reply["error_description"].as_str().unwrap_or("")
+                    if detail != "":
+                        error = f"{error}: {detail}"
+                    log.error(f"sign-in: the token endpoint refused the code: {answer.status} {error}")
+                    return self.page(502, "Sign-in failed", "Google refused the sign-in. Try again later.", True)
+            case Err(problem):
+                log.warn(f"sign-in: the token request failed: {problem.message()}")
+                return self.page(502, "Sign-in failed", "Google could not be reached. Try again later.", True)
+        id_token = reply["id_token"].as_str().unwrap_or("")
+        claims = json.Value.Null
+        match self.check_id_token(id_token, flow.nonce):
+            case Ok(checked):
+                claims = checked
+            case Err(reason):
+                log.warn(f"sign-in: the ID token was refused: {reason}")
+                return self.page(401, "Sign-in failed", "Could not verify the sign-in.", True)
+        user = user_of(claims)
+        if self.require_verified_email and not user.email_verified:
+            return self.page(403, "Sign-in refused", f"The Google account {user.email} has no verified email address.", False)
+        if len(self.allowed_domains) > 0 and user.domain.lower() not in self.allowed_domains:
+            return self.page(403, "Sign-in refused", f"The Google account {user.email} cannot sign in here.", False)
+        if len(self.allowed_emails) > 0 and user.email.lower() not in self.allowed_emails:
+            return self.page(403, "Sign-in refused", f"The Google account {user.email} cannot sign in here.", False)
+        match self.on_login:
+            case Some(hook):
+                expires_in = reply["expires_in"].as_float().unwrap_or(0.0)
+                tokens = Tokens(
+                    reply["access_token"].as_str().unwrap_or(""),
+                    reply["refresh_token"].as_str(),
+                    time.now() + expires_in,
+                    reply["scope"].as_str().unwrap_or(""),
+                    id_token,
+                )
+                match hook(user, tokens):
+                    case Ok(changed):
+                        user = User(user.id, changed.email, changed.email_verified, changed.name, changed.given_name, changed.family_name, changed.picture, changed.domain, changed.provider)
+                    case Err(refused):
+                        return self.page(refused.status, "Sign-in refused", refused.message, False)
+            case None:
+                pass
+        response = http.redirect(flow.next)
+        response.set_cookie(self.session_cookie, self.session_value(user), max_age=self.session_seconds, secure=self.secure)
+        return response
+
+    def check_id_token(self, token: str, nonce: str) -> Result[json.Value, str]:
+        """The ID token's claims, once its header and claims are checked; or why not."""
+        parts = token.split(".")
+        if len(parts) != 3:
+            return Err("it is not a JSON Web Token")
+        header = decode_part(parts[0])
+        claims = decode_part(parts[1])
+        if header["alg"].as_str() != Some("RS256"):
+            return Err(f"its algorithm is {header['alg']}, not RS256")
+        issuer = claims["iss"].as_str().unwrap_or("")
+        if issuer != ISSUER and issuer != "accounts.google.com":
+            return Err(f"its issuer is {issuer!r}")
+        match claims["aud"]:
+            case json.Value.Str(audience):
+                if audience != self.client_id:
+                    return Err(f"it is for another client ({audience})")
+            case json.Value.Array(audiences):
+                if json.Value.Str(self.client_id) not in audiences or claims["azp"].as_str() != Some(self.client_id):
+                    return Err("it is for other clients")
+            case _:
+                return Err("it has no audience")
+        current = time.now()
+        expires = claims["exp"].as_float().unwrap_or(0.0)
+        if expires <= current - float(SKEW):
+            return Err(f"it expired at {int(expires)}, and the time is {int(current)} (seconds since 1970); check the server's clock if this repeats")
+        issued = claims["iat"].as_float().unwrap_or(current)
+        if issued >= current + float(SKEW):
+            return Err(f"it was issued at {int(issued)}, after the time now, {int(current)} (seconds since 1970); check the server's clock")
+        if not crypto.equal(claims["nonce"].as_str().unwrap_or("").encode(), nonce.encode()):
+            return Err("its nonce is not the one this sign-in sent")
+        if claims["sub"].as_str().unwrap_or("") == "":
+            return Err("it names no account (`sub`)")
+        return claims
+
+    def logout(self, req: http.Request) -> Result[http.Response]:
+        match req.header("Origin"):
+            case Some(origin):
+                _scheme, separator, host = origin.partition("://")
+                if separator == "" or host != req.header("Host").unwrap_or(""):
+                    return http.error(403, "sign-out from another site refused")
+            case None:
+                pass
+        return self.logout_response(self.after_logout)
+
+    def page(self, status: int, title: str, message: str, retry: bool) -> http.Response:
+        """A small page explaining why sign-in stopped, with a link to try again."""
+        link = ""
+        if retry:
+            link = f"<p><a href=\"{escape(self.login_path)}\">Sign in again</a></p>"
+        body = f"<!doctype html><meta charset=\"utf-8\"><title>{escape(title)}</title><h1>{escape(title)}</h1><p>{escape(message)}</p>{link}"
+        return http.html(body, status)
+
+def decode_part(text: str) -> json.Value:
+    match crypto.base64url_decode(text):
+        case Some(data):
+            match data.decode():
+                case Some(decoded):
+                    return json.parse(decoded).unwrap_or(json.Value.Null)
+                case None:
+                    return json.Value.Null
+        case None:
+            return json.Value.Null
+
+def user_of(claims: json.Value) -> User:
+    verified = False
+    match claims["email_verified"]:
+        case json.Value.Bool(flag):
+            verified = flag
+        case json.Value.Str(text):
+            verified = text == "true"
+        case _:
+            pass
+    return User(
+        claims["sub"].as_str().unwrap_or(""),
+        claims["email"].as_str().unwrap_or(""),
+        verified,
+        claims["name"].as_str().unwrap_or(""),
+        claims["given_name"].as_str().unwrap_or(""),
+        claims["family_name"].as_str().unwrap_or(""),
+        claims["picture"].as_str().unwrap_or(""),
+        claims["hd"].as_str().unwrap_or(""),
+        "google",
+    )
+
+def safe_next(target: str) -> str:
+    """`target` if it is a path on this site, else `/`: the login route never sends a user to
+    another site (an open redirect)."""
+    if not target.starts_with("/") or target.starts_with("//") or "\\" in target:
+        return "/"
+    for c in target:
+        code = ord(c)
+        if code < 32 or code == 127:
+            return "/"
+    return target
+
+def escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
+
+# ---- protecting routes --------------------------------------------------------------------
+
+pub def user(req: http.Request) -> User?:
+    """The signed-in user, or `None`. The provider's middleware finds it."""
+    match req.local(USER_KEY):
+        case Some(text):
+            match json.decode[User](text):
+                case Ok(found):
+                    return found
+                case Err(_):
+                    return None
+        case None:
+            return None
+
+pub def required(req: http.Request, next: http.Handler) -> Result[http.Response]:
+    """Middleware that refuses signed-out requests: `server.use(auth.required)` or
+    `group.use(auth.required)`. A browser opening a page is redirected to the login route,
+    and anything else gets a 401."""
+    match guard(req):
+        case Some(refusal):
+            return refusal
+        case None:
+            return next(req)
+
+pub def protect(handler: http.Handler) -> http.Handler:
+    """`handler`, refusing signed-out requests as `required` does: `server.get("/notes",
+    auth.protect(notes))`."""
+    return lambda req: required(req, handler)
+
+pub def guard(req: http.Request) -> http.Response?:
+    """`None` if a user is signed in, or else the response refusing the request. `required`
+    uses it, as does the code `server.mount` generates for protected routes."""
+    match req.local(USER_KEY):
+        case Some(_):
+            return None
+        case None:
+            pass
+    match req.local(LOGIN_KEY):
+        case Some(login_path):
+            return refusal(req, login_path)
+        case None:
+            log.error(f"{req.method} {req.path} needs a signed-in user, but no sign-in provider is installed: call `provider.install(server)`")
+            return http.error(500, "internal server error")
+
+def refusal(req: http.Request, login_path: str) -> http.Response:
+    if (req.method == "GET" or req.method == "HEAD") and "text/html" in req.header("Accept").unwrap_or(""):
+        target = req.path
+        query = req.query_string()
+        if query != "":
+            target = target + "?" + query
+        return http.redirect(login_path + "?next=" + http.url_encode(target))
+    return http.error(401, "sign-in required").with_header("WWW-Authenticate", "Cookie realm=\"sign-in\"")

@@ -1,6 +1,6 @@
 # Sign in with Google: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 and 2 are built; the decisions (section 5) are confirmed.** Each milestone in section 6 ends with a "Done" note once built. It adds a standard library module, `auth`, that lets a program sign its users in with their Google accounts. The program points it at the credentials file it downloaded from the Google Cloud console. It marks the routes that need a signed-in user with `@auth.required`, or by giving the handler a parameter of type `auth.User`. The module provides the login, callback and logout routes, the session cookie, and the checks of Google's tokens. The program writes none of the OAuth flow itself.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 3 are built; the decisions (section 5) are confirmed.** Each milestone in section 6 ends with a "Done" note once built. It adds a standard library module, `auth`, that lets a program sign its users in with their Google accounts. The program points it at the credentials file it downloaded from the Google Cloud console. It marks the routes that need a signed-in user with `@auth.required`, or by giving the handler a parameter of type `auth.User`. The module provides the login, callback and logout routes, the session cookie, and the checks of Google's tokens. The program writes none of the OAuth flow itself.
 
 It mirrors what web developers get elsewhere:
 - Flask: Flask-Login's `@login_required` on top of Authlib or Flask-Dance.
@@ -521,6 +521,13 @@ Each milestone follows docs/11's rules: the gates (`make lint`, `make test`, `ma
   - `next` cannot leave the site (`//evil.com`, `/\evil.com`, `https://evil.com`).
   - A tampered or expired session cookie.
   - Logout with a foreign `Origin`.
+
+**Done** (D102). Everything listed, with these differences:
+- `install` takes a `Server`; groups use `group.use(auth.required)`. `logout_response` is a `Provider` method. `test_cookie` takes `expires_in=`. `google_for_tests` takes `endpoints=auth.Endpoints(...)`, the policies and `on_login`.
+- The checks of the redirect URI follow Google's rules as read on 2026-11-20: `https` except on `localhost`, `127.0.0.1` and `[::1]`; no fragment, wildcard or user name. A query is allowed. The file's `auth_uri` and `token_uri` are ignored (decision 6).
+- Google's web-server page describes neither PKCE nor the `iss` parameter; the discovery document advertises both. PKCE is sent, and `iss` is checked when present (D102).
+- The compiler checks what the program hands the module: `on_...` arguments of standard library functions, and functions such as `auth.protect(handler)`, must be shareable (`tests/ui/auth_sharing.wb`). `http.Request` gained `query_string()`.
+- The tests are `tests/run/auth_google_flow.wb` and `tests/run/auth_setup.wb`. The fake Google is a server in the same program that the client calls; the app is driven with `server.handle`. They cover everything listed, plus a wrong PKCE verifier, `alg: none`, a failing token endpoint, the `hd` and email policies, a cookie signed with another key, and a protected route without a provider. Each setup error has a test too.
 
 ### Milestone 4: signatures and the key cache (about 1.5 days)
 
