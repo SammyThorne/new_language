@@ -2,6 +2,7 @@
 //! and links the result with the runtime library.
 
 mod fmt;
+mod hash_password;
 mod loader;
 mod lsp;
 mod manifest;
@@ -101,6 +102,12 @@ enum Cmd {
     },
     /// Run the language server, speaking the Language Server Protocol on standard input and output
     Lsp,
+    /// Hash a password for METRICS_PASSWORD_HASH, reading it without echo (or from standard input)
+    HashPassword {
+        /// PBKDF2 iterations; more is slower to check and to guess
+        #[arg(long, default_value_t = hash_password::DEFAULT_ITERATIONS)]
+        iterations: u32,
+    },
     /// Rewrite source files in the standard layout
     Fmt {
         /// Files or directories (searched recursively); the current directory if none
@@ -136,6 +143,7 @@ fn main() -> ExitCode {
         Cmd::Check { file } => frontend(&file, None).map(|_| ExitCode::SUCCESS),
         Cmd::Fmt { paths, check } => format_files(&paths, check),
         Cmd::Explain { code } => explain(&code),
+        Cmd::HashPassword { iterations } => hash_password_command(iterations),
         Cmd::Fetch { file, update } => {
             let file = file.unwrap_or_else(|| PathBuf::from(".").join("main"));
             match manifest::dependencies_for(&file, true, update) {
@@ -175,6 +183,30 @@ fn with_default_command(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsSt
         args.insert(1, "build".into());
     }
     args
+}
+
+/// `hash-password`: print the hash of a password read from the terminal or standard input.
+fn hash_password_command(iterations: u32) -> Result<ExitCode, Failure> {
+    let Some(iterations) = std::num::NonZeroU32::new(iterations) else {
+        eprintln!("error: --iterations must be at least 1");
+        return Err(Failure(EXIT_COMPILE_ERROR));
+    };
+    let hashed = hash_password::read_password().and_then(|password| {
+        if password.is_empty() {
+            return Err("the password is empty".to_string());
+        }
+        hash_password::hash(&password, iterations)
+    });
+    match hashed {
+        Ok(hash) => {
+            println!("{hash}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(message) => {
+            eprintln!("error: {message}");
+            Err(Failure(EXIT_COMPILE_ERROR))
+        }
+    }
 }
 
 /// The error reference, `docs/errors.md`, which is part of the program.

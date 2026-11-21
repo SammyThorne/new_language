@@ -336,7 +336,7 @@ def remove(self, id: int): ...
 | `http.bearer(...)`, `http.basic_auth(...)`, `http.api_key(name, cookie=False, ...)` | `http.SecurityScheme` values, for `docs(security=...)` |
 | `server.security_scheme(name, scheme)` | A scheme documented on every page of the server, for libraries |
 | `server.listen(addr)` | Blocks, serving until shutdown. Options: read and write timeouts, maximum header and body sizes, graceful shutdown on SIGTERM |
-| `server.metrics(path="/metrics", user=None, password=None, public=False)` | Serves the metrics in the Prometheus text format, behind HTTP Basic authentication; see "Metrics and health" |
+| `server.metrics(path="/metrics", dashboard=True, user=None, password=None, public=False)` | Serves the metrics in the Prometheus text format, and a dashboard at `path + "/dashboard"`, behind HTTP Basic authentication; see "Metrics and health" |
 | `server.health(live="/healthz", ready="/readyz", checks={})` | Liveness and readiness routes for a load balancer; see "Metrics and health" |
 | `server.drain_delay` | Seconds to go on serving after SIGTERM, with readiness failing, before closing; 0 by default |
 | `http.Handler` | `def(http.Request) -> Result[http.Response]` |
@@ -800,7 +800,7 @@ def main():
     )
     server = http.Server()
     server.drain_delay = 5                                  # seconds of failing /readyz after SIGTERM
-    server.metrics()                                        # GET /metrics, METRICS_USER and METRICS_PASSWORD
+    server.metrics()                                        # GET /metrics and /metrics/dashboard, METRICS_USER and METRICS_PASSWORD
     server.health(checks={"database": lambda: ping(db)})    # GET /healthz and /readyz
     ...
 
@@ -810,10 +810,24 @@ def send(stats: Stats, job: Job) -> Result[None]:
     stats.jobs_done.inc({"queue": job.queue})
 ```
 
-**`server.metrics(path="/metrics", user=None, password=None, public=False)`** serves every metric in the Prometheus text format, version 0.0.4, with `Content-Type: text/plain; version=0.0.4; charset=utf-8` and `Cache-Control: no-store`. Recording requests starts when it is called; a server that never calls it reads no clock and touches no counter for its requests.
+**`server.metrics(path="/metrics", dashboard=True, user=None, password=None, public=False)`** serves every metric in the Prometheus text format, version 0.0.4, with `Content-Type: text/plain; version=0.0.4; charset=utf-8` and `Cache-Control: no-store`. Recording requests starts when it is called; a server that never calls it reads no clock and touches no counter for its requests.
 
 - **Credentials.** HTTP Basic authentication, with the user name and password from the arguments, else from the environment variables `METRICS_USER` and `METRICS_PASSWORD` (`config.load_env()` puts a `.env` file's there). A request without them gets a 401 with `WWW-Authenticate: Basic realm="metrics", charset="UTF-8"`. Without credentials, and without `public=True`, the call panics: ``server.metrics needs a username and password: set METRICS_USER and METRICS_PASSWORD in the environment or in .env (read by config.load or config.load_env), or pass public=True to serve the metrics without them.`` The runtime keeps only HMAC-SHA256 digests of the two, under a key made for the process, and compares digests in constant time.
-- The route is left out of the metrics and of the API documentation. Middleware applies to it, and `request_log` logs it.
+- **A password hash.** `METRICS_PASSWORD_HASH` may take the place of `METRICS_PASSWORD`, so the password itself is in no file: `viper hash-password` asks for it twice without echo (or reads one line from standard input when that is not a terminal) and prints `pbkdf2-sha256$<iterations>$<salt>$<hash>`, PBKDF2-HMAC-SHA256 with a 16-byte random salt and 600,000 iterations (`--iterations` changes it), salt and hash in standard base64. Checking a password against it takes a few hundred milliseconds; once one has matched, its HMAC digest is kept, so the dashboard's polling is checked as cheaply as a plain password. A value that is not in that form stops the program at `server.metrics` with ``METRICS_PASSWORD_HASH is not a password hash: make one with `viper hash-password`, which prints pbkdf2-sha256$<iterations>$<salt>$<hash>``.
+- **Lock-out.** After 10 wrong user names or passwords from one `req.client_ip()` within a minute, that address gets `429 Too Many Requests` with `Retry-After` for a minute, even with the right password, and a `warn` line is logged. Requests without an `Authorization` header (a browser's first try) are not counted. The table holds 4096 addresses.
+- **Plain HTTP.** The first time credentials arrive over plain HTTP from an address that is not loopback (not TLS, and not through a trusted proxy that sent `X-Forwarded-Proto: https`), a `warn` line says that they cross the network readably.
+- **Headers.** Every response from these routes has `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`; all but the dashboard's stylesheet and script have `Cache-Control: no-store`.
+- The routes are left out of the metrics and of the API documentation. Middleware applies to them, and `request_log` logs them.
+
+**The dashboard**, with `dashboard=True` (the default), is a page at `path + "/dashboard"` that charts the metrics over the last hour, for a quick look without Prometheus or Grafana. Its HTML, stylesheet and script are embedded in the runtime (no CDN, fonts or chart library; under 60 KB together), served with ETags, and left out of programs that never call `server.metrics`. The page has a strict `Content-Security-Policy` (`default-src 'self'`, no inline script or style), refreshes every 5 s, has a pause button and a 5 minute, 15 minute or 1 hour range, follows the browser's light or dark mode, and works at phone width. It shows:
+
+- tiles: uptime and start time, requests per second over the last minute and in total, the share of 5xx responses, p50, p95 and p99 latency, requests in flight and open connections;
+- charts: requests per second stacked by status class, latency p50, p90 and p99, requests in flight, connections and tasks, and the collected heap and resident memory;
+- each route, sortable and filterable: requests, requests per second over the last minute, 4xx and 5xx shares, p50, p95 and p99 since the start;
+- the last 50 responses with a status of 500 or more, and the 20 slowest requests of the last five minutes, each with its time, method, path **without its query string** (queries often carry tokens), status, duration and request ID, to find in the access log;
+- the program's own counters and gauges, each with a sparkline, and its histograms' counts.
+
+Percentiles are estimated from the duration histogram's buckets by linear interpolation, as Prometheus' `histogram_quantile` does, and the page says so. The history is a ring of 720 samples taken every 5 s by a thread that `server.metrics` starts (about 0.5 MB when 20 routes are busy; a sample keeps only the routes that had requests); it is kept in memory and starts again with the process. `VIPER_METRICS_INTERVAL_MS` changes the interval, down to 50 ms, for tests. The page reads it from `path + "/dashboard/data.json?since=<sample>"`, which returns only the samples after `since`, the totals, the routes and the recent events. Recording an event costs one comparison per request, and a short lock only for a request that is a server error or among the slowest. `examples/metrics_dashboard` is a small service with the dashboard, a `.env.example` and tests.
 
 What is recorded:
 

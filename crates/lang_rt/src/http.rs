@@ -1405,7 +1405,34 @@ fn record(request: &Request, started: Instant, panicked: bool) {
         Method::Other(_) => 7,
     };
     let elapsed = if request.upgraded.is_some() { None } else { Some(elapsed) };
+    if crate::dashboard::events_on() {
+        let nanos = elapsed.map(|e| e.as_nanos().min(u128::from(u64::MAX)) as u64);
+        if crate::dashboard::qualifies(status, nanos) {
+            note_event(request, status, nanos);
+        }
+    }
     metrics::request_finished(request.route, method, status, elapsed, bytes);
+}
+
+/// Keep a server error or slow request for the dashboard, with its request ID: from the
+/// `X-Request-Id` the response carries (`request_log` has forgotten it by now), else the
+/// task's, which a handler that panicked leaves behind.
+#[cold]
+#[inline(never)]
+fn note_event(request: &Request, status: i64, nanos: Option<u64>) {
+    let method = match request.method {
+        Method::Known(name) => name,
+        Method::Other(span) => request.text(span),
+    };
+    let out = &request.connection().out;
+    let head = out.get(request.out_start..).unwrap_or(&[]);
+    let head = &head[..head.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(head.len())];
+    let sent = head.split(|&b| b == b'\n').find_map(|line| {
+        let (name, value) = line.split_at(line.iter().position(|&b| b == b':')?);
+        name.eq_ignore_ascii_case(b"x-request-id").then(|| String::from_utf8_lossy(&value[1..]).trim().to_string())
+    });
+    let id = sent.or_else(|| crate::log::current_request_id().map(|id| id.to_string())).unwrap_or_default();
+    crate::dashboard::note(method, request.route, request.path(), status, nanos, id);
 }
 
 /// A route left out of the metrics, such as the metrics' own.
@@ -1561,6 +1588,28 @@ pub unsafe extern "C-unwind" fn lrt_http_req_client_ip(handle: i64) -> Str {
         .filter(|h| request.bytes(h.name).eq_ignore_ascii_case(b"x-forwarded-for"))
         .map(|h| request.text(h.value));
     Str::from_bytes(client_ip(peer, forwarded, &trusted).to_string().as_bytes())
+}
+
+/// Whether what this request carries stayed off the open network: it came over TLS, from this
+/// machine, or through a trusted proxy whose `X-Forwarded-Proto` says the client used HTTPS.
+///
+/// # Safety
+/// `handle` is a live request.
+pub(crate) unsafe fn request_is_private(handle: i64) -> bool {
+    let request = unsafe { request(handle) };
+    let connection = request.connection();
+    if connection.socket.tls.is_some() {
+        return true;
+    }
+    let peer = connection.peer.ip().to_canonical();
+    let trusted = TRUSTED_PROXIES.read().unwrap_or_else(|p| p.into_inner());
+    if trusted.iter().any(|n| n.contains(peer)) {
+        return request.header_list().any(|h| {
+            request.bytes(h.name).eq_ignore_ascii_case(b"x-forwarded-proto")
+                && request.text(h.value).trim().eq_ignore_ascii_case("https")
+        });
+    }
+    peer.is_loopback()
 }
 
 /// Addresses and networks whose `X-Forwarded-For` is believed, for every server in the process.

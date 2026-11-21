@@ -1,7 +1,8 @@
 //! Metrics, health and readiness (docs/14, milestone 8): `tests/http/metrics_server` is loaded
 //! from 64 connections and its `/metrics` checked to the request, its text format checked by a
 //! small parser, its Basic authentication and startup refusal tried, and its readiness checks
-//! and drain on SIGTERM watched.
+//! and drain on SIGTERM watched. The dashboard (milestone 9) is fetched, its data checked, and
+//! its lock-out and password hashes tried.
 
 mod common;
 
@@ -448,4 +449,181 @@ fn readiness_checks_and_the_drain_on_sigterm() {
     let took = stopping.elapsed();
     assert!(took >= Duration::from_secs(1) && took < Duration::from_secs(4), "{took:?}");
     assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "still accepting after the drain");
+}
+
+// ---- the dashboard (milestone 9) ------------------------------------------------------------
+
+fn authorized(password: &str) -> String {
+    format!("Authorization: Basic {}\r\n", base64(&format!("ops:{password}")))
+}
+
+/// The number after `"key":` in a JSON text.
+fn json_number(text: &str, key: &str) -> u64 {
+    let start = text.find(&format!("\"{key}\":")).unwrap_or_else(|| panic!("no {key} in {text}")) + key.len() + 3;
+    text[start..].chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap()
+}
+
+#[test]
+fn the_dashboard_serves_its_page_assets_and_data() {
+    let interval = env_var("METRICS_INTERVAL_MS");
+    let mut server = start_with_env(PROGRAM, &[CREDENTIALS[0], CREDENTIALS[1], (&interval, "100")]);
+    let port = server.port;
+    let auth = authorized(CREDENTIALS[1].1);
+    for path in ["/metrics/dashboard", "/metrics/dashboard/data.json", "/metrics/dashboard/dashboard.js"] {
+        let response = request(port, "GET", path, "");
+        assert_eq!(response.status, 401, "{path}");
+        assert!(!response.body.contains("<html") && !response.body.contains("samples"), "{path}");
+    }
+    let page = request(port, "GET", "/metrics/dashboard", &auth);
+    assert_eq!(page.status, 200);
+    assert_eq!(page.header("content-type"), Some("text/html; charset=utf-8"));
+    assert_eq!(page.header("cache-control"), Some("no-store"));
+    assert_eq!(page.header("x-frame-options"), Some("DENY"));
+    assert_eq!(page.header("referrer-policy"), Some("no-referrer"));
+    let csp = page.header("content-security-policy").unwrap();
+    assert!(csp.starts_with("default-src 'self'; style-src 'self'; script-src 'self'"), "{csp}");
+    assert!(page.body.contains("data-data=\"/metrics/dashboard/data.json\""), "{}", page.body);
+    assert!(page.body.contains("src=\"/metrics/dashboard/dashboard.js\""));
+    assert!(!page.body.contains("{{base}}") && !page.body.contains("<style") && !page.body.contains(" style="));
+    assert_eq!(request(port, "GET", "/metrics/dashboard/", &auth).status, 200);
+    for (path, kind) in
+        [("/metrics/dashboard/dashboard.css", "text/css"), ("/metrics/dashboard/dashboard.js", "text/javascript")]
+    {
+        let file = request(port, "GET", path, &auth);
+        assert_eq!(file.status, 200, "{path}");
+        assert!(file.header("content-type").unwrap().starts_with(kind));
+        assert_eq!(file.header("cache-control"), Some("no-cache"));
+        let etag = file.header("etag").unwrap().to_string();
+        let again = request(port, "GET", path, &format!("{auth}If-None-Match: {etag}\r\n"));
+        assert_eq!((again.status, again.body.as_str()), (304, ""), "{path}");
+    }
+
+    assert_eq!(request(port, "GET", "/boom?token=hunter2", "").status, 500);
+    for _ in 0..5 {
+        assert_eq!(request(port, "GET", "/items/7", "").status, 200);
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    let data = request(port, "GET", "/metrics/dashboard/data.json?since=0", &auth);
+    assert_eq!(data.status, 200);
+    assert_eq!(data.header("content-type"), Some("application/json"));
+    assert_eq!(data.header("cache-control"), Some("no-store"));
+    let body = &data.body;
+    assert!(body.contains("\"interval\":0.1,"), "{body}");
+    assert!(body.contains("\"route\":\"/boom\",\"path\":\"/boom\",\"status\":500"), "{body}");
+    assert!(!body.contains("hunter2") && !body.contains("token"), "a query string reached the dashboard: {body}");
+    assert!(body.contains("\"route\":\"/items/{id}\""), "{body}");
+    assert!(body.contains("\"name\":\"tags_total\""), "{body}");
+    // The dashboard's own requests are not counted.
+    assert!(!body.contains("\"route\":\"/metrics"), "{body}");
+    let last = json_number(body, "last");
+    assert!(last >= 3, "{body}");
+    assert!(body.matches("\"seq\":").count() as u64 >= 3);
+    // `since` sends only the newer samples.
+    let newer = request(port, "GET", &format!("/metrics/dashboard/data.json?since={last}"), &auth).body;
+    let count = newer.matches("\"seq\":").count();
+    assert!(count <= 2, "{count} samples after {last}: {newer}");
+    let none = request(port, "GET", "/metrics/dashboard/data.json?since=99999999", &auth).body;
+    assert!(none.contains("\"samples\":[]"), "{none}");
+    server.stop(PROGRAM);
+}
+
+#[test]
+fn ten_wrong_passwords_lock_a_client_out() {
+    let mut server = start_with_env(PROGRAM, &CREDENTIALS);
+    let port = server.port;
+    // Requests without credentials, as browsers first send, are not failures.
+    for _ in 0..12 {
+        assert_eq!(request(port, "GET", "/metrics", "").status, 401);
+    }
+    assert_eq!(request(port, "GET", "/metrics", &authorized(CREDENTIALS[1].1)).status, 200);
+    for _ in 0..10 {
+        assert_eq!(request(port, "GET", "/metrics/dashboard", &authorized("guess")).status, 401);
+    }
+    let refused = request(port, "GET", "/metrics", &authorized(CREDENTIALS[1].1));
+    assert_eq!(refused.status, 429, "{}", refused.body);
+    let wait: u64 = refused.header("retry-after").unwrap().parse().unwrap();
+    assert!((55..=60).contains(&wait), "{wait}");
+    assert_eq!(request(port, "GET", "/metrics/dashboard/data.json", &authorized(CREDENTIALS[1].1)).status, 429);
+    // The rest of the server is untouched.
+    assert_eq!(request(port, "GET", "/items/1", "").status, 200);
+    server.stop(PROGRAM);
+    let log = server.stderr.lock().unwrap().clone();
+    assert!(
+        log.contains("10 failed sign-ins to the metrics from 127.0.0.1 within a minute; refusing it for 60 s"),
+        "{log}"
+    );
+}
+
+fn hash_password(password: &str) -> String {
+    let mut child = Command::new(compiler())
+        .args(["hash-password", "--iterations", "1000"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(child.stdin.take().unwrap(), "{password}").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn a_password_hash_from_hash_password() {
+    let hash = hash_password("correct horse");
+    assert!(hash.starts_with("pbkdf2-sha256$1000$") && hash.split('$').count() == 4, "{hash}");
+    assert_ne!(hash, hash_password("correct horse"), "the salt is not fresh");
+    let mut server = start_with_env(PROGRAM, &[("METRICS_USER", "ops"), ("METRICS_PASSWORD_HASH", &hash)]);
+    let port = server.port;
+    assert_eq!(request(port, "GET", "/metrics", &authorized("correct horse")).status, 200);
+    assert_eq!(request(port, "GET", "/metrics", &authorized("correct horse")).status, 200);
+    assert_eq!(request(port, "GET", "/metrics", &authorized("wrong horse")).status, 401);
+    assert_eq!(request(port, "GET", "/metrics", &authorized(&hash)).status, 401);
+    server.stop(PROGRAM);
+
+    // Not a hash: the server refuses to start, and says how to make one.
+    let executable = std::env::temp_dir().join(format!("{CLI_NAME}-metrics-hash-{}", std::process::id()));
+    let output = Command::new(compiler())
+        .args(["build", &format!("tests/http/{PROGRAM}.{SOURCE_EXTENSION}"), "-o"])
+        .arg(&executable)
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let output = Command::new(&executable)
+        .env("METRICS_USER", "ops")
+        .env_remove("METRICS_PASSWORD")
+        .env("METRICS_PASSWORD_HASH", "correct horse")
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&executable);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains(&format!(
+            "METRICS_PASSWORD_HASH is not a password hash: make one with `{CLI_NAME} hash-password`"
+        )),
+        "{stderr}"
+    );
+}
+
+/// The example in `examples/metrics_dashboard` builds, and its tests pass.
+#[test]
+fn the_metrics_dashboard_example_passes_its_tests() {
+    common::build_runtime();
+    let example = repo_root().join("examples/metrics_dashboard");
+    let check = Command::new(compiler())
+        .arg("check")
+        .arg(format!("main.{SOURCE_EXTENSION}"))
+        .current_dir(&example)
+        .output()
+        .unwrap();
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
+    let test = Command::new(compiler()).arg("test").current_dir(&example).output().unwrap();
+    let stdout = String::from_utf8_lossy(&test.stdout);
+    assert!(
+        test.status.success() && stdout.contains("4 passed; 0 failed"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&test.stderr)
+    );
 }

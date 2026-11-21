@@ -1,0 +1,45 @@
+# A small orders service with its metrics and dashboard: the routes are in `make_server`, which
+# main.vi serves and app_test.vi tests.
+
+import http
+import metrics
+import time
+
+@frozen
+struct Shop:
+    orders: metrics.Counter
+    basket: metrics.Histogram
+
+pub def make_server_from_env() -> http.Server:
+    """The server, with the metrics' user and password from the environment."""
+    return make_server(None, None)
+
+pub def make_server(user: str?, password: str?) -> http.Server:
+    shop = Shop(
+        metrics.counter("shop_orders_total", "Orders placed, by payment method", labels=["payment"]),
+        metrics.histogram("shop_basket_items", "Items per order", buckets=[1.0, 2.0, 5.0, 10.0, 20.0]),
+    )
+    server = http.Server()
+    server.use(http.request_log())
+    server.get("/", lambda req: http.text("orders service: see /metrics/dashboard\n"))
+    server.post("/orders", lambda req: place(req, shop))
+    server.get("/slow", slow)
+    server.get("/fail", fail)
+    # The metrics at /metrics, and the dashboard at /metrics/dashboard, behind the password.
+    server.metrics(user=user, password=password)
+    server.health()
+    return server
+
+def place(req: http.Request, shop: Shop) -> Result[http.Response]:
+    items = http.query_int(req, "items")?
+    payment = req.query("payment").unwrap_or("card")
+    shop.orders.inc({"payment": payment})
+    shop.basket.observe(float(items))
+    return Ok(http.Response(201, f"{items} items by {payment}\n"))
+
+def slow(req: http.Request) -> Result[http.Response]:
+    time.sleep(0.2)
+    return http.text("slow\n")
+
+def fail(req: http.Request) -> Result[http.Response]:
+    return Err(http.Error(503, "the warehouse is not answering"))

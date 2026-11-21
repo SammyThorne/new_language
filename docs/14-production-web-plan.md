@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 8 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 9 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1058,6 +1058,15 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - The lock-out after 10 failures.
   - **A visual check in the built-in browser:** load the page with a running example under load (`bench/http` client for 30 s), and take screenshots in light and dark mode and at phone width.
 - **Docs:** docs/05; the site section with a screenshot description; and a new `examples/metrics_dashboard/` with a `.env.example`, a README and tests.
+
+**Done** (D114). Everything listed, with these differences:
+- The routes are `<path>/dashboard` (and with a trailing `/`), `/dashboard.css`, `/dashboard.js` and `/dashboard/data.json`, each checked for credentials itself rather than through middleware, since they are added as special routes like the metrics. The stylesheet and script keep ETags with `no-cache`; the page and the data are `no-store`. The CSP adds `frame-ancestors 'none'`.
+- The lock-out is a table of 4096 addresses in the metrics module; requests without an `Authorization` header are not counted, because a browser always tries without one first. It returns a 429 with `Retry-After` set to the seconds left.
+- The p90 is charted and p95 shown in the tiles and routes, as planned; the "Concurrency" chart has tasks with in-flight requests and connections, and "Memory" has the heap and resident memory, so no chart mixes units. Histograms of the program are shown as their counts.
+- The interval can be shortened with `VIPER_METRICS_INTERVAL_MS` (at least 50 ms), for tests.
+- The page fetches `data.json` against `location.origin`: when the page's address carries a user name and password, as a test browser's may, `fetch` refuses a relative URL.
+- **The visual check** ran `tests/http/metrics_server.vi` (optimised) under `bench/http/load.go` for six rounds of 10 s (32 connections on `/items/{id}`, 4 on `/tag`, three panics a round), about 200,000 requests per second, and looked at the page at 1280 by 900 in light and dark mode and at 375 by 812: no overflow at phone width, the tooltip follows the crosshair, the errors list the panics without their query strings, and the slowest requests are listed with IDs.
+- Tests: `crates/lang_cli/tests/metrics.rs` fetches the page, assets (with 304s) and `data.json` with and without credentials, checks the headers, that `since` returns only newer samples, that recent errors drop the query string, the lock-out and its log line, a hash from `hash-password` in `METRICS_PASSWORD_HASH`, and the refusal of a malformed one; `executables.rs` checks the page is absent from a server without metrics and present with them; runtime unit tests cover PBKDF2 against SHA-256 vectors in the style of RFC 6070, the lock-out window, quantile interpolation, JSON escaping and the assets' sizes; `examples/metrics_dashboard` has four tests of its own.
 
 #### Milestone 10: traces (about 2.5 days; after 6)
 

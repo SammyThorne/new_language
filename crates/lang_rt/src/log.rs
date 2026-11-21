@@ -108,6 +108,11 @@ pub unsafe extern "C-unwind" fn lrt_log_set_request_id(ptr: *const u8, len: i64)
     with_current(|c| c.0.set(id));
 }
 
+/// The running task's request ID, if it has one.
+pub(crate) fn current_request_id() -> Option<Arc<str>> {
+    with_current(Context::request_id)
+}
+
 /// The running task's request ID, or `""`.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_log_request_id() -> Str {

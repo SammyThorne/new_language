@@ -90,6 +90,12 @@ fn encode(input: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
     out
 }
 
+/// Standard base64 with padding, for tests that build what `base64_decode` reads.
+#[cfg(test)]
+pub(crate) fn base64_encode(input: &[u8]) -> String {
+    encode(input, STANDARD, true)
+}
+
 /// Decode either alphabet's text; `=` padding is optional, but must be right if present.
 /// `None` for any other character, or a length no encoding produces.
 /// Standard base64, padded or not.

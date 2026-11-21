@@ -123,7 +123,7 @@ const BUCKET_NS: [u64; 16] = [
 ];
 /// The same bounds in seconds, as the text format writes them, and the default buckets of a
 /// program's histograms.
-const BUCKET_SECONDS: [f64; 16] =
+pub(crate) const BUCKET_SECONDS: [f64; 16] =
     [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
 
 /// Shards of the request counters. A thread takes one when it first records.
@@ -281,6 +281,78 @@ pub(crate) fn request_finished(route: u16, method: u8, status: i64, elapsed: Opt
     cells.buckets[bucket].fetch_add(1, Ordering::Relaxed);
     cells.nanos.fetch_add(nanos, Ordering::Relaxed);
     cells.bytes.fetch_add(bytes, Ordering::Relaxed);
+}
+
+// ---- figures for the dashboard ---------------------------------------------------------------
+
+/// One route slot's requests since recording began: the count, by status class (1xx to 5xx),
+/// and the durations by bucket.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RouteTotal {
+    pub(crate) slot: u16,
+    pub(crate) requests: u64,
+    pub(crate) by_class: [u64; 5],
+    pub(crate) buckets: [u64; 17],
+}
+
+/// The totals of every slot that has seen a request, in slot order.
+pub(crate) fn route_totals() -> Vec<RouteTotal> {
+    let Some(shards) = TABLES.get() else { return Vec::new() };
+    let mut totals: Vec<RouteTotal> =
+        (0..ROUTE_SLOTS as u16).map(|slot| RouteTotal { slot, ..Default::default() }).collect();
+    for shard in shards.iter() {
+        for series in shard.series.iter() {
+            let key = series.key.load(Ordering::Acquire);
+            if key == 0 {
+                continue;
+            }
+            let (route, _, status) = key_parts(key);
+            let count = series.count.load(Ordering::Relaxed);
+            let total = &mut totals[usize::from(route.min(UNMATCHED))];
+            total.requests += count;
+            total.by_class[usize::from(status / 100).clamp(1, 5) - 1] += count;
+        }
+        for (total, cells) in totals.iter_mut().zip(shard.routes.iter()) {
+            for (sum, cell) in total.buckets.iter_mut().zip(&cells.buckets) {
+                *sum += cell.load(Ordering::Relaxed);
+            }
+        }
+    }
+    totals.retain(|t| t.requests > 0 || t.buckets.iter().any(|&b| b > 0));
+    totals
+}
+
+/// A slot's method (empty for `other` and `unmatched`) and pattern.
+pub(crate) fn route_name(slot: u16) -> (&'static str, &'static str) {
+    match slot {
+        OTHER_ROUTE => ("", "other"),
+        UNMATCHED => ("", "unmatched"),
+        _ => LABELS.get(usize::from(slot)).and_then(OnceLock::get).copied().unwrap_or(("", "unmatched")),
+    }
+}
+
+pub(crate) fn in_flight() -> i64 {
+    IN_FLIGHT.load(Ordering::Relaxed).max(0)
+}
+
+/// Each of the program's metrics: its name, kind and help, and its value added across its
+/// series (a histogram's count of observations).
+pub(crate) fn program_values() -> Vec<(String, &'static str, String, f64)> {
+    let registry = REGISTRY.read().unwrap_or_else(|p| p.into_inner());
+    registry
+        .iter()
+        .map(|metric| {
+            let all = metric.series.read().unwrap_or_else(|p| p.into_inner());
+            let value = all
+                .values()
+                .map(|series| match metric.kind {
+                    Kind::Histogram => series.count.load(Ordering::Relaxed) as f64,
+                    _ => f64::from_bits(series.value.load(Ordering::Relaxed)),
+                })
+                .sum();
+            (metric.name.clone(), metric.kind.name(), metric.help.clone(), value)
+        })
+        .collect()
 }
 
 // ---- the program's metrics ------------------------------------------------------------------
@@ -749,7 +821,7 @@ unsafe extern "C" {
 
 /// Seconds since the Unix epoch at which the process started, the CPU seconds it has used, and
 /// its resident memory in bytes, from `/proc` (Linux).
-fn process_figures() -> (Option<f64>, Option<f64>, Option<f64>) {
+pub(crate) fn process_figures() -> (Option<f64>, Option<f64>, Option<f64>) {
     const SC_CLK_TCK: i32 = 2;
     const SC_PAGESIZE: i32 = 30;
     // SAFETY: plain queries.
@@ -847,9 +919,17 @@ pub extern "C-unwind" fn lrt_metrics_snapshot() -> Str {
 
 /// A user name and password, kept only as HMAC-SHA256 digests under a key made for this
 /// process, so that comparing them takes the same time whatever their lengths and contents.
-struct Credentials {
+pub(crate) struct Credentials {
     user: [u8; 32],
-    password: [u8; 32],
+    password: Password,
+}
+
+enum Password {
+    /// The digest of the password.
+    Plain([u8; 32]),
+    /// A PBKDF2-SHA256 hash (`METRICS_PASSWORD_HASH`), and the digest of the last password
+    /// that matched it, so that a dashboard polling every few seconds pays for PBKDF2 once.
+    Hashed { iterations: std::num::NonZeroU32, salt: Vec<u8>, hash: Vec<u8>, verified: Mutex<Option<[u8; 32]>> },
 }
 
 fn hmac_key() -> &'static ring::hmac::Key {
@@ -868,7 +948,24 @@ fn digest(text: &[u8]) -> [u8; 32] {
 
 impl Credentials {
     fn new(user: &str, password: &str) -> Credentials {
-        Credentials { user: digest(user.as_bytes()), password: digest(password.as_bytes()) }
+        Credentials { user: digest(user.as_bytes()), password: Password::Plain(digest(password.as_bytes())) }
+    }
+
+    /// Credentials whose password is known only by its hash, written
+    /// `pbkdf2-sha256$<iterations>$<salt, base64>$<hash, base64>`; `None` if it is not one.
+    fn hashed(user: &str, text: &str) -> Option<Credentials> {
+        let mut parts = text.trim().split('$');
+        if parts.next()? != "pbkdf2-sha256" {
+            return None;
+        }
+        let iterations = parts.next()?.parse::<u32>().ok().and_then(std::num::NonZeroU32::new)?;
+        let salt = crate::crypto::base64_decode(parts.next()?.as_bytes())?;
+        let hash = crate::crypto::base64_decode(parts.next()?.as_bytes())?;
+        if parts.next().is_some() || salt.is_empty() || hash.len() < 16 {
+            return None;
+        }
+        let password = Password::Hashed { iterations, salt, hash, verified: Mutex::new(None) };
+        Some(Credentials { user: digest(user.as_bytes()), password })
     }
 
     /// Whether an `Authorization` header carries these credentials.
@@ -882,14 +979,31 @@ impl Credentials {
         let Some(colon) = decoded.iter().position(|&b| b == b':') else { return false };
         // Both halves are compared, whatever the first gives.
         let user = crate::crypto::equal(&digest(&decoded[..colon]), &self.user);
-        let password = crate::crypto::equal(&digest(&decoded[colon + 1..]), &self.password);
+        let given = &decoded[colon + 1..];
+        let password = match &self.password {
+            Password::Plain(password) => crate::crypto::equal(&digest(given), password),
+            Password::Hashed { iterations, salt, hash, verified } => {
+                let given_digest = digest(given);
+                let known = *verified.lock().unwrap_or_else(|p| p.into_inner());
+                if known.is_some_and(|known| crate::crypto::equal(&given_digest, &known)) {
+                    true
+                } else if ring::pbkdf2::verify(ring::pbkdf2::PBKDF2_HMAC_SHA256, *iterations, salt, given, hash).is_ok()
+                {
+                    *verified.lock().unwrap_or_else(|p| p.into_inner()) = Some(given_digest);
+                    true
+                } else {
+                    false
+                }
+            }
+        };
         user & password
     }
 }
 
-static CREDENTIALS: Mutex<Vec<Credentials>> = Mutex::new(Vec::new());
+static CREDENTIALS: RwLock<Vec<std::sync::Arc<Credentials>>> = RwLock::new(Vec::new());
 
-/// Keep a user name and password for [`lrt_metrics_authorized`]; returns their id.
+/// Keep a user name and password for [`lrt_metrics_authorized`]; returns their id. With
+/// `hashed` 1, `password` is a hash from `hash-password`; -1 if it is not one.
 ///
 /// # Safety
 /// The pointer and length pairs describe UTF-8 strings.
@@ -899,23 +1013,128 @@ pub unsafe extern "C-unwind" fn lrt_metrics_credentials(
     user_len: i64,
     password: *const u8,
     password_len: i64,
+    hashed: i64,
 ) -> i64 {
     let (user, password) = unsafe { (Str::from_raw(user, user_len), Str::from_raw(password, password_len)) };
-    let credentials = Credentials::new(user, password);
-    let mut all = CREDENTIALS.lock().unwrap_or_else(|p| p.into_inner());
-    all.push(credentials);
+    let credentials =
+        if hashed == 1 { Credentials::hashed(user, password) } else { Some(Credentials::new(user, password)) };
+    let Some(credentials) = credentials else {
+        crate::sys::record_error(format!(
+            "METRICS_PASSWORD_HASH is not a password hash: make one with `{} hash-password`, which prints pbkdf2-sha256$<iterations>$<salt>$<hash>",
+            lang_names::CLI_NAME
+        ));
+        return -1;
+    };
+    let mut all = CREDENTIALS.write().unwrap_or_else(|p| p.into_inner());
+    all.push(std::sync::Arc::new(credentials));
     all.len() as i64 - 1
 }
 
-/// Whether an `Authorization` header carries the credentials with this id: 1 or 0.
+// ---- failed sign-ins ------------------------------------------------------------------------
+
+/// Failures from one client within [`FAILURE_WINDOW`] that lock it out for [`LOCK_OUT`].
+const MAX_FAILURES: u32 = 10;
+const FAILURE_WINDOW: Duration = Duration::from_secs(60);
+const LOCK_OUT: Duration = Duration::from_secs(60);
+/// Clients tracked at once; past this, those with no recent failure are forgotten first.
+const MAX_CLIENTS: usize = 4096;
+
+struct Attempts {
+    failures: u32,
+    since: std::time::Instant,
+    locked_until: Option<std::time::Instant>,
+}
+
+static ATTEMPTS: Mutex<Option<HashMap<Box<str>, Attempts>>> = Mutex::new(None);
+
+/// Seconds `client` is still locked out for, if it is.
+fn locked(client: &str, now: std::time::Instant) -> Option<u64> {
+    let mut table = ATTEMPTS.lock().unwrap_or_else(|p| p.into_inner());
+    let attempts = table.as_mut()?.get(client)?;
+    let until = attempts.locked_until?;
+    (until > now).then(|| (until - now).as_secs_f64().ceil() as u64)
+}
+
+/// Count a failed sign-in from `client`; true when it has just been locked out.
+fn failed(client: &str, now: std::time::Instant) -> bool {
+    let mut table = ATTEMPTS.lock().unwrap_or_else(|p| p.into_inner());
+    let table = table.get_or_insert_with(HashMap::new);
+    if !table.contains_key(client) && table.len() >= MAX_CLIENTS {
+        table.retain(|_, a| a.locked_until.is_some_and(|u| u > now) || now - a.since < FAILURE_WINDOW);
+        if table.len() >= MAX_CLIENTS {
+            let victim = table.iter().find(|(_, a)| a.locked_until.is_none()).map(|(k, _)| k.clone());
+            match victim {
+                Some(victim) => {
+                    table.remove(&victim);
+                }
+                None => return false,
+            }
+        }
+    }
+    let attempts = table.entry(client.into()).or_insert(Attempts { failures: 0, since: now, locked_until: None });
+    if now - attempts.since >= FAILURE_WINDOW || attempts.locked_until.is_some_and(|u| u <= now) {
+        *attempts = Attempts { failures: 0, since: now, locked_until: None };
+    }
+    attempts.failures += 1;
+    if attempts.failures >= MAX_FAILURES && attempts.locked_until.is_none() {
+        attempts.locked_until = Some(now + LOCK_OUT);
+        return true;
+    }
+    false
+}
+
+static WARNED_PLAIN_HTTP: AtomicBool = AtomicBool::new(false);
+
+/// Whether an `Authorization` header from `client` carries the credentials with this id: 1 if
+/// it does, 0 if not, and minus the seconds left when the client is locked out after
+/// [`MAX_FAILURES`] failures in a minute. `handle` is the request (negative for a test
+/// request), for the warning about credentials sent over plain HTTP.
 ///
 /// # Safety
-/// `header` and `header_len` describe a UTF-8 string.
+/// The pointer and length pairs describe UTF-8 strings; `handle` is a live request or negative.
 #[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn lrt_metrics_authorized(id: i64, header: *const u8, header_len: i64) -> i64 {
-    let header = unsafe { Str::from_raw(header, header_len) };
-    let all = CREDENTIALS.lock().unwrap_or_else(|p| p.into_inner());
-    i64::from(all.get(id.max(0) as usize).is_some_and(|c| c.accept(header)))
+pub unsafe extern "C-unwind" fn lrt_metrics_authorized(
+    id: i64,
+    header: *const u8,
+    header_len: i64,
+    client: *const u8,
+    client_len: i64,
+    handle: i64,
+) -> i64 {
+    let (header, client) = unsafe { (Str::from_raw(header, header_len), Str::from_raw(client, client_len)) };
+    let now = std::time::Instant::now();
+    if let Some(seconds) = locked(client, now) {
+        return -(seconds.max(1) as i64);
+    }
+    if !header.is_empty()
+        && handle >= 0
+        && !WARNED_PLAIN_HTTP.load(Ordering::Relaxed)
+        && !unsafe { crate::http::request_is_private(handle) }
+        && !WARNED_PLAIN_HTTP.swap(true, Ordering::Relaxed)
+    {
+        crate::log::write_line(
+            "warn",
+            "metrics credentials arrived over plain HTTP, where anyone on the way can read them: serve the metrics over HTTPS, behind a proxy that ends TLS (with trusted_proxies and X-Forwarded-Proto), or on a private network",
+            "",
+        );
+    }
+    let credentials = CREDENTIALS.read().unwrap_or_else(|p| p.into_inner()).get(id.max(0) as usize).cloned();
+    if credentials.is_some_and(|c| c.accept(header)) {
+        return 1;
+    }
+    // A request without credentials is how a browser learns that it must ask for them; only
+    // wrong ones count against the client.
+    if !header.is_empty() && failed(client, now) {
+        crate::log::write_line(
+            "warn",
+            &format!(
+                "{MAX_FAILURES} failed sign-ins to the metrics from {client} within a minute; refusing it for {} s",
+                LOCK_OUT.as_secs()
+            ),
+            "",
+        );
+    }
+    0
 }
 
 #[cfg(test)]
@@ -945,8 +1164,9 @@ mod tests {
         let credentials = Credentials::new("admin", "s3cret");
         // What is kept is the keyed digest, never the text, and it is the same length for any
         // password, so the comparison's time cannot depend on the length of a guess.
-        assert_eq!(credentials.password, digest(b"s3cret"));
-        assert_ne!(&credentials.password[..6], b"s3cret");
+        let Password::Plain(password) = credentials.password else { panic!("not plain") };
+        assert_eq!(password, digest(b"s3cret"));
+        assert_ne!(&password[..6], b"s3cret");
         assert_eq!(credentials.user.len(), digest(b"a much longer user name than admin").len());
         assert_ne!(digest(b"s3cret"), digest(b"s3cre"));
         assert!(credentials.accept(&basic("admin", "s3cret")));
@@ -960,6 +1180,86 @@ mod tests {
         assert!(!credentials.accept("Basic YWRtaW4="));
         // A colon in the password is part of it.
         assert!(Credentials::new("a", "b:c").accept(&basic("a", "b:c")));
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn derive(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        let rounds = std::num::NonZeroU32::new(iterations).unwrap();
+        ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, rounds, salt, password, &mut out);
+        out
+    }
+
+    #[test]
+    fn password_hashes_are_pbkdf2_sha256() {
+        // RFC 6070's inputs, with the published results for SHA-256.
+        assert_eq!(
+            hex(&derive(b"password", b"salt", 1)),
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+        );
+        assert_eq!(
+            hex(&derive(b"password", b"salt", 2)),
+            "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+        );
+        assert_eq!(
+            hex(&derive(b"password", b"salt", 4096)),
+            "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
+        );
+        use crate::crypto::base64_encode;
+        let text = format!(
+            "pbkdf2-sha256$4096${}${}",
+            base64_encode(b"salt"),
+            base64_encode(&derive(b"password", b"salt", 4096))
+        );
+        let credentials = Credentials::hashed("admin", &text).unwrap();
+        assert!(credentials.accept(&basic("admin", "password")));
+        // The second time, from the cache of the last password that matched.
+        assert!(credentials.accept(&basic("admin", "password")));
+        assert!(!credentials.accept(&basic("admin", "Password")));
+        assert!(!credentials.accept(&basic("root", "password")));
+        let Password::Hashed { verified, .. } = &credentials.password else { panic!("not hashed") };
+        assert_eq!(*verified.lock().unwrap(), Some(digest(b"password")));
+        for bad in [
+            "",
+            "pbkdf2-sha256$0$c2FsdA==$Eg+2z/z4syxD5yJSVsT4N6hlSMkszDVICAWYfLcL4Xs=",
+            "pbkdf2-sha1$1$c2FsdA==$Eg+2z/z4syxD5yJSVsT4N6hlSMkszDVICAWYfLcL4Xs=",
+            "pbkdf2-sha256$1$!!$Eg+2z/z4syxD5yJSVsT4N6hlSMkszDVICAWYfLcL4Xs=",
+            "pbkdf2-sha256$1$c2FsdA==$EgA=",
+            "pbkdf2-sha256$1$c2FsdA==$Eg+2z/z4syxD5yJSVsT4N6hlSMkszDVICAWYfLcL4Xs=$x",
+            "s3cret",
+        ] {
+            assert!(Credentials::hashed("admin", bad).is_none(), "{bad}");
+        }
+        assert!(
+            Credentials::hashed("admin", "pbkdf2-sha256$1$c2FsdA==$Eg+2z/z4syxD5yJSVsT4N6hlSMkszDVICAWYfLcL4Xs=")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn ten_failures_in_a_minute_lock_a_client_out() {
+        let now = std::time::Instant::now();
+        let client = "192.0.2.77";
+        for _ in 0..MAX_FAILURES - 1 {
+            assert!(!failed(client, now));
+        }
+        assert_eq!(locked(client, now), None);
+        assert!(failed(client, now), "the tenth failure locks the client out");
+        assert_eq!(locked(client, now), Some(60));
+        assert_eq!(locked(client, now + Duration::from_secs(30)), Some(30));
+        assert_eq!(locked("192.0.2.78", now), None, "other clients are not affected");
+        let later = now + Duration::from_secs(61);
+        assert_eq!(locked(client, later), None);
+        // After the lock-out the count starts again.
+        assert!(!failed(client, later));
+        // Failures spread over more than a minute never add up to ten.
+        let slow = "192.0.2.79";
+        for i in 0..30u64 {
+            assert!(!failed(slow, now + Duration::from_secs(7 * i)));
+        }
     }
 
     #[test]

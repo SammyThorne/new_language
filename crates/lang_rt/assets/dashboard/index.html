@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Metrics</title>
+<link rel="stylesheet" href="{{base}}/dashboard.css">
+<script src="{{base}}/dashboard.js" defer></script>
+</head>
+<body data-data="{{base}}/data.json">
+<header class="top">
+  <div class="heading">
+    <h1>Metrics</h1>
+    <span id="version" class="muted"></span>
+  </div>
+  <div class="controls">
+    <div class="segmented" role="group" aria-label="Time range">
+      <button type="button" data-range="300" aria-pressed="true">5 min</button>
+      <button type="button" data-range="900" aria-pressed="false">15 min</button>
+      <button type="button" data-range="3600" aria-pressed="false">1 hour</button>
+    </div>
+    <button type="button" id="pause" aria-pressed="false">Pause</button>
+    <span id="status" class="status muted" role="status"></span>
+  </div>
+</header>
+<main>
+  <section class="tiles" aria-label="Summary">
+    <div class="tile"><span class="label">Uptime</span><span class="value" id="t-uptime">–</span><span class="note" id="t-started"></span></div>
+    <div class="tile"><span class="label">Requests per second</span><span class="value" id="t-rate">–</span><span class="note" id="t-total"></span></div>
+    <div class="tile"><span class="label">Server errors</span><span class="value" id="t-errors">–</span><span class="note">5xx, last minute</span></div>
+    <div class="tile wide"><span class="label">Latency, last minute</span><span class="value" id="t-latency">–</span><span class="note">p50 · p95 · p99, approximately</span></div>
+    <div class="tile"><span class="label">In flight</span><span class="value" id="t-flight">–</span><span class="note">requests</span></div>
+    <div class="tile"><span class="label">Connections</span><span class="value" id="t-connections">–</span><span class="note">open</span></div>
+  </section>
+
+  <section class="charts">
+    <figure class="card">
+      <figcaption><h2>Requests per second</h2><span class="muted">by status</span></figcaption>
+      <div class="legend" id="l-requests"></div>
+      <div class="chart" id="c-requests" role="img" aria-label="Requests per second by status class"></div>
+    </figure>
+    <figure class="card">
+      <figcaption><h2>Latency</h2><span class="muted">approximately</span></figcaption>
+      <div class="legend" id="l-latency"></div>
+      <div class="chart" id="c-latency" role="img" aria-label="Latency percentiles"></div>
+    </figure>
+    <figure class="card">
+      <figcaption><h2>Concurrency</h2></figcaption>
+      <div class="legend" id="l-load"></div>
+      <div class="chart" id="c-load" role="img" aria-label="Requests in flight, open connections and tasks"></div>
+    </figure>
+    <figure class="card">
+      <figcaption><h2>Memory</h2></figcaption>
+      <div class="legend" id="l-memory"></div>
+      <div class="chart" id="c-memory" role="img" aria-label="Collected heap and resident memory"></div>
+    </figure>
+  </section>
+
+  <section class="card">
+    <div class="section-head">
+      <h2>Routes</h2>
+      <input type="search" id="route-filter" placeholder="Filter routes" aria-label="Filter routes">
+    </div>
+    <div class="scroll">
+      <table id="routes">
+        <thead><tr>
+          <th data-key="method">Method</th>
+          <th data-key="route">Route</th>
+          <th data-key="requests" class="num">Requests</th>
+          <th data-key="rate" class="num">Per second</th>
+          <th data-key="client_errors" class="num">4xx</th>
+          <th data-key="server_errors" class="num">5xx</th>
+          <th data-key="p50" class="num">p50</th>
+          <th data-key="p95" class="num">p95</th>
+          <th data-key="p99" class="num">p99</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="muted small">Requests, error shares and latency since the process started; per second over the last minute.</p>
+  </section>
+
+  <div class="pair">
+    <section class="card">
+      <h2>Recent server errors</h2>
+      <div class="scroll"><table id="errors"><thead><tr><th>Time</th><th>Request</th><th class="num">Status</th><th class="num">Took</th><th>Request ID</th></tr></thead><tbody></tbody></table></div>
+    </section>
+    <section class="card">
+      <h2>Slowest requests</h2>
+      <div class="scroll"><table id="slowest"><thead><tr><th>Time</th><th>Request</th><th class="num">Status</th><th class="num">Took</th><th>Request ID</th></tr></thead><tbody></tbody></table></div>
+      <p class="muted small">The slowest of the last five minutes.</p>
+    </section>
+  </div>
+
+  <section class="card" id="program-section">
+    <h2>Application metrics</h2>
+    <div class="program" id="program"></div>
+  </section>
+</main>
+<footer class="muted small">Percentiles are estimated from histogram buckets, as Prometheus does, so they are approximate. Times are this browser's.</footer>
+</body>
+</html>

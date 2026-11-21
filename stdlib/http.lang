@@ -175,10 +175,19 @@ def metrics_enable_raw()
 def metrics_text_raw() -> str
 
 @extern("lrt_metrics_credentials")
-def metrics_credentials_raw(user: str, password: str) -> int
+def metrics_credentials_raw(user: str, password: str, hashed: int) -> int
 
 @extern("lrt_metrics_authorized")
-def metrics_authorized_raw(id: int, header: str) -> int
+def metrics_authorized_raw(id: int, header: str, client: str, handle: int) -> int
+
+@extern("lrt_dashboard_asset")
+def dashboard_asset_raw(index: int) -> str
+
+@extern("lrt_dashboard_start")
+def dashboard_start_raw()
+
+@extern("lrt_dashboard_data")
+def dashboard_data_raw(since: int) -> str
 
 # ---- errors -------------------------------------------------------------------------------
 
@@ -830,18 +839,67 @@ def not_routed(req: Request, fitting: list[Route]) -> Result[Response]:
         return error(405, "method not allowed").with_header("Allow", ", ".join(allowed))
     return error(404, "not found")
 
+def metrics_refusal(req: Request, credentials: int) -> Response?:
+    # The 401 for a request without the metrics' credentials, or the 429 for a client locked
+    # out after ten failures in a minute; `None` when it may go on.
+    if credentials < 0:
+        return None
+    header = ""
+    match req.header("Authorization"):
+        case Some(value):
+            header = value
+        case None:
+            pass
+    verdict = metrics_authorized_raw(credentials, header, req.client_ip(), req.handle)
+    if verdict == 1:
+        return None
+    if verdict < 0:
+        return error(429, "too many failed sign-ins; try again later").with_header("Retry-After", str(0 - verdict))
+    return error(401, "unauthorized").with_header("WWW-Authenticate", "Basic realm=\"metrics\", charset=\"UTF-8\"")
+
+def guarded(response: Response, page: bool, kept: bool) -> Response:
+    # The headers of every metrics and dashboard response: never framed or referred, and only
+    # the stylesheet and script `kept` (and checked each time, by their ETag).
+    if not kept:
+        response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if page:
+        response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+    return response
+
 def metrics_reply(req: Request, credentials: int) -> Response:
-    if credentials >= 0:
-        allowed = False
-        match req.header("Authorization"):
-            case Some(header):
-                allowed = metrics_authorized_raw(credentials, header) == 1
-            case None:
-                pass
-        if not allowed:
-            return error(401, "unauthorized").with_header("WWW-Authenticate", "Basic realm=\"metrics\", charset=\"UTF-8\"")
-    response = Response(200, metrics_text_raw(), "text/plain; version=0.0.4; charset=utf-8")
-    return response.with_header("Cache-Control", "no-store")
+    match metrics_refusal(req, credentials):
+        case Some(refusal):
+            return guarded(refusal, False, False)
+        case None:
+            pass
+    return guarded(Response(200, metrics_text_raw(), "text/plain; version=0.0.4; charset=utf-8"), False, False)
+
+def dashboard_file(req: Request, credentials: int, file: DocsFile) -> Response:
+    match metrics_refusal(req, credentials):
+        case Some(refusal):
+            return guarded(refusal, False, False)
+        case None:
+            pass
+    if file.page:
+        return guarded(Response(200, file.body, file.content_type), True, False)
+    return guarded(serve_docs_file(file, req), False, True)
+
+def dashboard_data(req: Request, credentials: int) -> Response:
+    match metrics_refusal(req, credentials):
+        case Some(refusal):
+            return guarded(refusal, False, False)
+        case None:
+            pass
+    since = 0
+    match req.query("since"):
+        case Some(text):
+            since = int.parse(text).unwrap_or(0)
+        case None:
+            pass
+    return guarded(Response(200, dashboard_data_raw(since), "application/json"), False, False)
 
 # How long each readiness check has, in seconds.
 const CHECK_SECONDS = 2.0
@@ -1596,28 +1654,52 @@ impl Server:
         """Ask `serve` to finish, as SIGTERM does."""
         shutdown_raw()
 
-    def metrics(self, path: str = "/metrics", user: str? = None, password: str? = None, public: bool = False):
+    def metrics(self, path: str = "/metrics", dashboard: bool = True, user: str? = None, password: str? = None, public: bool = False):
         """
         Serve the metrics at `path` in the Prometheus text format: requests by method, route
         pattern and status, their durations and response sizes, connections, errors, memory and
         tasks, and the program's own (the `metrics` module). Recording requests starts here;
-        before, it costs nothing.
+        before, it costs nothing. With `dashboard`, a page at `path + "/dashboard"` charts them
+        over the last hour, with the routes, recent server errors and slowest requests.
 
-        The metrics need a user name and password (HTTP Basic authentication), from the
-        arguments or else from the environment variables `METRICS_USER` and `METRICS_PASSWORD`.
-        Without them this panics, unless `public=True` says the metrics are meant to be open,
-        behind a private network. The route is left out of the metrics and of the API
-        documentation.
+        Both need a user name and password (HTTP Basic authentication), from the arguments or
+        else from the environment variables `METRICS_USER` and `METRICS_PASSWORD`, or
+        `METRICS_PASSWORD_HASH` in place of the password (a hash from the compiler's
+        `hash-password` command). Without them this panics, unless `public=True` says the
+        metrics are meant to be open, behind a private network. After ten wrong passwords in a
+        minute a client is refused for a minute. The routes are left out of the metrics and of
+        the API documentation.
         """
         name = user if user is not None else os.getenv("METRICS_USER")
         secret = password if password is not None else os.getenv("METRICS_PASSWORD")
+        hashed = 0
+        if secret is None and password is None:
+            secret = os.getenv("METRICS_PASSWORD_HASH")
+            hashed = 1
         credentials = -1
         if name is not None and secret is not None:
-            credentials = metrics_credentials_raw(name.unwrap(), secret.unwrap())
+            credentials = metrics_credentials_raw(name.unwrap(), secret.unwrap(), hashed)
+            if credentials < 0:
+                panic(last_error())
         elif not public:
             panic("server.metrics needs a username and password: set METRICS_USER and METRICS_PASSWORD in the environment or in .env (read by config.load or config.load_env), or pass public=True to serve the metrics without them.")
         metrics_enable_raw()
         self.special_route(path, lambda req: Ok(metrics_reply(req, credentials)), UNMETERED)
+        if not dashboard:
+            return
+        base = path
+        while base.ends_with("/"):
+            base = base[0:len(base) - 1]
+        board = base + "/dashboard"
+        dashboard_start_raw()
+        page = docs_file(dashboard_asset_raw(0).replace("{{base}}", html_escape(board)), "text/html; charset=utf-8", True)
+        style = docs_file(dashboard_asset_raw(1), "text/css; charset=utf-8", False)
+        script = docs_file(dashboard_asset_raw(2), "text/javascript; charset=utf-8", False)
+        self.special_route(board, lambda req: Ok(dashboard_file(req, credentials, page)), UNMETERED)
+        self.special_route(board + "/", lambda req: Ok(dashboard_file(req, credentials, page)), UNMETERED)
+        self.special_route(board + "/dashboard.css", lambda req: Ok(dashboard_file(req, credentials, style)), UNMETERED)
+        self.special_route(board + "/dashboard.js", lambda req: Ok(dashboard_file(req, credentials, script)), UNMETERED)
+        self.special_route(board + "/data.json", lambda req: Ok(dashboard_data(req, credentials)), UNMETERED)
 
     def health(self, live: str = "/healthz", ready: str = "/readyz", checks: dict[str, def() -> Result[None]] = {}):
         """

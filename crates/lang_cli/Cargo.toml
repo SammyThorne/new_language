@@ -19,6 +19,7 @@ lang_syntax.workspace = true
 lang_sema.workspace = true
 lang_codegen.workspace = true
 clap.workspace = true
+ring = "0.17.14"
 
 [dev-dependencies]
 lang_names.workspace = true

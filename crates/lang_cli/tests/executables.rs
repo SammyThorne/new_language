@@ -107,6 +107,22 @@ fn only_programs_that_serve_documentation_carry_the_viewer() {
     assert!(with_size < without_size + 220_000, "{with_size} bytes with the documentation, {without_size} without");
 }
 
+/// A line of the metrics dashboard's page, which only programs that call `metrics` carry.
+const DASHBOARD_MARK: &[u8] = b"Percentiles are estimated from histogram buckets";
+
+#[test]
+fn only_programs_that_serve_metrics_carry_the_dashboard() {
+    common::build_runtime();
+    let root = common::repo_root();
+    let (plain, metered) = (scratch("todo_no_metrics"), scratch("metrics_server"));
+    build_release(&root.join(format!("tests/http/todo_annotations.{SOURCE_EXTENSION}")), &plain);
+    build_release(&root.join(format!("tests/http/metrics_server.{SOURCE_EXTENSION}")), &metered);
+    let carries =
+        |program: &PathBuf| std::fs::read(program).unwrap().windows(DASHBOARD_MARK.len()).any(|w| w == DASHBOARD_MARK);
+    assert!(!carries(&plain), "a server without metrics carries the dashboard");
+    assert!(carries(&metered), "the metrics server does not carry the dashboard");
+}
+
 #[test]
 fn explain_prints_a_section_of_the_reference() {
     let ok = Command::new(compiler()).args(["explain", "e0300"]).output().unwrap();

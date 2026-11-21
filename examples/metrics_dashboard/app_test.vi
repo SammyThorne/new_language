@@ -1,0 +1,47 @@
+# The app's tests: run them with the compiler's `test` command. The metrics need a password, so
+# the tests pass one to `make_server`; the real server reads it from the environment.
+
+import crypto
+import http
+import app
+
+def basic(user: str, password: str) -> dict[str, str]:
+    return {"Authorization": "Basic " + crypto.base64_encode(f"{user}:{password}".encode())}
+
+def server() -> http.Server:
+    return app.make_server("ops", "test password")
+
+@test
+def orders_are_placed():
+    r = server().handle(http.test_request("POST", "/orders?items=3&payment=voucher"))
+    assert r.status == 201, r.body
+    assert r.body == "3 items by voucher\n"
+
+@test
+def the_metrics_need_the_password():
+    s = server()
+    assert s.handle(http.test_request("GET", "/metrics")).status == 401
+    assert s.handle(http.test_request("GET", "/metrics/dashboard")).status == 401
+    wrong = s.handle(http.test_request("GET", "/metrics/dashboard/data.json", headers=basic("ops", "guess")))
+    assert wrong.status == 401
+    assert wrong.headers["WWW-Authenticate"] == "Basic realm=\"metrics\", charset=\"UTF-8\""
+
+@test
+def the_metrics_count_orders():
+    s = server()
+    s.handle(http.test_request("POST", "/orders?items=2&payment=card"))
+    text = s.handle(http.test_request("GET", "/metrics", headers=basic("ops", "test password"))).body
+    assert "shop_orders_total{payment=\"card\"}" in text, text
+    assert "shop_basket_items_bucket{le=\"2\"}" in text, text
+
+@test
+def the_dashboard_is_served():
+    s = server()
+    page = s.handle(http.test_request("GET", "/metrics/dashboard", headers=basic("ops", "test password")))
+    assert page.status == 200
+    assert "/metrics/dashboard/dashboard.js" in page.body
+    assert page.headers["X-Frame-Options"] == "DENY"
+    data = s.handle(http.test_request("GET", "/metrics/dashboard/data.json?since=0", headers=basic("ops", "test password")))
+    assert data.status == 200
+    assert data.content_type == "application/json"
+    assert "\"name\":\"shop_orders_total\"" in data.body, data.body
