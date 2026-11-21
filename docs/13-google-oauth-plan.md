@@ -1,6 +1,6 @@
 # Sign in with Google: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestone 1 is built; its decisions (section 5) are confirmed.** Each milestone in section 6 ends with a "Done" note once built. It adds a standard library module, `auth`, that lets a program sign its users in with their Google accounts. The program points it at the credentials file it downloaded from the Google Cloud console. It marks the routes that need a signed-in user with `@auth.required`, or by giving the handler a parameter of type `auth.User`. The module provides the login, callback and logout routes, the session cookie, and the checks of Google's tokens. The program writes none of the OAuth flow itself.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 and 2 are built; the decisions (section 5) are confirmed.** Each milestone in section 6 ends with a "Done" note once built. It adds a standard library module, `auth`, that lets a program sign its users in with their Google accounts. The program points it at the credentials file it downloaded from the Google Cloud console. It marks the routes that need a signed-in user with `@auth.required`, or by giving the handler a parameter of type `auth.User`. The module provides the login, callback and logout routes, the session cookie, and the checks of Google's tokens. The program writes none of the OAuth flow itself.
 
 It mirrors what web developers get elsewhere:
 - Flask: Flask-Login's `@login_required` on top of Authlib or Flask-Dance.
@@ -499,6 +499,14 @@ Each milestone follows docs/11's rules: the gates (`make lint`, `make test`, `ma
   - `equal` returns `False` for different lengths.
   - A `tests/ui` golden for a wrong argument type.
 - **Docs:** a `crypto` section in docs/05 and on the site's standard library page.
+
+**Done** (D101). Everything listed, with these differences:
+- The functions are those of section 4.1 without the AES-GCM pair, which decision 3 made unnecessary, plus `base64_encode` and `base64_decode` for the standard alphabet. Base64 is written in the runtime, not taken from a crate. The decoders accept padding or none, and reject anything no encoder writes.
+- The run test is `tests/run/crypto_module.wb`, since a program named after a module cannot import it (E0336). Its RSA fixture is a 2048-bit key's `n` and `e` and an `openssl` signature, embedded as base64url; the private key is not in the repository. It checks the right message, a tampered message, a changed signature, another key (the modulus without its first byte) and a key too short for `ring`.
+- The runtime has unit tests for the same known answers and for the decoder's rejections.
+- Passing a `str` where `bytes` is expected now has a help line (`text.encode()`), and the reverse names `hex()` and `decode()`. The golden is `tests/ui/crypto_errors.wb`.
+- The standard library's module list in E0334's help now names `crypto`, which changed one golden (`tests/ui/module_errors.stderr`) and its copy in docs/errors.md.
+- The gates passed: tests, stress (300 runs), clippy, the formatter, the site's examples, the HTTP counts (unchanged) and `bench/run.py --check`, on the first run.
 
 ### Milestone 3: `auth` without signatures (about 2.5 days)
 

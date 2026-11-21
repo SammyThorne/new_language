@@ -1,0 +1,96 @@
+"""
+Secure random values, hashes, message authentication, base64, and RSA signature checks: what a
+web service needs for session cookies, CSRF tokens, signed links and webhook signatures.
+
+    import crypto
+
+    session_id = crypto.token()                                   # 43 URL-safe characters
+    digest = crypto.sha256("hello".encode()).hex()
+    mac = crypto.hmac_sha256(secret.encode(), body.encode())
+    if not crypto.equal(mac, sent):                               # never `==` for secrets
+        ...
+
+Data is `bytes`: `text.encode()` makes some from a string. Built on `ring`, the library the
+runtime already uses for TLS.
+"""
+
+@extern("lrt_crypto_random")
+def random_raw(n: int) -> str
+
+@extern("lrt_crypto_sha256")
+def sha256_raw(data: str) -> str
+
+@extern("lrt_crypto_hmac_sha256")
+def hmac_sha256_raw(key: str, data: str) -> str
+
+@extern("lrt_crypto_equal")
+def equal_raw(a: str, b: str) -> int
+
+@extern("lrt_crypto_base64_encode")
+def base64_encode_raw(data: str, url: int) -> str
+
+@extern("lrt_crypto_base64_decode")
+def base64_decode_raw(text: str, url: int) -> str?
+
+@extern("lrt_crypto_verify_rs256")
+def verify_rs256_raw(modulus: str, exponent: str, message: str, signature: str) -> int
+
+pub def random_bytes(n: int) -> bytes:
+    """`n` bytes from the operating system's secure random source, for keys and tokens."""
+    if n < 0:
+        panic(f"cannot make {n} random bytes")
+    return __bytes(random_raw(n))
+
+pub def token(n_bytes: int = 32) -> str:
+    """A random, URL-safe token: `n_bytes` random bytes as base64url, without padding. The
+    default 32 bytes (43 characters) cannot be guessed; use it for session identifiers, CSRF
+    tokens and the like."""
+    return base64url_encode(random_bytes(n_bytes))
+
+pub def sha256(data: bytes) -> bytes:
+    """The SHA-256 digest of `data`: 32 bytes. `.hex()` writes it as 64 hex digits."""
+    return __bytes(sha256_raw(__bytes_data(data)))
+
+pub def hmac_sha256(key: bytes, data: bytes) -> bytes:
+    """HMAC-SHA256 of `data` with `key`: 32 bytes that only a holder of the key can produce.
+    Check one with `equal`, not `==`."""
+    return __bytes(hmac_sha256_raw(__bytes_data(key), __bytes_data(data)))
+
+pub def equal(a: bytes, b: bytes) -> bool:
+    """Whether `a` and `b` are the same, taking a time that depends only on their lengths.
+    Compare secrets, signatures and tokens with this: `==` stops at the first difference, and
+    how long it took tells an attacker how much of a guess was right."""
+    return equal_raw(__bytes_data(a), __bytes_data(b)) == 1
+
+pub def base64_encode(data: bytes) -> str:
+    """`data` as base64 with the standard alphabet and `=` padding (RFC 4648)."""
+    return base64_encode_raw(__bytes_data(data), 0)
+
+pub def base64_decode(text: str) -> bytes?:
+    """The data `text` holds as standard base64, or `None` if it is not base64. Padding may
+    be left out."""
+    match base64_decode_raw(text, 0):
+        case Some(data):
+            return Some(__bytes(data))
+        case None:
+            return None
+
+pub def base64url_encode(data: bytes) -> str:
+    """`data` as URL-safe base64 (`-` and `_` in place of `+` and `/`) without padding, as JSON
+    Web Tokens use: safe in URLs, cookies and file names."""
+    return base64_encode_raw(__bytes_data(data), 1)
+
+pub def base64url_decode(text: str) -> bytes?:
+    """The data `text` holds as URL-safe base64, with or without padding, or `None`."""
+    match base64_decode_raw(text, 1):
+        case Some(data):
+            return Some(__bytes(data))
+        case None:
+            return None
+
+pub def verify_rs256(modulus: bytes, exponent: bytes, message: bytes, signature: bytes) -> bool:
+    """Whether `signature` is a valid RS256 signature of `message` (RSASSA-PKCS1-v1_5 with
+    SHA-256, as JSON Web Tokens use it) by the RSA public key with this modulus and exponent,
+    big-endian: a JSON Web Key's `n` and `e`, base64url-decoded. Keys of 2048 to 8192 bits;
+    anything else, or a malformed key, is `False`."""
+    return verify_rs256_raw(__bytes_data(modulus), __bytes_data(exponent), __bytes_data(message), __bytes_data(signature)) == 1

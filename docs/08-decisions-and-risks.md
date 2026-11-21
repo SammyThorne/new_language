@@ -1002,6 +1002,22 @@ Milestone 1 of the [Google sign-in plan](13-google-oauth-plan.md): what `http` l
 
 **`Request` is no bigger.** A test request's parts and the locals live in one optional `extra` field, made only when a test or a middleware needs it. A first version added two fields, and the HTTP benchmark's counts caught it: 16 more bytes per request on `/plaintext` and `/json` (+6.7%), since the collector rounds objects up to 16 bytes. The single field took the place of the cached body text, `body_text: str?`, so `Request` shrank back to its old size and the counts are unchanged. The price is that `req.text()` on a real request reads the connection's buffer again on each call instead of returning a cached copy. Handlers read the body once (`http.body[T]`, `req.json()` and a `Json` parameter each call it once), and the docstring says to keep the result.
 
+### D101. The `crypto` module (Google sign-in plan, milestone 2)
+
+Milestone 2 of the [Google sign-in plan](13-google-oauth-plan.md): the primitives a signed session cookie, a PKCE challenge and an ID token's signature need, as a module of their own, since webhook signatures, CSRF tokens and signed links need them too.
+
+**On `ring`, with no new crate.** The runtime already links `ring` for TLS (through `rustls`), so random bytes, SHA-256, HMAC and RSA verification cost no new dependency and no extra build time. Base64 is forty lines in the runtime rather than a crate.
+
+**Data is `bytes`, text stays `str`.** Digests, keys and signatures are arbitrary bytes, so every function takes and returns `bytes`; base64 text and tokens are `str`. Passing a `str` where `bytes` is expected now has a help line, `text.encode()`, and the reverse names `hex()` and `decode()`, since the mix-up is the first error anyone hits with the module.
+
+**One encoding per value.** The decoders accept padding or its absence, as JWT libraries do, but reject everything no encoder writes: a stray character, a wrong count of `=`, non-zero left-over bits, or a length of 4n+1. A signature or token that decodes must have been written exactly that way, which matters when a decoded value is compared.
+
+**`equal`, not `==`, for secrets.** It folds the XOR of every byte pair and only then tests the result, through `black_box` so the optimiser keeps the loop, so its time depends on the lengths alone. A different length is `False` at once: lengths of MACs and digests are public.
+
+**`verify_rs256` takes the key's numbers.** A JSON Web Key gives `n` and `e`, not a PEM file, so the function takes the decoded big-endian modulus and exponent (leading zero bytes are dropped, which `ring` would refuse) and accepts 2048- to 8192-bit keys. Its test uses a fixture signed by `openssl`, whose private key is not in the repository. Only RS256: Google signs ID tokens with it, and other algorithms can be added when something needs them.
+
+**No encryption.** Decision 3 of the plan keeps no tokens, so the session cookie is signed, not sealed, and the AES-GCM functions the plan sketched are left out.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

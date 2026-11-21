@@ -17,8 +17,9 @@ The standard library is what makes Weby a backend language and not a general-pur
 | `testing` | Assertions and the `@test` runner | post-prototype | Weby |
 | `re` | Regular expressions | M12 | Weby API over the `regex-lite` crate |
 | `postgres` | PostgreSQL client with a connection pool | M12 | Runtime protocol code; Weby API layer |
+| `crypto` | Secure random values, SHA-256, HMAC, constant-time comparison, base64, RS256 checks | post-prototype (D101) | Weby API over the `ring` crate |
 
-Not in the prototype: HTTP client, TLS, database drivers, templating, regular expressions, cryptography beyond what the WebSocket handshake needs. An HTTP client and a PostgreSQL driver are the first two additions afterwards, since a backend without them is a toy. Milestone 12 added the client, TLS (server and client, through `rustls`), the PostgreSQL driver and regular expressions.
+Not in the prototype: HTTP client, TLS, database drivers, templating, regular expressions, cryptography beyond what the WebSocket handshake needs. An HTTP client and a PostgreSQL driver are the first two additions afterwards, since a backend without them is a toy. Milestone 12 added the client, TLS (server and client, through `rustls`), the PostgreSQL driver and regular expressions. The `crypto` module came with Google sign-in (docs/13, D101).
 
 ## `io` and `os` (M5)
 
@@ -406,6 +407,30 @@ for m in word.find_all("one two"):
 | `re.Match` | `text`, `start`, `end` (byte offsets), `group(i) -> str?`, `named(name) -> str?` |
 | `re.Regex` | Frozen: one compiled pattern can be shared by every task |
 
+## Cryptography (D101)
+
+```python
+import crypto
+
+session_id = crypto.token()                                  # 43 URL-safe characters
+digest = crypto.sha256("abc".encode()).hex()                 # ba7816bf...
+mac = crypto.hmac_sha256(secret.encode(), body.encode())
+if not crypto.equal(mac, crypto.base64url_decode(sent).unwrap_or("".encode())):
+    return http.Response(401)
+```
+
+| Item | Shape |
+|---|---|
+| `crypto.random_bytes(n) -> bytes` | `n` bytes from the operating system's secure random source; panics if `n` is negative |
+| `crypto.token(n_bytes=32) -> str` | `n_bytes` random bytes as base64url without padding: session identifiers, CSRF tokens, PKCE verifiers |
+| `crypto.sha256(data) -> bytes`, `crypto.hmac_sha256(key, data) -> bytes` | 32-byte digests; `.hex()` writes one as 64 hex digits |
+| `crypto.equal(a, b) -> bool` | Compares in a time that depends only on the lengths. Use it for secrets and signatures, never `==` |
+| `crypto.base64_encode(data) -> str`, `crypto.base64_decode(text) -> bytes?` | RFC 4648 standard alphabet; encoding pads with `=`, decoding accepts it with or without padding |
+| `crypto.base64url_encode(data) -> str`, `crypto.base64url_decode(text) -> bytes?` | The URL-safe alphabet (`-`, `_`) without padding, as JSON Web Tokens use; padding is accepted when decoding |
+| `crypto.verify_rs256(modulus, exponent, message, signature) -> bool` | RSASSA-PKCS1-v1_5 with SHA-256 (JWT `RS256`) by the public key with this big-endian modulus and exponent (a JSON Web Key's `n` and `e`, decoded); keys of 2048 to 8192 bits, anything else is `False` |
+
+Data is `bytes`; `text.encode()` makes some, and passing a `str` instead is a compile error whose help says so. Decoding rejects any text no encoder writes (wrong characters, wrong padding, non-zero left-over bits), so each value has one encoding. There is no encryption: sessions are signed, not sealed (docs/13, decision 3). Everything is on `ring`, which the runtime already used for TLS.
+
 ## PostgreSQL (M12)
 
 ```python
@@ -541,6 +566,7 @@ Cancellation is not in the prototype. The intended design is a deadline carried 
 | JSON | derive | scanner, writer | `Value`, API |
 | HTTP, WebSocket | | protocol, router, I/O | `Server`, `Request`, `Response`, helpers |
 | TLS | | `rustls` | `bind_tls`, `listen_tls` |
+| `crypto` | | `ring` digests, HMAC, RSA; base64 | API |
 | PostgreSQL | | protocol, pool | `Db`, `Row`, `query_as` |
 | `log`, `time`, `io`, `os` | | system calls | API |
 

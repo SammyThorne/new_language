@@ -1,0 +1,9 @@
+# The crypto module takes `bytes`; a `str` gets a hint to `.encode()` it, and a digest used as a
+# `str` gets one to `.decode()` or `.hex()` it.
+import crypto
+
+def main():
+    digest = crypto.sha256("text")
+    same = crypto.equal(digest, "x")
+    shown: str = crypto.sha256("text".encode())
+    print(same, shown, crypto.token("32"))

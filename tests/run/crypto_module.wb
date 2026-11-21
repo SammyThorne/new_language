@@ -1,0 +1,60 @@
+# The crypto module (docs/13, milestone 2): known answers from the RFCs, random values, the
+# constant-time comparison, base64 in both alphabets, and an RS256 signature made by OpenSSL.
+# expect: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+# expect: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+# expect: b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+# expect: 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+# expect: 16 43 True False
+# expect: True False False True
+# expect: Zm9vYmFy Zm9vYg== Zg== +/8= -_8
+# expect: foobar foob f b'\xfb\xff' b'\xfb\xff'
+# expect: None None None
+# expect: True False False False False
+
+import crypto
+
+# A 2048-bit public key and a signature of "header.payload", made with
+#     openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out key.pem
+#     openssl dgst -sha256 -sign key.pem -out signature message
+# and written as base64url, as a JSON Web Key and a JSON Web Token carry them.
+const N = "qeDJICqRy8i7rAWHabaRLQ6y-fmghOKa6iYqbZ62lUjeZ-corjlNgf6ZAx9g5r_jQULjvHB7Nxu6qm_DDu6h4c-_-FEY0olgv4Wv7BX85tQYmzFKvGs6ePN4Dtglk8xavYC6it5n2pryoRKn6cLvWxjhRTxkxp1jPju3z0_t1efS00LYRr1ROdhrV72jy-MBSsJVRrRXo03nU3ipwPAEvMCUhh6USkAvcfhQhrRYLcPSOKWQQvYNXpp9MwC-zQdkeDZV-F27LHrjmRWO4fd59OT3cfSFopbfInJZcb_ouKvu0wd53yeRJFOAn8j_wsM9OBqgJJOQmqdbyCzZhB1DyQ"
+const E = "AQAB"
+const SIGNATURE = "j3QnDRVNfCxyIvtFc7k3gGMW8XmrG0WgEDHXZ7YJu2y9rLl_5ZFx796jL5juKI4sd3mB3uG7c_jZ12I4p_Ha9EmWcwZtbfjt5if3XvrTSQipLicCf1jJrZgR0BAXZrODYOH3xa-W3wYAd3ZWsrkczId1ouezQOkXGCBrHGhAM7_IdXhfiVTj7L0tt6F_zksVS5DMOgSg0hzQbewHbXwtoMOdAMHRJHMvKBGhWAl0KwS_FfAqx702mupsV4d3ZAhtnclAOsylLMebRz4AFYmrg0dTrar2BgUNzQoJ6TRsQS_YVVhnRA7HUsmMUxGH-LJy0cRhx40JAUg-pLq2CP3Iqg"
+
+def decoded(text: str) -> bytes:
+    return crypto.base64url_decode(text).unwrap()
+
+def main():
+    # SHA-256 of "" and "abc" (FIPS 180-2); HMAC-SHA256, RFC 4231 test cases 1 and 2.
+    print(crypto.sha256("".encode()).hex())
+    print(crypto.sha256("abc".encode()).hex())
+    key = crypto.base64_decode("CwsLCwsLCwsLCwsLCwsLCwsLCws=").unwrap()      # 20 bytes of 0x0b
+    print(crypto.hmac_sha256(key, "Hi There".encode()).hex())
+    print(crypto.hmac_sha256("Jefe".encode(), "what do ya want for nothing?".encode()).hex())
+
+    # Random values: the right sizes, and different each time.
+    token = crypto.token()
+    print(len(crypto.random_bytes(16)), len(token), token != crypto.token(), "=" in token)
+
+    # Equal: the same, different content, different lengths, both empty.
+    mac = crypto.hmac_sha256("k".encode(), "m".encode())
+    print(crypto.equal(mac, crypto.hmac_sha256("k".encode(), "m".encode())), crypto.equal(mac, crypto.sha256("m".encode())), crypto.equal("ab".encode(), "abc".encode()), crypto.equal("".encode(), "".encode()))
+
+    # Base64 (RFC 4648 section 10), and the two alphabets.
+    special = crypto.base64_decode("+/8=").unwrap()
+    print(crypto.base64_encode("foobar".encode()), crypto.base64_encode("foob".encode()), crypto.base64_encode("f".encode()), crypto.base64_encode(special), crypto.base64url_encode(special))
+    print(crypto.base64_decode("Zm9vYmFy").unwrap().decode().unwrap(), crypto.base64_decode("Zm9vYg").unwrap().decode().unwrap(), crypto.base64url_decode("Zg==").unwrap().decode().unwrap(), crypto.base64url_decode("-_8").unwrap(), special)
+    print(crypto.base64_decode("Zm9v!"), crypto.base64_decode("-_8"), crypto.base64url_decode("Z"))
+
+    # RS256: the signature, a changed message, a changed signature, another key, and a key
+    # too short for `ring`.
+    message = "header.payload".encode()
+    signature = decoded(SIGNATURE)
+    changed = signature.slice(0, len(signature) - 1) + "x".encode()
+    print(
+        crypto.verify_rs256(decoded(N), decoded(E), message, signature),
+        crypto.verify_rs256(decoded(N), decoded(E), "header.payloaD".encode(), signature),
+        crypto.verify_rs256(decoded(N), decoded(E), message, changed),
+        crypto.verify_rs256(decoded(N).slice(1, len(decoded(N))), decoded(E), message, signature),
+        crypto.verify_rs256("abc".encode(), decoded(E), message, signature),
+    )

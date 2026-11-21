@@ -109,6 +109,11 @@ impl Checker<'_, '_> {
             (Ty::STR, Ty::INT | Ty::FLOAT | Ty::BOOL) => {
                 Some("convert it with `str(...)`, or use an f-string".to_string())
             }
+            (_, Ty::STR) if expected_shown == "bytes" => Some("`text.encode()` makes `bytes` from a `str`".to_string()),
+            (Ty::STR, _) if found_shown == "bytes" => Some(
+                "`data.hex()` writes `bytes` as hex digits; `data.decode()` gives the UTF-8 text, or `None`"
+                    .to_string(),
+            ),
             (_, Ty::NONE) => {
                 let shown = self.display(expected);
                 Some(format!("only optional types can hold `None`; declare it as `{shown}?`"))
