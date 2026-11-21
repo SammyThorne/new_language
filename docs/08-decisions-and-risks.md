@@ -1230,6 +1230,19 @@ Section 4.13 of docs/14:
 - **E0343** covers the ways a form parameter can conflict: with a JSON body parameter, on a route without a body, or two `http.Form[T]` parameters. A form parameter whose `T` cannot be decoded is E0340, like a body parameter that is not `Json`.
 - **Test requests hold the form.** A test request's body is `str`, which cannot hold every file, so `test_request(files=...)` stores the `FormData` itself; `form=` alone becomes an urlencoded body, so `req.text()` sees it as it would on the wire.
 
+### D118. Timeouts and cancellation (production web plan, milestone 13)
+
+Section 4.10 of docs/14:
+
+- **The deadline lives in the task, not the request.** A route's `timeout` gives the task running the handler a deadline in its context, beside the request ID (D105). Waits check the task, so code several calls deep, and tasks the handler spawns, see it without anything passed along. The check is one atomic load per wait; the clock is read only by a task that has a deadline.
+- **A quarter-second sweep, not a timer per request.** Tasks with a deadline are kept in a table that the timer thread's existing I/O sweep walks, marking and waking the ones past their deadline. A timer heap entry would hold a reference to the task until it fired, keeping a finished connection's stack alive for the whole timeout; the table entry is removed when the handler returns. The price is up to 250 ms of lateness, which a timeout of seconds does not notice.
+- **Per-route timeouts in the runtime's route slots.** `Server.compose` stores each route's effective timeout (the route's, else the group's, else the server's) in a table indexed by the route's metrics slot. The one call that already tells the runtime which route took a request then loads it, so routes without a timeout pay one load and no extra call.
+- **Cancelled waits fail; others are left alone.** Sockets (so the HTTP client and PostgreSQL), channel receives (`None`, as when closed), `sleep` (returns early) and the database pool's wait stop. Channel sends, mutex locks and `join` cannot fail in the language, so they wait on; section 4.10's list included mutex waits, and changing `lock()` to return a `Result` was not worth it for waits that end when another task releases the lock.
+- **Hang-ups are checked before they are believed.** Socket sources are recycled, and an `EPOLLRDHUP` for a closed connection can arrive after its source was registered for a new one; during development this cancelled the next connection's handler. The poller now asks the source's current socket with a zero-timeout `poll(POLLRDHUP)`, and a per-registration generation, checked under the owner's lock, rejects the rest of the race. The cost falls on hang-ups, not requests.
+- **A cancelled PostgreSQL query is stopped on the server.** Closing the connection alone would leave the backend running the query until it next wrote. The client keeps the key from BackendKeyData and sends a CancelRequest from a short-lived thread (the cancelled task itself cannot wait).
+- **`connect_timeout`** is a separate, optional limit inside `timeout`, and timeout errors now name the limit that expired, as section 4.10 asks.
+- **Not done:** `spawn_scoped` (tasks that are also cancelled by a hang-up), and a yield check that would let a timeout interrupt a loop that never waits; `http.check_cancelled()` covers the latter.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

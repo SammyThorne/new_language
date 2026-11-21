@@ -157,7 +157,7 @@ static UNRECORDED: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: AtomicI64 = AtomicI64::new(0);
 static CONNECTIONS: AtomicU64 = AtomicU64::new(0);
 /// Requests that failed before or while being handled, by [`ErrorKind`].
-static ERRORS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static ERRORS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
@@ -221,9 +221,11 @@ pub(crate) enum ErrorKind {
     Timeout = 1,
     Parse = 2,
     TooLarge = 3,
+    /// The client hung up while the handler ran (`cancel.rs`).
+    ClientClosed = 4,
 }
 
-const ERROR_KINDS: [&str; 4] = ["panic", "timeout", "parse", "too_large"];
+const ERROR_KINDS: [&str; 5] = ["panic", "timeout", "parse", "too_large", "client_closed"];
 
 pub(crate) fn request_failed(kind: ErrorKind) {
     ERRORS[kind as usize].fetch_add(1, Ordering::Relaxed);

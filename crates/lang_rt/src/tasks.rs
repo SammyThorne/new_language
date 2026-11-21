@@ -326,7 +326,17 @@ pub unsafe extern "C-unwind" fn lrt_channel_recv(channel: *mut Channel, out: *mu
             }
             state.receivers.push(&node);
         }
-        node.wait();
+        // A cancelled task (`cancel.rs`) receives nothing, as from a closed channel.
+        if !node.wait_cancellable() {
+            let mut state = fiber::lock(&c.state);
+            if node.signaled() {
+                // Woken as it gave up: pass the wake-up on.
+                state.receivers.wake_one();
+            } else {
+                state.receivers.remove(&node);
+            }
+            return 0;
+        }
     }
 }
 
@@ -432,7 +442,8 @@ pub extern "C-unwind" fn lrt_time_sleep(seconds: f64) {
         std::thread::sleep(deadline - Instant::now());
         return;
     }
-    while Instant::now() < deadline {
+    // A cancelled task (`cancel.rs`) stops sleeping.
+    while Instant::now() < deadline && crate::cancel::check().is_none() {
         fiber::park(Some(deadline));
     }
 }

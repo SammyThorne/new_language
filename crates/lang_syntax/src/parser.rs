@@ -423,6 +423,10 @@ impl Parser<'_> {
                 self.bump();
                 AnnotationValue::Int(i64::try_from(value).unwrap_or(i64::MAX))
             }
+            TokenKind::Float(value) => {
+                self.bump();
+                AnnotationValue::Float(value)
+            }
             TokenKind::True => {
                 self.bump();
                 AnnotationValue::Bool(true)

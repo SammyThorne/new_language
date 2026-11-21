@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 12 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 13 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1146,6 +1146,16 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - The stress run.
 - **Gate:** the counts unchanged. The checks are one load of the context per park, and the bench measures it.
 - **Docs:** docs/05, docs/04 (runtime), and a site section.
+
+Done (D118):
+
+- A task's context carries a deadline and a cancel reason. `sleep`, channel receives, socket reads and writes (so client calls and `postgres` queries) and the database pool's wait look at the reason before they wait: one load, and a look at the coarse clock only when there is a deadline. The timer thread's quarter-second sweep marks tasks past their deadline and wakes them.
+- `timeout` on `server.route` and the verb methods, `group.timeout`, `server.timeout`, and `timeout=` in route annotations. A handler past its timeout gets a 503 with `Retry-After: 1`, the `timeout` error kind in the metrics, and status 503 in `request_log`. Tasks it spawned inherit the deadline.
+- A hang-up is seen through `EPOLLRDHUP`, checked with a zero-timeout `poll` and tied to the socket's registration, so a recycled descriptor never inherits one. Pipelined requests are data, not a hang-up; a half-close after a request is one, as in Go. The handler is cancelled, its response is not written, and `client_closed` is counted.
+- A `postgres` query stopped by a cancel sends a CancelRequest, so the server stops it too, and the connection is dropped from the pool.
+- `http.fetch` takes `connect_timeout=`; client errors name the limit that ran out ("timed out connecting to ... (connect_timeout=0.3s)").
+- `req.deadline()`, `req.cancelled()` and `http.check_cancelled()`, which is a 503 after a deadline and a 499 after a hang-up. Code that never waits is not interrupted.
+- Tests: `crates/lang_cli/tests/cancel.rs` runs `tests/http/cancel_server.vi` (route, group, annotation and server timeouts, a spawned task, a loop that checks, a hang-up seen through a channel, pipelining and a half-close, `connect_timeout` against a listener with a full backlog, and, with the test database, a query stopped at the deadline); `tests/run/http_cancel.vi` covers test requests and code outside a request; `tests/ui/route_annotation_errors.vi` covers bad `timeout=` values.
 
 #### Milestone 14: rate limiting (about 1.5 days; after 1)
 

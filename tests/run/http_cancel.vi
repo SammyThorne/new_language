@@ -1,0 +1,27 @@
+# expect: outside a request: Ok(None) False
+# expect: test request: no deadline False
+# expect: slept: True
+# Cancellation outside the server (docs/14, milestone 13): nothing is cancelled, and test
+# requests have no deadline, whatever the route's timeout.
+
+import http
+import time
+
+def handler(req: http.Request) -> Result[http.Response]:
+    http.check_cancelled()?
+    match req.deadline():
+        case Some(_):
+            return http.text(f"deadline {req.cancelled()}")
+        case None:
+            return http.text(f"no deadline {req.cancelled()}")
+
+def main():
+    print("outside a request:", http.check_cancelled(), http.Request("GET", "/").cancelled())
+    server = http.Server()
+    server.timeout = 0.01
+    server.get("/", handler, timeout=0.01)
+    response = server.handle(http.test_request("GET", "/"))
+    print("test request:", response.body)
+    started = time.monotonic()
+    time.sleep(0.05)
+    print("slept:", time.monotonic() - started >= 0.05)

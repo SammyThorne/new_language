@@ -632,6 +632,9 @@ pub(crate) fn spawn(refs: [*mut u8; 2], entry: Entry) -> FiberRef {
         words.sub(10).write(0x037F_0000_1F80); // MXCSR default, then the x87 control word
         *fiber.sp.get() = words.sub(10) as *mut u8;
     }
+    if fiber.context.cancel.has_deadline() {
+        crate::cancel::spawned(&fiber);
+    }
     // From here on the collector scans the stack, and the record with it.
     slot.store(fiber.as_ptr(), Ordering::Release);
     enqueue(fiber.clone());
@@ -654,6 +657,7 @@ extern "C" fn fiber_main(fiber: *const Fiber) -> ! {
         }
     }
     release_held(fiber);
+    crate::cancel::ended(fiber);
     suspend(Intent::Exit);
     unreachable!("an ended fiber was resumed")
 }
@@ -695,7 +699,7 @@ pub(crate) fn guard_window() -> Option<(usize, usize)> {
 }
 
 /// A reference to the running fiber that can outlive this call.
-fn current_ref() -> Option<FiberRef> {
+pub(crate) fn current_ref() -> Option<FiberRef> {
     Some(FiberRef::to(current()?))
 }
 
@@ -789,6 +793,18 @@ impl WaitNode {
         while !self.signaled() {
             park(None);
         }
+    }
+
+    /// Wait until signaled, or until the running task is cancelled. Returns false if it was
+    /// cancelled first; the caller then takes the node off its list.
+    pub(crate) fn wait_cancellable(&self) -> bool {
+        while !self.signaled() {
+            if crate::cancel::check().is_some() {
+                return self.signaled();
+            }
+            park(None);
+        }
+        true
     }
 }
 

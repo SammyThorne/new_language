@@ -42,6 +42,8 @@ const EFD_NONBLOCK: i32 = 0o4000;
 const EFD_CLOEXEC: i32 = 0o2000000;
 const POLLIN: i16 = 1;
 const POLLOUT: i16 = 4;
+const POLLHUP: i16 = 0x010;
+const POLLRDHUP: i16 = 0x2000;
 
 unsafe extern "C" {
     fn epoll_create1(flags: i32) -> i32;
@@ -161,6 +163,10 @@ pub(crate) fn poll(timeout_ms: i32) {
         if flags & (EPOLLOUT | EPOLLHUP | EPOLLERR) != 0 {
             source.write.ready();
         }
+        // The peer has closed its side. Pipelined requests arrive as `EPOLLIN` alone.
+        if flags & (EPOLLRDHUP | EPOLLHUP) != 0 {
+            source.hang_up();
+        }
     }
 }
 
@@ -221,6 +227,13 @@ pub(crate) struct IoSource {
     fd: AtomicI32,
     read: Direction,
     write: Direction,
+    /// Counts the sockets this source has been registered for, so that a hang-up seen for one
+    /// of them is never taken for a later one's.
+    generation: AtomicU64,
+    /// The generation whose peer has hung up (`EPOLLRDHUP` or `EPOLLHUP`), or 0.
+    hung_up: AtomicU64,
+    /// For a server's connection, the task serving it, whose handler a hang-up cancels.
+    owner: Mutex<Option<FiberRef>>,
 }
 
 /// Every source ever made, for recycling and for waking them all at shutdown.
@@ -234,6 +247,8 @@ pub(crate) enum Wait {
     Retry,
     /// The deadline passed.
     TimedOut,
+    /// The waiting task was cancelled (`cancel.rs`).
+    Cancelled(crate::cancel::Reason),
 }
 
 impl IoSource {
@@ -246,10 +261,14 @@ impl IoSource {
                 fd: AtomicI32::new(-1),
                 read: Direction::new(),
                 write: Direction::new(),
+                generation: AtomicU64::new(0),
+                hung_up: AtomicU64::new(0),
+                owner: Mutex::new(None),
             }));
             lock(&SOURCES).push(source);
             source
         });
+        source.generation.fetch_add(1, Ordering::SeqCst);
         source.fd.store(fd, Ordering::SeqCst);
         let mut event =
             EpollEvent { events: EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, data: source as *const IoSource as u64 };
@@ -274,13 +293,55 @@ impl IoSource {
         }
         self.read.reset();
         self.write.reset();
+        self.hung_up.store(0, Ordering::SeqCst);
+        let owner = lock(&self.owner).take();
+        drop(owner);
         lock(&FREE_SOURCES).push(self);
+    }
+
+    /// Say which task serves this connection, so that a hang-up can cancel its handler.
+    pub(crate) fn set_owner(&self, fiber: FiberRef) {
+        *lock(&self.owner) = Some(fiber);
+    }
+
+    /// Whether the peer has hung up.
+    pub(crate) fn hung_up(&self) -> bool {
+        let hung_up = self.hung_up.load(Ordering::Relaxed);
+        hung_up != 0 && hung_up == self.generation.load(Ordering::Relaxed)
+    }
+
+    /// The poller saw a hang-up. An event can arrive after its socket was closed and the source
+    /// registered for another, so the socket the source has now is asked whether its peer has
+    /// closed, and the generation is checked again under the owner's lock (which `deregister`
+    /// takes) before the owner's handler is cancelled.
+    fn hang_up(&self) {
+        let generation = self.generation.load(Ordering::SeqCst);
+        let fd = self.fd.load(Ordering::SeqCst);
+        let mut pfd = PollFd { fd, events: POLLRDHUP, revents: 0 };
+        // SAFETY: one pollfd, no waiting.
+        if fd < 0 || unsafe { sys_poll(&mut pfd, 1, 0) } != 1 || pfd.revents & (POLLRDHUP | POLLHUP) == 0 {
+            return;
+        }
+        let owner = {
+            let owner = lock(&self.owner);
+            if self.generation.load(Ordering::SeqCst) != generation || self.fd.load(Ordering::SeqCst) < 0 {
+                return;
+            }
+            self.hung_up.store(generation, Ordering::SeqCst);
+            owner.clone()
+        };
+        if let Some(fiber) = owner {
+            crate::cancel::hung_up(&fiber);
+        }
     }
 
     /// Wait until the socket may be readable (`write` false) or writable, or until `deadline`
     /// (on the [`coarse_now`] clock). A deadline that has already passed is noticed by the next
     /// sweep, within a quarter of a second; no clock is read here.
     pub(crate) fn wait(&self, write: bool, deadline: Option<u64>) -> Wait {
+        if let Some(reason) = crate::cancel::check() {
+            return Wait::Cancelled(reason);
+        }
         let direction = if write { &self.write } else { &self.read };
         {
             let mut waiter = lock(&direction.waiter);
@@ -399,7 +460,9 @@ pub(crate) fn start_timer_thread() {
             let now = Instant::now();
             if now >= next_sweep {
                 next_sweep = now + SWEEP;
-                sweep_io_deadlines(coarse_now());
+                let now = coarse_now();
+                sweep_io_deadlines(now);
+                crate::cancel::sweep(now);
             }
         }
     });

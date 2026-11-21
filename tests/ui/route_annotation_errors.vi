@@ -53,6 +53,18 @@ impl Api:
     def a_megabyte(self) -> str:
         return "ok"
 
+    @http.get("/l", timeout=0)
+    def no_time_at_all(self) -> str:
+        return "l"
+
+    @http.get("/m", timeout="10s")
+    def timeout_as_text(self) -> str:
+        return "m"
+
+    @http.get("/ok2", timeout=2.5)
+    def two_and_a_half_seconds(self) -> str:
+        return "ok"
+
     @http.get("/ok", tags=["todos", "admin"], deprecated=True, errors=[409, 404, 404], security=["token", "token"])
     def fine(self) -> str:
         """Everything here is accepted."""

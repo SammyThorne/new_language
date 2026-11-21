@@ -46,7 +46,7 @@ error[E0340]: `@http.ws` takes a path and, optionally, `tags=` and `deprecated=`
    |
    = help: for example `@http.ws("/chat")`
 
-error[E0340]: a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=`, `security=` and `max_body=`
+error[E0340]: a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=`, `security=`, `max_body=` and `timeout=`
   --> tests/ui/route_annotation_errors.vi:32:21
    |
 32 |     @http.get("/g", summary="no such keyword")
@@ -86,4 +86,20 @@ error[E0340]: `max_body=` takes the largest body to accept, in bytes
    |
    = help: for example `max_body=10485760` for 10 MiB
 
-error: could not compile `tests/ui/route_annotation_errors.vi` due to 11 errors
+error[E0340]: `timeout=` takes the seconds the handler may run
+  --> tests/ui/route_annotation_errors.vi:56:21
+   |
+56 |     @http.get("/l", timeout=0)
+   |                     ^^^^^^^^^ not a positive number of seconds
+   |
+   = help: for example `timeout=10.0`
+
+error[E0340]: `timeout=` takes the seconds the handler may run
+  --> tests/ui/route_annotation_errors.vi:60:21
+   |
+60 |     @http.get("/m", timeout="10s")
+   |                     ^^^^^^^^^^^^^ not a positive number of seconds
+   |
+   = help: for example `timeout=10.0`
+
+error: could not compile `tests/ui/route_annotation_errors.vi` due to 13 errors

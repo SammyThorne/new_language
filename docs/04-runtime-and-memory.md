@@ -131,6 +131,15 @@ A task becomes a **fiber**: a user-space thread with its own stack, scheduled by
 | `Atomic[int]`, `Atomic[bool]` | Lock-free counters and flags |
 | `select` | Waiting on several channels at once. Deferred; needs syntax |
 
+### Deadlines and cancellation (docs/14, milestone 13)
+
+A task's context, which already carries its request ID and trace for log lines, also carries a deadline and a cancel reason (`crates/lang_rt/src/cancel.rs`).
+
+- **Setting them.** Routing a request to a route with a `timeout` gives the connection's task a deadline, on the coarse monotonic clock, and puts the task in a table the timer thread sweeps with the I/O deadlines every quarter second. A task whose deadline has passed is marked (reason `Deadline`) and unparked from whatever it waits on. A spawned task copies its parent's deadline, and stays in the table until it ends.
+- **Hang-ups.** A server connection's socket source records the task serving it. While a handler runs, an `EPOLLRDHUP` or `EPOLLHUP` for that socket marks the task (reason `ClientClosed`) and unparks it; plain `EPOLLIN` (a pipelined request) does not. Sources are recycled, so an event can arrive after its socket was closed and the source registered for another: the poller asks the source's current socket with `poll(POLLRDHUP)`, and a generation number, bumped at each registration and checked under the owner's lock, keeps a hang-up from being taken for a later connection's.
+- **Checking them.** Waits that can fail look at the reason first (one load; the clock is read only for a task with a deadline): an I/O wait returns `Wait::Cancelled`, which sockets turn into an error that the HTTP client and the PostgreSQL client report as `cancelled: ...` (the PostgreSQL client also sends a CancelRequest from a thread of its own); a channel receive gives up as if the channel were closed, unlinking its wait node (or passing on a wake-up it was given meanwhile); `sleep` and the pool's wait return early. Channel sends, mutex locks and joins are not interrupted, since their operations cannot fail. Running code is never interrupted.
+- **Ending a request.** When the handler returns, the server takes the task out of the table, clears the deadline, stops watching for hang-ups and reads the reason: past the deadline the response becomes a 503; after a hang-up the connection closes once the response is written. A WebSocket upgrade does the same at the upgrade, so a socket that lives on has no deadline.
+
 ### Data-race prevention
 
 A data race is two tasks touching the same memory at the same time, at least one of them writing, with no lock. In a language with multi-word values and growable collections a race is not only a logic bug: a reader can see a string pointer with another string's length, or a list whose length exceeds its buffer. Viper prevents the common cases at compile time by controlling what may be shared between tasks.

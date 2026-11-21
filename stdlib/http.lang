@@ -160,7 +160,16 @@ def docs_asset(index: int) -> str
 def docs_hash(text: str) -> int
 
 @extern("lrt_http_client")
-def client_raw(method: str, url: str, headers: str, body: str, timeout_ns: int) -> int
+def client_raw(method: str, url: str, headers: str, body: str, timeout_ns: int, connect_timeout_ns: int) -> int
+
+@extern("lrt_cancel_state")
+def cancel_state_raw() -> int
+
+@extern("lrt_cancel_deadline")
+def cancel_deadline_raw() -> int
+
+@extern("lrt_http_set_route_timeout")
+def set_route_timeout_raw(route: int, nanos: int)
 
 @extern("lrt_http_client_headers")
 def client_headers() -> str
@@ -261,6 +270,17 @@ impl Display for HttpError:
 pub def Error(status: int, message: str) -> HttpError:
     """An error with an HTTP status, for handlers to return."""
     return HttpError(status, message)
+
+pub def check_cancelled() -> Result[None, HttpError]:
+    """An error if the running task has been cancelled, for loops that never wait (waiting
+    operations fail by themselves): 503 past the deadline, 499 after the client closed the
+    connection. `http.check_cancelled()?` in the loop ends the handler."""
+    state = cancel_state_raw()
+    if state == 1:
+        return Err(HttpError(503, "cancelled: the request's deadline passed"))
+    if state == 2:
+        return Err(HttpError(499, "cancelled: the client closed the connection"))
+    return Ok(None)
 
 # ---- requests -----------------------------------------------------------------------------
 
@@ -387,6 +407,21 @@ impl Request:
         routing and when no route took it. For logs and metrics, whose labels must not be raw
         paths."""
         return route_pattern_raw(self.route_label())
+
+    def deadline(self) -> datetime.DateTime?:
+        """When the route's `timeout` cancels the handler, or `None` without one. Tasks the
+        handler spawns have the same deadline."""
+        if self.handle < 0:
+            return None
+        nanos = cancel_deadline_raw()
+        if nanos < 0:
+            return None
+        return datetime.from_unix(nanos // 1000000000, nanos % 1000000000)
+
+    def cancelled(self) -> bool:
+        """Whether the handler has been cancelled: its deadline has passed, or the client
+        closed the connection. Waiting operations then fail by themselves."""
+        return self.handle >= 0 and cancel_state_raw() != 0
 
     priv def route_label(self) -> int:
         if self.handle >= 0:
@@ -1026,6 +1061,8 @@ struct Route:
     preflight: Handler? = None
     # The route's slot in the runtime's metrics, plus UNMETERED or QUIET times 65536.
     label: int = UNMATCHED
+    # Seconds until its handler is cancelled and the client answered 503; 0 for the server's.
+    timeout: float = 0.0
 
 # Requests no route took, in the metrics (the runtime's `metrics::UNMATCHED`).
 const UNMATCHED = 1025
@@ -1037,7 +1074,7 @@ const QUIET = 131072
 const ROUTE_LIMIT = 16777216
 const MAX_ROUTE_LIMIT = 274877906944
 
-def new_route(method: str, pattern: str, handler: Handler, max_body: int = 0) -> Route:
+def new_route(method: str, pattern: str, handler: Handler, max_body: int = 0, timeout: float = 0.0) -> Route:
     kinds: list[int] = []
     names: list[str] = []
     for part in split_path(pattern):
@@ -1053,7 +1090,9 @@ def new_route(method: str, pattern: str, handler: Handler, max_body: int = 0) ->
     has_params = PARAM in kinds or REST in kinds
     if max_body < 0 or max_body >= MAX_ROUTE_LIMIT:
         panic(f"the route {method} {pattern} has max_body={max_body}, which must be from 0 (the server's) to 256 GiB")
-    return Route(method, pattern, handler, kinds, names, has_params, None, route_slot_raw(method, pattern) + max_body * ROUTE_LIMIT)
+    if timeout < 0.0:
+        panic(f"the route {method} {pattern} has timeout={timeout}, which must be 0 (the server's) or more")
+    return Route(method, pattern, handler, kinds, names, has_params, None, route_slot_raw(method, pattern) + max_body * ROUTE_LIMIT, timeout)
 
 def split_path(path: str) -> list[str]:
     return [part for part in path.split("/") if part != ""]
@@ -1248,6 +1287,9 @@ def log_request(req: Request, next: Handler, skipped: tuple[str, ...]) -> Result
         case Err(problem):
             status = problem.status()
             req.add_error_header("X-Request-Id", id)
+    if req.handle >= 0 and cancel_state_raw() == 1:
+        # Past the route's timeout the client is answered 503, whatever the handler gave.
+        status = 503
     fields = {"method": req.method, "path": req.path, "status": str(status), "ms": f"{ms:.2f}"}
     route = route_pattern_raw(label)
     if route != "":
@@ -1658,6 +1700,9 @@ pub struct Server:
     # ("" for the system's temporary directory).
     max_files: int = 10
     max_fields: int = 1000
+    # Seconds a handler may run before its task is cancelled and the client answered 503 with
+    # `Retry-After: 1`, unless the route or its group says otherwise; 0 for no limit.
+    timeout: float = 0.0
     max_part_headers: int = 8192
     upload_dir: str = ""
     max_message: int = 16777216
@@ -1690,27 +1735,28 @@ pub struct Server:
     priv security_schemes: dict[str, SecurityScheme] = {}
 
 impl Server:
-    def route(self, method: str, path: str, handler: Handler, max_body: int = 0):
+    def route(self, method: str, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
         """Register a handler for a method and a path such as `/todos/{id}` or `/files/{rest...}`.
-        `max_body` is the largest request body it reads, in bytes, in place of the server's."""
-        self.routes.append(new_route(method.upper(), path, handler, max_body))
+        `max_body` is the largest request body it reads, in bytes, and `timeout` the seconds its
+        handler may run, in place of the server's."""
+        self.routes.append(new_route(method.upper(), path, handler, max_body, timeout))
         self.chain = None
         self.docs_json = ""
 
-    def get(self, path: str, handler: Handler):
-        self.route("GET", path, handler)
+    def get(self, path: str, handler: Handler, timeout: float = 0.0):
+        self.route("GET", path, handler, 0, timeout)
 
-    def post(self, path: str, handler: Handler, max_body: int = 0):
-        self.route("POST", path, handler, max_body)
+    def post(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
+        self.route("POST", path, handler, max_body, timeout)
 
-    def put(self, path: str, handler: Handler, max_body: int = 0):
-        self.route("PUT", path, handler, max_body)
+    def put(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
+        self.route("PUT", path, handler, max_body, timeout)
 
-    def patch(self, path: str, handler: Handler, max_body: int = 0):
-        self.route("PATCH", path, handler, max_body)
+    def patch(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
+        self.route("PATCH", path, handler, max_body, timeout)
 
-    def delete(self, path: str, handler: Handler, max_body: int = 0):
-        self.route("DELETE", path, handler, max_body)
+    def delete(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
+        self.route("DELETE", path, handler, max_body, timeout)
 
     def head(self, path: str, handler: Handler):
         self.route("HEAD", path, handler)
@@ -1862,6 +1908,9 @@ impl Server:
                 pass
         self.build_fixed()
         set_form_limits_raw(self.max_files, self.max_fields, self.max_part_headers, self.upload_dir)
+        for route in self.routes:
+            seconds = route.timeout if route.timeout > 0.0 else self.timeout
+            set_route_timeout_raw(route.label, int(seconds * 1000000000.0))
         server = self
         handler: Handler = lambda req: server.dispatch(req)
         for i in range(len(self.middleware) - 1, -1, -1):
@@ -2192,13 +2241,17 @@ pub struct Group:
     # The largest request body its routes read, unless a route says otherwise; 0 for the
     # server's `max_body`.
     max_body: int = 0
+    # The seconds its handlers may run, unless a route says otherwise; 0 for the server's
+    # `timeout`.
+    timeout: float = 0.0
 
 impl Group:
-    def route(self, method: str, path: str, handler: Handler, max_body: int = 0):
+    def route(self, method: str, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
         wrapped = handler
         for i in range(len(self.middleware) - 1, -1, -1):
             wrapped = wrap(self.middleware[i], wrapped)
-        self.server.route(method, self.prefix + path, wrapped, max_body if max_body > 0 else self.max_body)
+        limit = max_body if max_body > 0 else self.max_body
+        self.server.route(method, self.prefix + path, wrapped, limit, timeout if timeout > 0.0 else self.timeout)
         if len(self.middleware) > 0:
             server = self.server
             preflight: Handler = lambda req: not_routed(req, [r for r in server.routes if fits(r, split_path(req.path))])
@@ -2206,20 +2259,20 @@ impl Group:
                 preflight = wrap(self.middleware[i], preflight)
             server.routes[len(server.routes) - 1].preflight = preflight
 
-    def get(self, path: str, handler: Handler):
-        self.route("GET", path, handler)
+    def get(self, path: str, handler: Handler, timeout: float = 0.0):
+        self.route("GET", path, handler, 0, timeout)
 
-    def post(self, path: str, handler: Handler, max_body: int = 0):
-        self.route("POST", path, handler, max_body)
+    def post(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
+        self.route("POST", path, handler, max_body, timeout)
 
-    def put(self, path: str, handler: Handler, max_body: int = 0):
-        self.route("PUT", path, handler, max_body)
+    def put(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
+        self.route("PUT", path, handler, max_body, timeout)
 
-    def patch(self, path: str, handler: Handler, max_body: int = 0):
-        self.route("PATCH", path, handler, max_body)
+    def patch(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
+        self.route("PATCH", path, handler, max_body, timeout)
 
-    def delete(self, path: str, handler: Handler, max_body: int = 0):
-        self.route("DELETE", path, handler, max_body)
+    def delete(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
+        self.route("DELETE", path, handler, max_body, timeout)
 
     def ws(self, path: str, handler: WsHandler):
         self.route("GET", path, lambda req: upgrade(req, handler))
@@ -2239,6 +2292,7 @@ impl Group:
     def group(self, prefix: str) -> Group:
         nested = Group(self.server, self.prefix + prefix)
         nested.max_body = self.max_body
+        nested.timeout = self.timeout
         for middleware in self.middleware:
             nested.middleware.append(middleware)
         return nested
@@ -2537,14 +2591,22 @@ pub def fetch(
     body: str = "",
     headers: dict[str, str] = {},
     timeout: datetime.Duration = datetime.seconds(30),
+    connect_timeout: datetime.Duration? = None,
 ) -> Result[ClientResponse, ClientError]:
     """Send a request and wait for the whole response, for at most `timeout` from connecting to
-    the last byte. A task waiting here does not hold a worker. `https://` URLs use TLS, checking
-    the server's certificate."""
+    the last byte, and at most `connect_timeout`, if given, for the connection. A task waiting
+    here does not hold a worker, and a cancelled task's request fails at once. `https://` URLs
+    use TLS, checking the server's certificate."""
     lines = ""
     for name, value in headers.items():
         lines = lines + f"{name}: {value}\r\n"
-    status = client_raw(method, url, lines, body, timeout.nanoseconds())
+    connect_ns = 0
+    match connect_timeout:
+        case Some(limit):
+            connect_ns = limit.nanoseconds()
+        case None:
+            pass
+    status = client_raw(method, url, lines, body, timeout.nanoseconds(), connect_ns)
     if status < 0:
         return Err(ClientError(url, last_error()))
     parsed: dict[str, str] = {}

@@ -68,6 +68,8 @@ pub enum AnnotationValue {
     Name(Ident),
     Str(String),
     Int(i64),
+    /// A number with a fraction, as in `timeout=2.5`.
+    Float(f64),
     Bool(bool),
     /// `[a, b]`, as in `tags=["todos"]`.
     List(Vec<AnnotationValue>),

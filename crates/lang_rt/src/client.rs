@@ -67,8 +67,24 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Read more of the response into `buffer`; false at the end of the stream.
-fn fill(socket: &Socket, buffer: &mut Vec<u8>, deadline: Instant) -> Result<bool, String> {
+/// A limit as the caller wrote it, for the error that says it expired: `timeout=30s`.
+fn limit(name: &str, duration: Duration) -> String {
+    let seconds = duration.as_secs_f64();
+    if seconds.fract() == 0.0 { format!("{name}={seconds:.0}s") } else { format!("{name}={seconds}s") }
+}
+
+/// The error of a socket operation: a cancellation (`cancel.rs`) says so, and others say what
+/// failed.
+fn failure(what: &str, error: std::io::Error) -> String {
+    match crate::cancel::reason_of(&error) {
+        Some(reason) => reason.message().to_string(),
+        None => format!("{what}: {error}"),
+    }
+}
+
+/// Read more of the response into `buffer`; false at the end of the stream. `timeout` is the
+/// limit the deadline comes from.
+fn fill(socket: &Socket, buffer: &mut Vec<u8>, deadline: Instant, timeout: Duration) -> Result<bool, String> {
     let mut chunk = [0u8; 8192];
     match socket.read(&mut chunk, Some(deadline), false) {
         Ok(0) => Ok(false),
@@ -79,31 +95,48 @@ fn fill(socket: &Socket, buffer: &mut Vec<u8>, deadline: Instant) -> Result<bool
             buffer.extend_from_slice(&chunk[..n]);
             Ok(true)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Err("timed out waiting for the response".to_string()),
-        Err(e) => Err(e.to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            Err(format!("timed out waiting for the response ({})", limit("timeout", timeout)))
+        }
+        Err(e) => Err(failure("reading the response failed", e)),
     }
 }
 
-/// Connect to the first of the host's addresses that answers.
-fn connect(host: &str, port: u16, deadline: Instant) -> Result<Socket, String> {
+/// Connect to the first of the host's addresses that answers, by `deadline`, which comes from
+/// the limit `expired` names.
+fn connect(host: &str, port: u16, deadline: Instant, expired: &str) -> Result<Socket, String> {
     let addresses = (host, port).to_socket_addrs().map_err(|e| format!("cannot resolve `{host}`: {e}"))?;
-    let mut failure = format!("`{host}` has no address");
+    let mut last = format!("`{host}` has no address");
     for address in addresses {
         match Socket::connect(&address, deadline) {
             Ok(socket) => return Ok(socket),
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                return Err(format!("timed out connecting to {address}"));
+                return Err(format!("timed out connecting to {address} ({expired})"));
             }
-            Err(e) => failure = format!("cannot connect to {address}: {e}"),
+            Err(e) if crate::cancel::reason_of(&e).is_some() => return Err(failure("", e)),
+            Err(e) => last = format!("cannot connect to {address}: {e}"),
         }
     }
-    Err(failure)
+    Err(last)
 }
 
-fn request(method: &str, url: &str, headers: &str, body: &[u8], timeout: Duration) -> Result<(i64, Response), String> {
+fn request(
+    method: &str,
+    url: &str,
+    headers: &str,
+    body: &[u8],
+    timeout: Duration,
+    connect_timeout: Option<Duration>,
+) -> Result<(i64, Response), String> {
     let url = parse_url(url)?;
-    let deadline = Instant::now() + timeout;
-    let mut socket = connect(&url.host, url.port, deadline)?;
+    let started = Instant::now();
+    let deadline = started + timeout;
+    // Connecting has the sooner of the two limits.
+    let (connected_by, expired) = match connect_timeout {
+        Some(connect) if connect < timeout => (started + connect, limit("connect_timeout", connect)),
+        _ => (deadline, limit("timeout", timeout)),
+    };
+    let mut socket = connect(&url.host, url.port, connected_by, &expired)?;
     if url.tls {
         socket.start_tls(Session::client(&url.host, Protocol::Http)?);
     }
@@ -130,14 +163,14 @@ fn request(method: &str, url: &str, headers: &str, body: &[u8], timeout: Duratio
     head.push_str("\r\n");
     let mut out = head.into_bytes();
     out.extend_from_slice(body);
-    socket.write_all(&out).map_err(|e| format!("sending the request failed: {e}"))?;
+    socket.write_all(&out).map_err(|e| failure("sending the request failed", e))?;
 
     let mut buffer = Vec::new();
     let header_end = loop {
         if let Some(at) = find(&buffer, b"\r\n\r\n") {
             break at;
         }
-        if !fill(&socket, &mut buffer, deadline)? {
+        if !fill(&socket, &mut buffer, deadline, timeout)? {
             return Err("the connection closed before a response".to_string());
         }
     };
@@ -166,7 +199,7 @@ fn request(method: &str, url: &str, headers: &str, body: &[u8], timeout: Duratio
                 if let Some(at) = find(&rest, b"\r\n") {
                     break at;
                 }
-                if !fill(&socket, &mut rest, deadline)? {
+                if !fill(&socket, &mut rest, deadline, timeout)? {
                     return Err("the chunked body ended early".to_string());
                 }
             };
@@ -177,7 +210,7 @@ fn request(method: &str, url: &str, headers: &str, body: &[u8], timeout: Duratio
                 break body;
             }
             while rest.len() < size + 2 {
-                if !fill(&socket, &mut rest, deadline)? {
+                if !fill(&socket, &mut rest, deadline, timeout)? {
                     return Err("the chunked body ended early".to_string());
                 }
             }
@@ -186,14 +219,14 @@ fn request(method: &str, url: &str, headers: &str, body: &[u8], timeout: Duratio
         }
     } else if let Some(length) = length {
         while rest.len() < length {
-            if !fill(&socket, &mut rest, deadline)? {
+            if !fill(&socket, &mut rest, deadline, timeout)? {
                 return Err("the connection closed in the middle of the body".to_string());
             }
         }
         rest.truncate(length);
         rest
     } else {
-        while fill(&socket, &mut rest, deadline)? {}
+        while fill(&socket, &mut rest, deadline, timeout)? {}
         rest
     };
     socket.shutdown();
@@ -210,7 +243,8 @@ fn request(method: &str, url: &str, headers: &str, body: &[u8], timeout: Duratio
 }
 
 /// Make a request. `headers` is `Name: value\r\n` lines; `timeout_ns` bounds the whole
-/// exchange (30 seconds when it is not positive). Returns the status, with the headers and body
+/// exchange (30 seconds when it is not positive), and `connect_timeout_ns`, when positive,
+/// connecting. A cancelled task's request fails (`cancel.rs`). Returns the status, with the headers and body
 /// available from the functions below, or -1 after recording the error.
 ///
 /// # Safety
@@ -226,6 +260,7 @@ pub unsafe extern "C-unwind" fn lrt_http_client(
     body: *const u8,
     body_len: i64,
     timeout_ns: i64,
+    connect_timeout_ns: i64,
 ) -> i64 {
     let method = unsafe { Str::from_raw(method, method_len) }.to_ascii_uppercase();
     let url = unsafe { Str::from_raw(url, url_len) };
@@ -245,7 +280,8 @@ pub unsafe extern "C-unwind" fn lrt_http_client(
         }
         _ => headers,
     };
-    let result = request(&method, url, headers, body, timeout);
+    let connect_timeout = (connect_timeout_ns > 0).then(|| Duration::from_nanos(connect_timeout_ns as u64));
+    let result = request(&method, url, headers, body, timeout, connect_timeout);
     if let Some(mut span) = span {
         match &result {
             Ok((status, _)) => {
@@ -291,7 +327,7 @@ fn trace_start(method: &str, url: &str) -> Option<Box<crate::trace::Open>> {
 /// Send a request and read its status, for the runtime's own use (the trace exporter): no
 /// span, and the response is not kept.
 pub(crate) fn send(method: &str, url: &str, headers: &str, body: &[u8], timeout: Duration) -> Result<i64, String> {
-    request(method, url, headers, body, timeout).map(|(status, _)| status)
+    request(method, url, headers, body, timeout, None).map(|(status, _)| status)
 }
 
 /// The last response's headers: lower-case `name: value` lines.

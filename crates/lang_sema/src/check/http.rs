@@ -169,6 +169,8 @@ pub(super) struct Route {
     pub doc: RouteDoc,
     /// `max_body=`: the largest request body the route reads, in bytes.
     pub max_body: Option<i64>,
+    /// `timeout=`: the seconds its handler may run.
+    pub timeout: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -443,6 +445,7 @@ impl<'m> Checker<'_, 'm> {
         let mut status = None;
         let mut doc = RouteDoc::default();
         let mut max_body = None;
+        let mut timeout = None;
         for arg in &annotation.args {
             match (&arg.keyword, &arg.value) {
                 (None, ast::AnnotationValue::Str(text)) if path.is_none() => path = Some(text.clone()),
@@ -519,6 +522,25 @@ impl<'m> Checker<'_, 'm> {
                         return None;
                     }
                 },
+                (Some(k), value) if k.name == "timeout" && !ws => {
+                    let seconds = match value {
+                        ast::AnnotationValue::Int(n) => Some(*n as f64),
+                        ast::AnnotationValue::Float(x) => Some(*x),
+                        _ => None,
+                    };
+                    match seconds {
+                        Some(seconds) if seconds > 0.0 && seconds <= 1e9 => timeout = Some(seconds),
+                        _ => {
+                            self.route_error(
+                                "`timeout=` takes the seconds the handler may run",
+                                arg.span,
+                                "not a positive number of seconds",
+                                Some("for example `timeout=10.0`"),
+                            );
+                            return None;
+                        }
+                    }
+                }
                 (Some(k), value) if k.name == "deprecated" => {
                     let ast::AnnotationValue::Bool(flag) = value else {
                         self.route_error(
@@ -560,7 +582,7 @@ impl<'m> Checker<'_, 'm> {
                         if ws {
                             "`@http.ws` takes a path and, optionally, `tags=` and `deprecated=`"
                         } else {
-                            "a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=`, `security=` and `max_body=`"
+                            "a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=`, `security=`, `max_body=` and `timeout=`"
                         },
                         arg.span,
                         "not expected here",
@@ -922,6 +944,7 @@ impl<'m> Checker<'_, 'm> {
             span,
             doc,
             max_body,
+            timeout,
         })
     }
 
@@ -1211,7 +1234,10 @@ impl<'m> Checker<'_, 'm> {
                     text.push_str(&format!("        return __http.reply_json({call}{try_mark}, {status})\n"))
                 }
             }
-            let limit = route.max_body.map(|bytes| format!(", max_body={bytes}")).unwrap_or_default();
+            let mut limit = route.max_body.map(|bytes| format!(", max_body={bytes}")).unwrap_or_default();
+            if let Some(seconds) = route.timeout {
+                limit.push_str(&format!(", timeout={seconds:?}"));
+            }
             text.push_str(&format!(
                 "    __server.route({:?}, __prefix + {:?}, __route_{index}{limit})\n",
                 route.method, route.path

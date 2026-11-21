@@ -429,6 +429,10 @@ struct Conn {
     start: usize,
     /// The last ReadyForQuery status: `I` idle, `T` in a transaction, `E` in a failed one.
     status: u8,
+    /// Where the server is, and the key from its BackendKeyData, for asking it to stop a query
+    /// whose task was cancelled.
+    address: Option<std::net::SocketAddr>,
+    key: Option<[u8; 8]>,
 }
 
 impl Conn {
@@ -450,7 +454,15 @@ impl Conn {
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                     return Err(Error::Broken("timed out waiting for the database".into()));
                 }
-                Err(e) => return Err(Error::broken("reading from the database failed", e)),
+                Err(e) => {
+                    if let Some(reason) = crate::cancel::reason_of(&e) {
+                        // The connection is closed after this; ask the server to stop the
+                        // query too, or it runs on to the end.
+                        self.cancel_query();
+                        return Err(Error::Broken(reason.message().to_string()));
+                    }
+                    return Err(Error::broken("reading from the database failed", e));
+                }
             }
         }
         Ok(())
@@ -480,14 +492,14 @@ impl Conn {
         for address in addresses {
             match Socket::connect(&address, deadline) {
                 Ok(s) => {
-                    socket = Some(s);
+                    socket = Some((s, address));
                     break;
                 }
                 Err(e) => failure = Error::Broken(format!("cannot connect to the database at {address}: {e}")),
             }
         }
-        let socket = socket.ok_or(failure)?;
-        let mut conn = Conn { socket, buffer: Vec::new(), start: 0, status: b'I' };
+        let (socket, address) = socket.ok_or(failure)?;
+        let mut conn = Conn { socket, buffer: Vec::new(), start: 0, status: b'I', address: Some(address), key: None };
         if config.ssl != SslMode::Disable {
             conn.start_tls(config, deadline)?;
         }
@@ -604,7 +616,9 @@ impl Conn {
                     self.status = body.first().copied().unwrap_or(b'I');
                     return Ok(());
                 }
-                // ParameterStatus, BackendKeyData, notices.
+                // BackendKeyData: the process ID and secret key, for cancelling queries.
+                b'K' => self.key = body.get(..8).and_then(|key| key.try_into().ok()),
+                // ParameterStatus, notices.
                 _ => {}
             }
         }
@@ -691,6 +705,24 @@ impl Conn {
                 _ => {}
             }
         }
+    }
+
+    /// Send a CancelRequest for the query running on this connection, from a thread of its own:
+    /// it opens a new connection, and the task asking has been cancelled, so it cannot wait.
+    fn cancel_query(&self) {
+        let (Some(address), Some(key)) = (self.address, self.key) else { return };
+        let _ = std::thread::Builder::new().name("pg-cancel".into()).spawn(move || {
+            use std::io::Write;
+            let timeout = std::time::Duration::from_secs(5);
+            if let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, timeout) {
+                let mut out = Vec::with_capacity(16);
+                out.extend_from_slice(&16i32.to_be_bytes());
+                out.extend_from_slice(&80877102i32.to_be_bytes());
+                out.extend_from_slice(&key);
+                let _ = stream.set_write_timeout(Some(timeout));
+                let _ = stream.write_all(&out);
+            }
+        });
     }
 
     fn terminate(&self) {
@@ -867,11 +899,18 @@ impl Pool {
                 }
                 state.waiters.push(&node);
             }
-            while !node.signaled() && Instant::now() < deadline {
+            while !node.signaled() && Instant::now() < deadline && crate::cancel::check().is_none() {
                 fiber::park(Some(deadline));
             }
             if !node.signaled() {
-                fiber::lock(&self.state).waiters.remove(&node);
+                let mut state = fiber::lock(&self.state);
+                state.waiters.remove(&node);
+                drop(state);
+                if let Some(reason) = crate::cancel::check()
+                    && !node.signaled()
+                {
+                    return Err(Error::Broken(reason.message().to_string()));
+                }
                 if !node.signaled() {
                     return Err(Error::Broken(format!(
                         "every database connection (pool_max={}) stayed busy for {} seconds",

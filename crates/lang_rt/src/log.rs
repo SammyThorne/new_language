@@ -59,11 +59,13 @@ pub(crate) const MAX_REQUEST_ID: usize = 128;
 /// What a task carries for its log lines: the ID of the request it is handling, and the trace
 /// and span it is in (`trace.rs`), if any. They are counted, not collected, so that a thread
 /// outside the fiber runtime can hold them in a thread-local, which the collector does not
-/// scan; and three words, so that a task without a request costs little more. Tasks start with
-/// (references to) their parent's.
+/// scan; and a few words, so that a task without a request costs little more. Tasks start with
+/// (references to) their parent's, and with its deadline (`cancel.rs`).
 pub(crate) struct Context {
     request_id: Cell<Option<Arc<str>>>,
     trace: Cell<Option<Arc<TraceContext>>>,
+    /// Its deadline and whether it has been cancelled (`cancel.rs`).
+    pub(crate) cancel: crate::cancel::State,
 }
 
 /// Where a task is in a trace: the trace, the current span, whether the trace is recorded, and
@@ -79,7 +81,11 @@ pub(crate) struct TraceContext {
 impl Context {
     /// The running task's context, for a task it spawns.
     pub(crate) fn inherited() -> Context {
-        with_current(|c| Context { request_id: Cell::new(c.request_id()), trace: Cell::new(c.trace()) })
+        with_current(|c| Context {
+            request_id: Cell::new(c.request_id()),
+            trace: Cell::new(c.trace()),
+            cancel: c.cancel.inherited(),
+        })
     }
 
     fn request_id(&self) -> Option<Arc<str>> {
@@ -96,7 +102,9 @@ impl Context {
 }
 
 thread_local! {
-    static THREAD_CONTEXT: Context = const { Context { request_id: Cell::new(None), trace: Cell::new(None) } };
+    static THREAD_CONTEXT: Context = const {
+        Context { request_id: Cell::new(None), trace: Cell::new(None), cancel: crate::cancel::State::new() }
+    };
 }
 
 fn with_current<R>(f: impl FnOnce(&Context) -> R) -> R {

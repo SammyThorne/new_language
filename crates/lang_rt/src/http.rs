@@ -27,7 +27,7 @@ use crate::tls::{self, Session};
 use crate::{Str, tasks};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -409,9 +409,7 @@ impl Socket {
         let socket = Socket::with_tls(stream, None);
         if in_progress {
             loop {
-                if socket.wait(true, Deadline::At(deadline)) == Wait::TimedOut {
-                    return Err(std::io::ErrorKind::TimedOut.into());
-                }
+                socket.waited(true, Deadline::At(deadline))?;
                 if let Some(error) = socket.stream.take_error()? {
                     return Err(error);
                 }
@@ -436,6 +434,28 @@ impl Socket {
         }
     }
 
+    /// Wait as [`Socket::wait`] does: an error of kind `TimedOut` at the deadline, and a
+    /// [`crate::cancel::Cancelled`] error if the task is cancelled.
+    fn waited(&self, write: bool, deadline: Deadline) -> std::io::Result<()> {
+        match self.wait(write, deadline) {
+            Wait::Retry => Ok(()),
+            Wait::TimedOut => Err(std::io::ErrorKind::TimedOut.into()),
+            Wait::Cancelled(reason) => Err(reason.io_error()),
+        }
+    }
+
+    /// Say that the running task serves this connection, so a hang-up cancels its handlers.
+    fn owned_by_current(&self) {
+        if let (Some(source), Some(fiber)) = (self.source, fiber::current_ref()) {
+            source.set_owner(fiber);
+        }
+    }
+
+    /// Whether the peer has hung up.
+    fn hung_up(&self) -> bool {
+        self.source.is_some_and(|source| source.hung_up())
+    }
+
     /// Read some bytes, waiting until `deadline` for them. `Ok(0)` at the end of the stream;
     /// an error of kind `TimedOut` at the deadline or, with `stop_at_shutdown`, at shutdown.
     pub(crate) fn read(
@@ -454,9 +474,7 @@ impl Socket {
             if stop_at_shutdown && SHUTDOWN.load(Ordering::SeqCst) {
                 return Err(ErrorKind::TimedOut.into());
             }
-            if self.wait(false, deadline) == Wait::TimedOut {
-                return Err(ErrorKind::TimedOut.into());
-            }
+            self.waited(false, deadline)?;
         }
         loop {
             if stop_at_shutdown && SHUTDOWN.load(Ordering::SeqCst) {
@@ -472,9 +490,7 @@ impl Socket {
                     return Ok(n);
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    if self.wait(false, deadline) == Wait::TimedOut {
-                        return Err(ErrorKind::TimedOut.into());
-                    }
+                    self.waited(false, deadline)?;
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
@@ -494,9 +510,7 @@ impl Socket {
                 Ok(0) => return Err(ErrorKind::WriteZero.into()),
                 Ok(n) => bytes = &bytes[n..],
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    if self.wait(true, Deadline::After(IDLE_TIMEOUT)) == Wait::TimedOut {
-                        return Err(ErrorKind::TimedOut.into());
-                    }
+                    self.waited(true, Deadline::After(IDLE_TIMEOUT))?;
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
@@ -589,15 +603,12 @@ impl Socket {
                 }
             };
             // The session's lock is released while the task waits.
-            if self.wait(wait_for_write, deadline) == Wait::TimedOut {
-                return Err(ErrorKind::TimedOut.into());
-            }
+            self.waited(wait_for_write, deadline)?;
         }
     }
 
     /// `write_all` through the TLS session.
     fn write_tls(&self, session: &Session, mut bytes: &[u8]) -> std::io::Result<()> {
-        use std::io::ErrorKind;
         loop {
             let flushed = {
                 let mut connection = session.lock();
@@ -613,8 +624,8 @@ impl Socket {
             if flushed && bytes.is_empty() {
                 return Ok(());
             }
-            if !flushed && self.wait(true, Deadline::After(IDLE_TIMEOUT)) == Wait::TimedOut {
-                return Err(ErrorKind::TimedOut.into());
+            if !flushed {
+                self.waited(true, Deadline::After(IDLE_TIMEOUT))?;
             }
         }
     }
@@ -945,6 +956,8 @@ impl Request {
 
     pub(crate) fn set_upgraded(&mut self, id: i64) {
         self.upgraded = Some(id);
+        // A WebSocket runs as long as it runs: no deadline, and its own reads see a hang-up.
+        crate::cancel::end_request();
     }
 }
 
@@ -1509,6 +1522,7 @@ fn serve_connection(
         scanned: 0,
         out: Vec::new(),
     };
+    connection.socket.owned_by_current();
     loop {
         let mut request = match connection.read_request() {
             Ok(request) => request,
@@ -1539,22 +1553,31 @@ fn serve_connection(
         let span = if crate::trace::on() { start_span(&request) } else { None };
         // A panicking handler ends only this request, with a 500; the panic was reported
         // where it happened. Mutexes it held are released.
+        // From here a hang-up cancels the handler (`cancel.rs`).
+        crate::cancel::begin_request(connection.socket.hung_up());
         let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(code, env, handle)));
+        let cancelled = crate::cancel::end_request();
         if request.refused != 0 {
             refuse(&mut request);
         }
-        if let Some(started) = started {
-            record(&request, started, handled.is_err());
-        }
-        if let Some(span) = span {
-            end_span(span, &request, handled.is_err());
-        }
-        if handled.is_err() {
+        let mut panicked = handled.is_err();
+        if panicked {
             if let Some(me) = fiber::current() {
                 fiber::release_held(me);
             }
             crate::log::clear_request_id();
             request.responded = false;
+        }
+        if let Some(reason) = cancelled {
+            // A handler past its deadline is answered 503, whatever it did, panics included.
+            panicked &= reason != crate::cancel::Reason::Deadline;
+            cancelled_request(&mut request, reason);
+        }
+        if let Some(started) = started {
+            record(&request, started, panicked);
+        }
+        if let Some(span) = span {
+            end_span(span, &request, panicked);
         }
         if let Some(id) = request.upgraded {
             // The handler has run the WebSocket to its end; the connection is finished.
@@ -1594,6 +1617,40 @@ fn serve_connection(
         }
     }
     connection.socket.shutdown();
+}
+
+/// The body of the response to a request whose handler ran past its deadline.
+const TIMED_OUT: &[u8] = b"the request took longer than its timeout\n";
+
+/// A handler was cancelled. Past its deadline, the client gets a 503 with `Retry-After: 1` in
+/// place of whatever the handler answered; after a hang-up the connection closes once the
+/// handler's response is written (in case only one direction was closed).
+#[cold]
+#[inline(never)]
+fn cancelled_request(request: &mut Request, reason: crate::cancel::Reason) {
+    if reason == crate::cancel::Reason::ClientClosed {
+        if metrics::on() {
+            metrics::request_failed(metrics::ErrorKind::ClientClosed);
+        }
+        request.keep_alive = false;
+        return;
+    }
+    if metrics::on() {
+        metrics::request_failed(metrics::ErrorKind::Timeout);
+    }
+    if request.upgraded.is_some() {
+        return;
+    }
+    // SAFETY: the connection outlives its requests.
+    let out = unsafe { &mut (*request.connection).out };
+    out.truncate(request.out_start);
+    request.stream = None;
+    request.file = None;
+    let content_type = "text/plain; charset=utf-8";
+    write_response(out, 503, content_type, "Retry-After: 1\r\n", TIMED_OUT, request.keep_alive, request.head);
+    request.responded = true;
+    request.status = 503;
+    request.bytes = if request.head { 0 } else { TIMED_OUT.len() as u64 };
 }
 
 /// The message for a body that could not be read.
@@ -1741,8 +1798,26 @@ pub unsafe extern "C-unwind" fn lrt_http_set_route(handle: i64, route: i64) {
     let request = unsafe { request(handle) };
     request.route = (route & 0xffff).min(i64::from(metrics::UNMATCHED)) as u16;
     request.route_flags = ((route >> 16) & 0xff) as u8;
+    // The route's `timeout`: one load, and a deadline for the task only if there is one.
+    let timeout = ROUTE_TIMEOUTS[usize::from(request.route)].load(Ordering::Relaxed);
+    if timeout != 0 {
+        crate::cancel::set_timeout(timeout);
+    }
     // The route's `max_body`, from `Route.label`'s high bits.
     request.limit = (route >> 24).max(0) as u64;
+}
+
+/// Each route slot's `timeout` in nanoseconds; 0 for none.
+static ROUTE_TIMEOUTS: [AtomicU64; metrics::UNMATCHED as usize + 1] =
+    [const { AtomicU64::new(0) }; metrics::UNMATCHED as usize + 1];
+
+/// Set the `timeout` of a route's slot (from `Server.compose`): its handler's task is cancelled
+/// that long after routing, and the client answered 503. 0 for none.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_http_set_route_timeout(route: i64, nanos: i64) {
+    if let Some(slot) = ROUTE_TIMEOUTS.get((route & 0xffff) as usize) {
+        slot.store(nanos.max(0) as u64, Ordering::Relaxed);
+    }
 }
 
 /// What `lrt_http_set_route` was given, or the unmatched slot.

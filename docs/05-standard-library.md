@@ -180,6 +180,7 @@ There is no reflection and no scanning at startup.
 | `status=201` | Optional argument: the status for a successful response. The default is 200, or 204 when the handler returns nothing |
 | `tags=["todos"]`, `deprecated=True`, `errors=[404, 409]`, `security=["token"]` | Optional arguments for the API documentation (below): the operation's tags, whether it is deprecated, the error statuses it can return besides the `400` the compiler generates, and the security schemes it accepts (any one of them). The handler's docstring gives the summary (its first paragraph) and the description (the rest). They change nothing about how requests are served |
 | `max_body=10485760` | Optional argument: the largest request body the route reads, in bytes, in place of the group's or the server's (see "Request size limits") |
+| `timeout=10.0` | Optional argument: the seconds the handler may run, in place of the group's or the server's, before it is cancelled and the client answered 503 (see "Timeouts and cancellation") |
 | `@http.ws(path)` | A WebSocket endpoint (below) |
 | `server.mount(value)` | Registers every annotated method of the value's type, bound to that value |
 | `server.mount(function)` | Registers one annotated function |
@@ -225,8 +226,8 @@ resp = http.fetch("PUT", url, body, {"Authorization": token})?    # any method, 
 | `http.post_form(url, fields, headers={})` | `POST` the `(name, value)` pairs as a form body (`application/x-www-form-urlencoded`), as OAuth token endpoints expect |
 | `http.ClientResponse` | `status`, `body: bytes`, `ok()`, `header(name) -> str?` (a header sent several times, such as `Set-Cookie`, is its values joined by newlines), `text() -> Result[str]`, `json() -> Result[json.Value]` |
 | `http.decode_json[T](response)` | The body decoded into `T` |
-| `timeout=` | `http.fetch(..., timeout=datetime.seconds(5))` bounds the whole exchange, from connecting to the last byte; 30 seconds by default |
-| `http.ClientError` | No response: unreachable host, timeout (30 seconds unless the call sets one), connection closed early, an untrusted TLS certificate, or a URL that is not `http://` or `https://`. Returned from a handler with `?`, it becomes a 502 |
+| `timeout=`, `connect_timeout=` | `http.fetch(..., timeout=datetime.seconds(5))` bounds the whole exchange, from connecting to the last byte; 30 seconds by default. `connect_timeout=datetime.seconds(2)` bounds connecting alone, within that. The error says which expired: ``timed out connecting to 10.0.0.9:80 (connect_timeout=2s)`` |
+| `http.ClientError` | No response: unreachable host, timeout (30 seconds unless the call sets one), connection closed early, an untrusted TLS certificate, a URL that is not `http://` or `https://`, or a cancelled task (`cancelled: the request's deadline passed`). Returned from a handler with `?`, it becomes a 502 |
 
 One request per connection, HTTP/1.1 (D77). `https://` URLs use TLS and check the server's certificate against the Mozilla root store built into the program, plus the certificates in the file named by `SSL_CERT_FILE` if it is set (D79).
 
@@ -326,8 +327,8 @@ def remove(self, id: int): ...
 |---|---|
 | `http.Server()` | Creates a server with an empty router |
 | `server.mount(value_or_function, prefix="")` | Registers annotated routes (above) |
-| `server.get/post/put/patch/delete/head/options(path, handler)` | Register one route in call style; `post`, `put`, `patch` and `delete` take `max_body=` |
-| `server.route(method, path, handler, max_body=0)` | General form |
+| `server.get/post/put/patch/delete/head/options(path, handler)` | Register one route in call style; `post`, `put`, `patch` and `delete` take `max_body=`, and `get`, `post`, `put`, `patch` and `delete` take `timeout=` |
+| `server.route(method, path, handler, max_body=0, timeout=0.0)` | General form |
 | `server.group(prefix)` | Returns a sub-router sharing a prefix and its own middleware |
 | `server.use(middleware)` | Middleware has the type `def(http.Request, http.Handler) -> Result[http.Response]` |
 | `http.request_log(skip=[], trace=False)` | Middleware that gives each request an ID and logs one line when it is answered: `GET /photos/7 200` with the fields `method`, `path` (without the query string), `status`, `ms`, `route` (the pattern of the route that took it, when one did) and, for a request from a connection, `client` (`req.client_ip()`); `error` for a 5xx, otherwise `info`. The ID is the client's `X-Request-Id` when it is 1 to 128 ASCII letters, digits, `.`, `_` and `-`, otherwise a new one; it is sent back in `X-Request-Id` (error responses included), kept as the request local `"request_id"`, and carried by log lines (see "Logging"). Paths in `skip` get neither, and nor do `server.health`'s routes. Add it first, so it times the other middleware too. A handler that panics gets no line: the panic is reported instead. With `trace=True`, it also turns tracing on from the environment (see "Traces"), and its lines carry `trace_id` and `span_id` |
@@ -345,14 +346,16 @@ def remove(self, id: int): ...
 | `server.metrics(path="/metrics", dashboard=True, user=None, password=None, public=False)` | Serves the metrics in the Prometheus text format, and a dashboard at `path + "/dashboard"`, behind HTTP Basic authentication; see "Metrics and health" |
 | `server.health(live="/healthz", ready="/readyz", checks={})` | Liveness and readiness routes for a load balancer; see "Metrics and health" |
 | `server.drain_delay` | Seconds to go on serving after SIGTERM, with readiness failing, before closing; 0 by default |
+| `server.timeout`, `group.timeout` | Seconds a handler may run before it is cancelled and the client answered 503; 0 (the default) for no limit. A route's `timeout=` comes first, then its group's, then the server's. See "Timeouts and cancellation" |
 | `server.max_files`, `server.max_fields`, `server.max_part_headers`, `server.upload_dir` | Limits on a form: 10 files and 1000 text fields (else 413), 8 KiB of headers in one multipart part (else 400); the directory where files over 1 MiB wait while the request is handled (`""`, the default, for the system's temporary directory). See "Forms and uploads" |
 | `http.Handler` | `def(http.Request) -> Result[http.Response]` |
-| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `query_string() -> str` (as sent, without `?`), `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes` (any bytes, for binary uploads), `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr() -> str` (the connection's other end, `host:port`), `client_ip() -> str` (the client's address without a port: through `server.trusted_proxies`, the rightmost address in `X-Forwarded-For` that is not one of them, so a client cannot choose it; otherwise the connection's; `""` for a test request); `form() -> Result[http.FormData]` (see "Forms and uploads"); `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13); `route() -> str` is the pattern of the route that took the request (`/todos/{id}`), `""` before routing or when none did |
+| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `query_string() -> str` (as sent, without `?`), `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes` (any bytes, for binary uploads), `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr() -> str` (the connection's other end, `host:port`), `client_ip() -> str` (the client's address without a port: through `server.trusted_proxies`, the rightmost address in `X-Forwarded-For` that is not one of them, so a client cannot choose it; otherwise the connection's; `""` for a test request); `form() -> Result[http.FormData]` (see "Forms and uploads"); `deadline() -> datetime.DateTime?` and `cancelled() -> bool` (see "Timeouts and cancellation"); `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13); `route() -> str` is the pattern of the route that took the request (`/todos/{id}`), `""` before routing or when none did |
 | `http.Response` | `status`, `headers`, `body`; built with `http.text`, `http.json`, `http.binary(data, content_type="application/octet-stream", status=200)` (a body of any bytes), `http.error`, `http.redirect`, `http.no_content`; `body_bytes()` is the body as sent, for tests. `with_header(name, value)` sets a header; `add_header(name, value)` adds another value, sent as its own line (in `headers`, the values are joined by newlines) |
 | `response.set_cookie(name, value, max_age=-1, path="/", http_only=True, secure=False, same_site="Lax")` | Adds a `Set-Cookie` header; any number per response. Characters a cookie cannot hold, and `%`, are sent as `%XX`, which `req.cookie` decodes. `__Host-` and `__Secure-` cookies, and `same_site="None"`, are always `Secure`. An invalid name, path or `same_site` is a bug and panics (a 500). `delete_cookie(name, path="/")` expires one; `response.cookie(name) -> str?` reads one back, for tests |
 | `http.url_encode(text)`, `http.url_decode(text, plus_is_space=True) -> str?`, `http.form_encode([(name, value), ...])` | Percent-encoding: everything but ASCII letters, digits and `-._~` as `%XX` of its UTF-8 bytes. `form_encode` makes a query string or an `application/x-www-form-urlencoded` body |
 | `http.test_request(method, path, body="", headers={}, form={}, files={})` | A request without a connection, for `server.handle(...)` in tests. A query string on `path` is what `query` reads; `headers` are what `header` and `cookie` read. `form` (`dict[str, str]`) sends text fields as an urlencoded body; with `files` (`dict[str, http.Upload]`, each made by `http.test_file(filename, content, content_type="application/octet-stream")`), a multipart form |
 | `http.Error` | An `Error` carrying a status code |
+| `http.check_cancelled() -> Result[None, http.HttpError]` | An error if the running task has been cancelled: a 503 past its deadline, a 499 after its client hung up. For loops that never wait (see "Timeouts and cancellation") |
 
 ### Request size limits (docs/14, milestone 11)
 
@@ -410,6 +413,38 @@ def handler(req: http.Request) -> Result[http.Response]:   # or by hand
 - **Lenient where browsers and libraries differ.** Lines may end in a lone LF as well as CRLF, a boundary line may have trailing spaces, a preamble before the first boundary is ignored, and a quoted file name may hold unescaped backslashes (a Windows path, as some browsers send). A line that only starts like the boundary (`--boundaryX`) is data.
 - **The API documentation** shows such routes with a `multipart/form-data` request body (and `application/x-www-form-urlencoded` when there are no files): `T`'s schema for the text fields and `{"type": "string", "format": "binary"}` for each file, an array of them for a list. The page's "Try it out" has a file input for each file and sends the form as the browser would.
 - **Test requests.** `http.test_request("POST", "/profile", form={"name": "Ada", "age": "36"}, files={"photo": http.test_file("me.jpg", data, content_type="image/jpeg")})` sends a form without a connection; a multipart body can also be given whole with `body=` and its `Content-Type` header. Test requests keep every file in memory, and use `max_files` and the other limits once the server has composed its routes.
+
+### Timeouts and cancellation (docs/14, milestone 13)
+
+```python
+server.timeout = 30.0                                     # every route; none by default
+api = server.group("/api")
+api.timeout = 5.0                                         # this group's routes
+server.get("/report", report, timeout=60.0)               # one route
+
+@http.get("/search", timeout=2.5)
+def search(q: str) -> Result[list[Hit], http.HttpError]:
+    return engine.query(q)                                # a query past 2.5 s fails, and the client gets a 503
+
+def export(req: http.Request) -> Result[http.Response]:
+    for row in rows:                                      # a loop that never waits
+        http.check_cancelled()?
+        ...
+```
+
+- **At the deadline** the handler's task is cancelled and the client gets a **503** with `Retry-After: 1` and the text body `the request took longer than its timeout`, whatever the handler then returns. It is counted as `http_request_errors_total{kind="timeout"}`, and `http.request_log` logs the 503. The deadline starts when the route is chosen.
+- **Cancellation stops waits, not code.** A cancelled task's next wait fails at once, and so does one it is in:
+  - socket reads and writes, so `http.fetch` and `postgres` queries fail with `cancelled: the request's deadline passed`. A cancelled query's connection is closed, and the server is asked to stop the query (a PostgreSQL CancelRequest);
+  - `ch.recv()` returns `None`, as from a closed channel;
+  - `time.sleep` returns early;
+  - waiting for a database connection from the pool fails.
+
+  Handlers written with `?` then return by themselves. Sending on a full channel, `lock()` and `task.join()` are not interrupted: they cannot fail. A loop that never waits is not interrupted either; `http.check_cancelled()?` ends it.
+- **A client that hangs up** while its handler runs cancels the handler the same way (`cancelled: the client closed the connection`; `check_cancelled` gives a 499). It is counted as `http_request_errors_total{kind="client_closed"}`. Requests pipelined behind the running one are not a hang-up. A client that closes only its sending side after a request (an HTTP/1.0 habit) counts as gone, as in Go; it still gets the response.
+- **Tasks the handler spawns** have its deadline: their waits fail at the same moment. They are not cancelled when the client hangs up.
+- **`req.deadline()`** gives the deadline as a `datetime.DateTime`, or `None` without one; **`req.cancelled()`** says whether the handler has been cancelled.
+- **Not covered:** WebSocket handlers (a timeout applies until the upgrade, and none after it), and requests made with `server.handle(http.test_request(...))`, which have no deadline.
+- **Cost.** A request on a route without a timeout pays one load; each wait, one load of the task's state.
 
 ### Error mapping
 
@@ -902,7 +937,7 @@ What is recorded:
 | `http_response_size_bytes` | summary | `method`, `route` | `_sum` and `_count` of body bytes sent (none for `HEAD` and 304) |
 | `http_requests_in_flight`, `http_connections_open` | gauge | | |
 | `http_connections_total` | counter | | Accepted since recording began |
-| `http_request_errors_total` | counter | `kind` | `panic` (a handler panicked: a 500), `timeout` (a client too slow to send its request: 408), `parse` (400, 505), `too_large` (a body past its limit: 413, which is also counted as a request; a head too large: 414, 431) |
+| `http_request_errors_total` | counter | `kind` | `panic` (a handler panicked: a 500), `timeout` (a client too slow to send its request: 408; or a handler past its route's timeout: 503, also counted as a request), `parse` (400, 505), `too_large` (a body past its limit: 413, which is also counted as a request; a head too large: 414, 431), `client_closed` (a client that hung up while its handler ran) |
 | `process_start_time_seconds`, `process_resident_memory_bytes`, `process_cpu_seconds_total` | gauge, gauge, counter | | From `/proc` |
 | `runtime_heap_bytes`, `runtime_gc_collections_total` | gauge, counter | | From the collector |
 | `runtime_tasks`, `runtime_worker_threads` | gauge | | |
@@ -1006,7 +1041,7 @@ def with_timeout():
 
 What may be passed to `spawn`, sent on a channel or put in a `Mutex` is checked at compile time ([04](04-runtime-and-memory.md#data-race-prevention)); in the example above `Page` must be a `@frozen` struct.
 
-Cancellation is not in the prototype. The intended design is a deadline carried by the request and checked by waiting operations, similar in purpose to Go's `context` but implicit.
+A request's deadline and cancellation are carried by the task, not passed around: see "Timeouts and cancellation" under HTTP. Inside a cancelled task, `recv` returns `None` and `time.sleep` returns early.
 
 ## What lives where
 
