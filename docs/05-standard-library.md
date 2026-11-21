@@ -184,7 +184,8 @@ resp = http.fetch("PUT", url, body, {"Authorization": token})?    # any method, 
 | Item | Shape |
 |---|---|
 | `http.get(url)`, `http.post(url, body, content_type="application/json")`, `http.fetch(method, url, body="", headers={})` | Send a request and wait for the whole response. A task waiting here parks; it does not hold a worker |
-| `http.ClientResponse` | `status`, `body: bytes`, `ok()`, `header(name) -> str?`, `text() -> Result[str]`, `json() -> Result[json.Value]` |
+| `http.post_form(url, fields, headers={})` | `POST` the `(name, value)` pairs as a form body (`application/x-www-form-urlencoded`), as OAuth token endpoints expect |
+| `http.ClientResponse` | `status`, `body: bytes`, `ok()`, `header(name) -> str?` (a header sent several times, such as `Set-Cookie`, is its values joined by newlines), `text() -> Result[str]`, `json() -> Result[json.Value]` |
 | `http.decode_json[T](response)` | The body decoded into `T` |
 | `http.ClientError` | No response: unreachable host, timeout (30 seconds), connection closed early, an untrusted TLS certificate, or a URL that is not `http://` or `https://`. Returned from a handler with `?`, it becomes a 502 |
 
@@ -296,8 +297,11 @@ def remove(self, id: int): ...
 | `http.bearer(...)`, `http.basic_auth(...)`, `http.api_key(name, cookie=False, ...)` | `http.SecurityScheme` values, for `docs(security=...)` |
 | `server.listen(addr)` | Blocks, serving until shutdown. Options: read and write timeouts, maximum header and body sizes, graceful shutdown on SIGTERM |
 | `http.Handler` | `def(http.Request) -> Result[http.Response]` |
-| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `header(name) -> str?`, `body() -> bytes`, `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr` |
-| `http.Response` | `status`, `headers`, `body`; built with `http.text`, `http.json`, `http.bytes`, `http.error`, `http.redirect`, `http.no_content` |
+| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes`, `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr`; `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13) |
+| `http.Response` | `status`, `headers`, `body`; built with `http.text`, `http.json`, `http.bytes`, `http.error`, `http.redirect`, `http.no_content`. `with_header(name, value)` sets a header; `add_header(name, value)` adds another value, sent as its own line (in `headers`, the values are joined by newlines) |
+| `response.set_cookie(name, value, max_age=-1, path="/", http_only=True, secure=False, same_site="Lax")` | Adds a `Set-Cookie` header; any number per response. Characters a cookie cannot hold, and `%`, are sent as `%XX`, which `req.cookie` decodes. `__Host-` and `__Secure-` cookies, and `same_site="None"`, are always `Secure`. An invalid name, path or `same_site` is a bug and panics (a 500). `delete_cookie(name, path="/")` expires one; `response.cookie(name) -> str?` reads one back, for tests |
+| `http.url_encode(text)`, `http.url_decode(text, plus_is_space=True) -> str?`, `http.form_encode([(name, value), ...])` | Percent-encoding: everything but ASCII letters, digits and `-._~` as `%XX` of its UTF-8 bytes. `form_encode` makes a query string or an `application/x-www-form-urlencoded` body |
+| `http.test_request(method, path, body="", headers={})` | A request without a connection, for `server.handle(...)` in tests. A query string on `path` is what `query` reads; `headers` are what `header` and `cookie` read |
 | `http.Error` | An `Error` carrying a status code |
 
 ### Error mapping

@@ -1037,6 +1037,81 @@ fn percent_decode(text: &str, plus_is_space: bool) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// `%XX` for every byte `keep` refuses, upper-case hex.
+fn percent_encode(text: &str, keep: impl Fn(u8) -> bool) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(text.len());
+    for &b in text.as_bytes() {
+        if keep(b) {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 15) as usize] as char);
+        }
+    }
+    out
+}
+
+/// RFC 3986's unreserved characters, which `url_encode` leaves as they are.
+fn unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
+}
+
+/// What a cookie value may hold unescaped (RFC 6265's `cookie-octet`), less `%`, which starts
+/// an escape.
+fn cookie_octet(b: u8) -> bool {
+    matches!(b, 0x21 | 0x23..=0x24 | 0x26..=0x2B | 0x2D..=0x3A | 0x3C..=0x5B | 0x5D..=0x7E)
+}
+
+/// `http.url_encode`: every byte but the unreserved characters as `%XX`.
+///
+/// # Safety
+/// `ptr` and `len` describe a UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_url_encode(ptr: *const u8, len: i64) -> Str {
+    let text = unsafe { Str::from_raw(ptr, len) };
+    Str::from_bytes(percent_encode(text, unreserved).as_bytes())
+}
+
+/// `http.url_decode`: `%XX` escapes decoded, and `+` as a space when `plus_is_space` is not 0;
+/// `None` if an escape is malformed or the result is not UTF-8.
+///
+/// # Safety
+/// `ptr` and `len` describe a UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_url_decode(ptr: *const u8, len: i64, plus_is_space: i64) -> Str {
+    let text = unsafe { Str::from_raw(ptr, len) };
+    optional(percent_decode(text, plus_is_space != 0).as_deref())
+}
+
+/// A cookie value as `Set-Cookie` may carry it: bytes it cannot hold, and `%`, as `%XX`.
+///
+/// # Safety
+/// `ptr` and `len` describe a UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_cookie_encode(ptr: *const u8, len: i64) -> Str {
+    let text = unsafe { Str::from_raw(ptr, len) };
+    Str::from_bytes(percent_encode(text, cookie_octet).as_bytes())
+}
+
+/// The first parameter called `name` in a query string, decoded: for test requests, whose
+/// query string is not in a connection's buffer.
+///
+/// # Safety
+/// Both pointer and length pairs describe UTF-8 strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_query_value(
+    query_ptr: *const u8,
+    query_len: i64,
+    name_ptr: *const u8,
+    name_len: i64,
+) -> Str {
+    let query = unsafe { Str::from_raw(query_ptr, query_len) };
+    let name = unsafe { Str::from_raw(name_ptr, name_len) };
+    optional(query_value(query, name).as_deref())
+}
+
 fn reason(status: i64) -> &'static str {
     match status {
         200 => "OK",
@@ -1443,5 +1518,14 @@ mod tests {
         assert_eq!(percent_decode("a+b", false).as_deref(), Some("a+b"));
         assert_eq!(percent_decode("%zz", true), None);
         assert_eq!(percent_decode("%C3%A9", false).as_deref(), Some("é"));
+    }
+
+    #[test]
+    fn percent_encoding() {
+        assert_eq!(percent_encode("a b&c=d/é~", unreserved), "a%20b%26c%3Dd%2F%C3%A9~");
+        assert_eq!(percent_decode(&percent_encode("a+b %", unreserved), true).as_deref(), Some("a+b %"));
+        // Cookie values keep everything a cookie may hold, and escape the rest and `%`.
+        assert_eq!(percent_encode("ab.c-_=/:", cookie_octet), "ab.c-_=/:");
+        assert_eq!(percent_encode("a b;c,d\"%é", cookie_octet), "a%20b%3Bc%2Cd%22%25%C3%A9");
     }
 }

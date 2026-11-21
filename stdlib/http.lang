@@ -57,6 +57,18 @@ def req_body(handle: int) -> str?
 @extern("lrt_http_respond")
 def respond_raw(handle: int, status: int, content_type: str, headers: str, body: str)
 
+@extern("lrt_http_url_encode")
+def url_encode_raw(text: str) -> str
+
+@extern("lrt_http_url_decode")
+def url_decode_raw(text: str, plus_is_space: int) -> str?
+
+@extern("lrt_http_cookie_encode")
+def cookie_encode_raw(text: str) -> str
+
+@extern("lrt_http_query_value")
+def query_value_raw(query: str, name: str) -> str?
+
 @extern("lrt_io_error")
 def last_error() -> str
 
@@ -138,7 +150,20 @@ pub struct Request:
     path: str
     priv handle: int = -1
     priv params: dict[str, str] = {}
-    priv body_text: str? = None
+    # What no connection holds: a test request's parts, and the values middleware stored.
+    # `None` until needed, so a request that uses neither is no bigger for them.
+    priv extra: RequestExtra? = None
+
+struct RequestExtra:
+    # A test request's body, query string and headers; `None` for a request from a connection.
+    test: TestParts?
+    locals: dict[str, str]?
+
+struct TestParts:
+    body: str
+    query: str
+    # Names lower-cased.
+    headers: dict[str, str]
 
 impl Request:
     def param(self, name: str) -> str:
@@ -163,30 +188,70 @@ impl Request:
     def param_bool(self, name: str) -> Result[bool, HttpError]:
         return parse_bool(self.param(name), f"path parameter `{name}`")
 
+    priv def test_parts(self) -> TestParts?:
+        match self.extra:
+            case Some(extra):
+                return extra.test
+            case None:
+                return None
+
     def query(self, name: str) -> str?:
         """A query parameter (`?name=value`), decoded, or `None`."""
         if self.handle < 0:
-            return None
+            match self.test_parts():
+                case Some(parts):
+                    return query_value_raw(parts.query, name)
+                case None:
+                    return None
         return req_query(self.handle, name)
 
     def header(self, name: str) -> str?:
         """A header's value, or `None`. Header names are case-insensitive."""
         if self.handle < 0:
-            return None
+            match self.test_parts():
+                case Some(parts):
+                    return parts.headers.get(name.lower())
+                case None:
+                    return None
         return req_header(self.handle, name)
 
-    def text(self) -> Result[str, HttpError]:
-        """The body as text; a 400 error if it is not UTF-8."""
-        match self.body_text:
-            case Some(text):
-                return text
+    def set_local(self, name: str, value: str):
+        """Keep a value with this request, for the handlers and middleware after this one:
+        middleware that works out who is asking stores it here, as Express's `res.locals` and
+        Starlette's `request.state` do."""
+        match self.extra:
+            case Some(extra):
+                match extra.locals:
+                    case Some(values):
+                        values[name] = value
+                    case None:
+                        extra.locals = {name: value}
             case None:
-                pass
+                self.extra = RequestExtra(None, {name: value})
+
+    def local(self, name: str) -> str?:
+        """A value stored with `set_local`, or `None`."""
+        match self.extra:
+            case Some(extra):
+                match extra.locals:
+                    case Some(values):
+                        return values.get(name)
+                    case None:
+                        return None
+            case None:
+                return None
+
+    def text(self) -> Result[str, HttpError]:
+        """The body as text; a 400 error if it is not UTF-8. Each call reads it from the
+        connection's buffer again, so keep the result rather than calling it twice."""
         if self.handle < 0:
-            return ""
+            match self.test_parts():
+                case Some(parts):
+                    return parts.body
+                case None:
+                    return ""
         match req_body(self.handle):
             case Some(text):
-                self.body_text = text
                 return text
             case None:
                 return Err(HttpError(400, "the request body is not UTF-8 text"))
@@ -207,13 +272,18 @@ impl Request:
         return req_remote(self.handle)
 
     def cookie(self, name: str) -> str?:
-        """A cookie sent with the request (from its `Cookie` header), or `None`."""
+        """A cookie sent with the request (from its `Cookie` header), or `None`. `%XX` escapes
+        are decoded, undoing what `Response.set_cookie` does to characters a cookie cannot
+        hold; a value with a malformed escape is returned as it was sent."""
         match self.header("Cookie"):
             case Some(text):
                 for pair in text.split(";"):
                     parts = pair.strip().split("=")
                     if len(parts) >= 2 and parts[0] == name:
-                        return "=".join(parts[1:])
+                        value = "=".join(parts[1:])
+                        if "%" not in value:
+                            return value
+                        return url_decode_raw(value, 0).unwrap_or(value)
                 return None
             case None:
                 return None
@@ -267,10 +337,16 @@ pub def cookie_param_opt(req: Request, name: str) -> Result[Cookie?, HttpError]:
         case None:
             return Ok(None)
 
-pub def test_request(method: str, path: str, body: str = "") -> Request:
-    """A request that is not from a connection, for calling `server.handle(...)` in tests."""
-    request = Request(method, path)
-    request.body_text = body
+pub def test_request(method: str, path: str, body: str = "", headers: dict[str, str] = {}) -> Request:
+    """A request that is not from a connection, for calling `server.handle(...)` in tests.
+    `path` may end in a query string (`"/items?limit=5"`), which `query` reads; `headers` are
+    what `header` and `cookie` read, with names in any case."""
+    before, _mark, after = path.partition("?")
+    lowered: dict[str, str] = {}
+    for name, value in headers.items():
+        lowered[name.lower()] = value
+    request = Request(method, before)
+    request.extra = RequestExtra(TestParts(body, after, lowered), None)
     return request
 
 def parse_bool(text: str, what: str) -> Result[bool, HttpError]:
@@ -354,9 +430,82 @@ pub struct Response:
 
 impl Response:
     def with_header(self, name: str, value: str) -> Response:
-        """Add a header, and return the response for chaining."""
+        """Set a header, replacing any value it had, and return the response for chaining."""
         self.headers[name] = value
         return self
+
+    def add_header(self, name: str, value: str) -> Response:
+        """Add a header, keeping any it already has: the header is sent once per value. In
+        `headers`, the values are joined by newlines."""
+        match self.headers.get(name):
+            case Some(existing):
+                self.headers[name] = existing + "\n" + value
+            case None:
+                self.headers[name] = value
+        return self
+
+    def set_cookie(
+        self,
+        name: str,
+        value: str,
+        max_age: int = -1,
+        path: str = "/",
+        http_only: bool = True,
+        secure: bool = False,
+        same_site: str = "Lax",
+    ) -> Response:
+        """Set a cookie (a `Set-Cookie` header); any number can be set on one response.
+        Characters a cookie cannot hold (spaces, `;`, `,`, `"`, `\\`, non-ASCII) and `%` are
+        sent as `%XX`, which `req.cookie` decodes. `max_age` is in seconds; -1 makes a cookie
+        that ends with the browser session. Scripts cannot read it unless `http_only=False`.
+        `same_site` is `"Lax"`, `"Strict"`, `"None"` or `""` to leave it out. A cookie named
+        `__Host-...` or `__Secure-...`, or with `same_site="None"`, is always `Secure`, as
+        browsers require."""
+        check_cookie_name(name)
+        if same_site != "Lax" and same_site != "Strict" and same_site != "None" and same_site != "":
+            panic(f"`same_site` must be \"Lax\", \"Strict\", \"None\" or \"\", not {same_site!r}")
+        if ";" in path or "\n" in path or "\r" in path:
+            panic(f"a cookie's path cannot contain `;` or a line break: {path!r}")
+        if name.starts_with("__Host-") and path != "/":
+            panic(f"a `__Host-` cookie must have the path \"/\", not {path!r}")
+        parts = [name + "=" + cookie_encode_raw(value)]
+        if path != "":
+            parts.append("Path=" + path)
+        if max_age >= 0:
+            parts.append(f"Max-Age={max_age}")
+        if http_only:
+            parts.append("HttpOnly")
+        if secure or same_site == "None" or name.starts_with("__Host-") or name.starts_with("__Secure-"):
+            parts.append("Secure")
+        if same_site != "":
+            parts.append("SameSite=" + same_site)
+        return self.add_header("Set-Cookie", "; ".join(parts))
+
+    def delete_cookie(self, name: str, path: str = "/") -> Response:
+        """Tell the browser to forget a cookie: the same name and path, expired now."""
+        return self.set_cookie(name, "", 0, path, True, False, "Lax")
+
+    def cookie(self, name: str) -> str?:
+        """The value this response sets for the cookie `name`, decoded, or `None`: for tests."""
+        match self.headers.get("Set-Cookie"):
+            case Some(lines):
+                for line in lines.split("\n"):
+                    first, _mark, _rest = line.partition(";")
+                    key, equals, value = first.partition("=")
+                    if equals == "=" and key == name:
+                        return url_decode_raw(value, 0).unwrap_or(value)
+                return None
+            case None:
+                return None
+
+def check_cookie_name(name: str):
+    # RFC 6265: a token, so no separators, spaces or control characters.
+    if name == "":
+        panic("a cookie needs a name")
+    for c in name:
+        code = ord(c)
+        if code <= 32 or code >= 127 or c in "()<>@,;:\\\"/[]?={}":
+            panic(f"{name!r} is not a valid cookie name: use letters, digits and `-_.!#$%&'*+^`|~`")
 
 pub def text(body: str, status: int = 200) -> Response:
     return Response(status, body, "text/plain; charset=utf-8")
@@ -377,6 +526,27 @@ pub def redirect(location: str, status: int = 302) -> Response:
 
 pub def no_content() -> Response:
     return Response(204, "", "")
+
+# ---- encoding -----------------------------------------------------------------------------
+
+pub def url_encode(text: str) -> str:
+    """`text` with every character but ASCII letters, digits and `-._~` written as `%XX`, byte
+    by byte in UTF-8: safe in a query string, a form body or a path segment."""
+    return url_encode_raw(text)
+
+pub def url_decode(text: str, plus_is_space: bool = True) -> str?:
+    """`%XX` escapes decoded, and `+` as a space unless `plus_is_space=False` (it is a space in
+    query strings and form bodies, not in paths). `None` if an escape is malformed or the
+    result is not UTF-8."""
+    return url_decode_raw(text, 1 if plus_is_space else 0)
+
+pub def form_encode(fields: list[tuple[str, str]]) -> str:
+    """Name and value pairs as `a=1&b=2`, each part `url_encode`d: a query string, or an
+    `application/x-www-form-urlencoded` body. A list keeps the order and allows a name twice."""
+    parts: list[str] = []
+    for name, value in fields:
+        parts.append(url_encode_raw(name) + "=" + url_encode_raw(value))
+    return "&".join(parts)
 
 # ---- routing ------------------------------------------------------------------------------
 
@@ -700,7 +870,13 @@ impl Server:
             if len(response.headers) > 0:
                 header_lines: list[str] = []
                 for name, value in response.headers.items():
-                    header_lines.append(f"{name}: {value}\r\n")
+                    if "\n" in value or "\r" in value:
+                        # Several values (`add_header`, `set_cookie`): one line each. A line
+                        # break can never start a header of another name.
+                        for line in value.replace("\r", "").split("\n"):
+                            header_lines.append(f"{name}: {line}\r\n")
+                    else:
+                        header_lines.append(f"{name}: {value}\r\n")
                 headers = "".join(header_lines)
             respond_raw(handle, response.status, response.content_type, headers, response.body)
         __http_serve(self.listener, serve_one)
@@ -1186,7 +1362,8 @@ impl ClientResponse:
         return self.status >= 200 and self.status < 300
 
     def header(self, name: str) -> str?:
-        """A response header; names are case-insensitive."""
+        """A response header; names are case-insensitive. A header sent several times, such as
+        `Set-Cookie`, is its values joined by newlines."""
         return self.headers.get(name.lower())
 
     def text(self) -> Result[str, ClientError]:
@@ -1217,7 +1394,7 @@ pub def decode_json[T: FromJson](response: ClientResponse) -> Result[T, ClientEr
 
 pub def fetch(method: str, url: str, body: str = "", headers: dict[str, str] = {}) -> Result[ClientResponse, ClientError]:
     """Send a request and wait for the whole response. A task waiting here does not hold a
-    worker. Only `http://` URLs are supported for now."""
+    worker. `https://` URLs use TLS, checking the server's certificate."""
     lines = ""
     for name, value in headers.items():
         lines = lines + f"{name}: {value}\r\n"
@@ -1228,7 +1405,13 @@ pub def fetch(method: str, url: str, body: str = "", headers: dict[str, str] = {
     for line in client_headers().split("\n"):
         parts = line.split(": ")
         if len(parts) >= 2:
-            parsed[parts[0]] = ": ".join(parts[1:])
+            value = ": ".join(parts[1:])
+            # A header sent several times (`Set-Cookie`) keeps every value, one per line.
+            match parsed.get(parts[0]):
+                case Some(earlier):
+                    parsed[parts[0]] = earlier + "\n" + value
+                case None:
+                    parsed[parts[0]] = value
     return ClientResponse(status, __bytes(client_body()), parsed, url)
 
 pub def get(url: str) -> Result[ClientResponse, ClientError]:
@@ -1238,6 +1421,13 @@ pub def get(url: str) -> Result[ClientResponse, ClientError]:
 pub def post(url: str, body: str, content_type: str = "application/json") -> Result[ClientResponse, ClientError]:
     """`POST url` with a body."""
     return fetch("POST", url, body, {"Content-Type": content_type})
+
+pub def post_form(url: str, fields: list[tuple[str, str]], headers: dict[str, str] = {}) -> Result[ClientResponse, ClientError]:
+    """`POST url` with the fields as an HTML form would send them
+    (`application/x-www-form-urlencoded`), as OAuth token endpoints expect."""
+    all_headers = headers.copy()
+    all_headers["Content-Type"] = "application/x-www-form-urlencoded"
+    return fetch("POST", url, form_encode(fields), all_headers)
 
 # ---- adapters for annotated routes --------------------------------------------------------
 

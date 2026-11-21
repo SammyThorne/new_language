@@ -986,6 +986,22 @@ Milestone 5 of the [OpenAPI plan](12-openapi-docs-plan.md), which finishes it.
 
 **Tags.** `http.Tag(name, description)` values in `docs(tags=[...])` become the document's `tags`, in the order given, which the page follows for its groups (tags not listed come after, in order of first use).
 
+### D100. Cookies, URL encoding, test requests with headers, and request locals (Google sign-in plan, milestone 1)
+
+Milestone 1 of the [Google sign-in plan](13-google-oauth-plan.md): what `http` lacked for an OAuth flow, each useful on its own.
+
+**Several values of one header are lines of one dict entry.** `Response.headers` stays a `dict[str, str]`; `add_header` joins a second value with a newline, and `serve` writes each line as its own header. This is how `set_cookie` sets any number of cookies on one response (the sign-in callback sets one and clears another), with no new field on `Response`, so responses that set no cookie cost what they did. Splitting on line breaks also means a value with a line break in it can no longer start a header of another name, which `with_header` used to allow. The client keeps repeated response headers the same way, where the last one used to win. A separate `cookies: list[str]` field was dropped: it would be allocated for every response.
+
+**Cookie values are percent-encoded where they must be.** `set_cookie` sends a value as it is when every character is one a cookie may hold (RFC 6265's `cookie-octet`), so tokens, base64url and plain words are unchanged; anything else, and `%`, becomes `%XX`. `req.cookie` decodes `%XX` (a malformed escape is returned as sent). Express encodes every value; Go drops the characters it cannot send. An invalid name, path or `same_site` is a programming error and panics, which a handler turns into a 500 (D64). `__Host-` and `__Secure-` cookies, and `SameSite=None`, are always `Secure`, since browsers drop them otherwise.
+
+**Encoding in the runtime.** `url_encode` keeps RFC 3986's unreserved characters and encodes every other byte, so its output is safe in a query string, a form body and a path segment; `url_decode` is the runtime's existing decoder, which the request parser already used. `form_encode` takes a list of pairs, which keeps the order and allows a name twice, and `post_form` sends one.
+
+**Test requests.** `test_request(method, path, body="", headers={})` splits a query string off `path`, and `query`, `header`, `cookie` and `text` read the test's values. Before, a test request with a query string was routed with the query in its path, and a 404.
+
+**Request locals.** `req.set_local(name, value)` and `req.local(name)` keep strings with the request, as the sign-in session needs; typed values would need a type parameter on `Request` or a dynamic type, and JSON text covers the cases so far.
+
+**`Request` is no bigger.** A test request's parts and the locals live in one optional `extra` field, made only when a test or a middleware needs it. A first version added two fields, and the HTTP benchmark's counts caught it: 16 more bytes per request on `/plaintext` and `/json` (+6.7%), since the collector rounds objects up to 16 bytes. The single field took the place of the cached body text, `body_text: str?`, so `Request` shrank back to its old size and the counts are unchanged. The price is that `req.text()` on a real request reads the connection's buffer again on each call instead of returning a cached copy. Handlers read the body once (`http.body[T]`, `req.json()` and a `Json` parameter each call it once), and the docstring says to keep the result.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

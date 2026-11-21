@@ -1,0 +1,130 @@
+# Cookies, URL and form encoding, test requests with headers and a query string, and values
+# middleware keeps with a request (docs/13, milestone 1).
+# expect: a%20b%26c%3Dd%2F%C3%A9~ | a b&c=d/é~
+# expect: a+b | a b | None
+# expect: q=caf%C3%A9%20%26%20cr%C3%A8me&q=2&empty=
+# expect: theme=dark; Path=/; HttpOnly; SameSite=Lax
+# expect: sid=a%20b%3Bc; Path=/app; Max-Age=60; HttpOnly; Secure; SameSite=Strict
+# expect: __Host-id=x; Path=/; HttpOnly; Secure; SameSite=Lax
+# expect: theme=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax
+# expect: dark | a b;c | None
+# expect: 200 /search ann 5 None
+# expect: 200 token-1 caf é
+# expect: 200 user=ann
+# expect: 401 {"error":"no user"}
+# expect: 200 2 cookies
+# expect: theme=dark; Path=/; HttpOnly; SameSite=Lax
+# expect: sid=a%20b%3Bc; Path=/app; Max-Age=60; HttpOnly; Secure; SameSite=Strict
+# expect: 200 back: a b;c
+# expect: 200 grant_type=authorization_code code=4/0Ab+c redirect=http://localhost:8080/cb
+# expect: X-Test: one|two
+
+import http
+
+def search(req: http.Request) -> Result[http.Response]:
+    who = req.query("who").unwrap_or("?")
+    limit = req.query("limit").unwrap_or("?")
+    return http.text(f"{req.path} {who} {limit} {req.query('missing')}")
+
+def token(req: http.Request) -> Result[http.Response]:
+    auth = req.header("authorization").unwrap_or("?")
+    return http.text(f"{auth} {req.cookie('name').unwrap_or('?')}")
+
+# Middleware that works out who is asking, for the handlers after it.
+def identify(req: http.Request, next: http.Handler) -> Result[http.Response]:
+    match req.header("X-User"):
+        case Some(user):
+            req.set_local("user", user)
+        case None:
+            pass
+    return next(req)
+
+def me(req: http.Request) -> Result[http.Response]:
+    match req.local("user"):
+        case Some(user):
+            return http.text(f"user={user}")
+        case None:
+            return Err(http.Error(401, "no user"))
+
+def cookies(req: http.Request) -> Result[http.Response]:
+    response = http.text("2 cookies")
+    response.set_cookie("theme", "dark")
+    response.set_cookie("sid", "a b;c", max_age=60, path="/app", secure=True, same_site="Strict")
+    return response
+
+def back(req: http.Request) -> Result[http.Response]:
+    return http.text(f"back: {req.cookie('sid').unwrap_or('?')}")
+
+def form(req: http.Request) -> Result[http.Response]:
+    text = req.text()?
+    fields: dict[str, str] = {}
+    for pair in text.split("&"):
+        name, _mark, value = pair.partition("=")
+        fields[http.url_decode(name).unwrap()] = http.url_decode(value).unwrap()
+    return http.text(f"grant_type={fields['grant_type']} code={fields['code']} redirect={fields['redirect_uri']}")
+
+def two_headers(req: http.Request) -> Result[http.Response]:
+    return http.text("ok").add_header("X-Test", "one").add_header("X-Test", "two")
+
+def make_server() -> http.Server:
+    server = http.Server()
+    server.use(identify)
+    server.get("/search", search)
+    server.get("/token", token)
+    server.get("/me", me)
+    server.get("/cookies", cookies)
+    server.get("/app/back", back)
+    server.post("/form", form)
+    server.get("/two", two_headers)
+    return server
+
+def serve(ports: Channel[int]):
+    server = make_server()
+    ports.send(server.bind("127.0.0.1:0").unwrap())
+    server.serve()
+
+def main():
+    # Encoding.
+    encoded = http.url_encode("a b&c=d/é~")
+    print(encoded, "|", http.url_decode(encoded).unwrap())
+    print(http.url_decode("a+b", plus_is_space=False).unwrap(), "|", http.url_decode("a+b").unwrap(), "|", http.url_decode("%zz"))
+    print(http.form_encode([("q", "café & crème"), ("q", "2"), ("empty", "")]))
+
+    # Cookies on a response.
+    response = http.text("x")
+    response.set_cookie("theme", "dark")
+    response.set_cookie("sid", "a b;c", max_age=60, path="/app", secure=True, same_site="Strict")
+    response.set_cookie("__Host-id", "x")
+    for line in response.headers["Set-Cookie"].split("\n"):
+        print(line)
+    print(http.text("x").delete_cookie("theme").headers["Set-Cookie"])
+    print(response.cookie("theme").unwrap(), "|", response.cookie("sid").unwrap(), "|", response.cookie("nope"))
+
+    # Test requests with a query string and headers, through the middleware.
+    server = make_server()
+    r = server.handle(http.test_request("GET", "/search?who=ann&limit=5"))
+    print(r.status, r.body)
+    r = server.handle(http.test_request("GET", "/token", headers={"Authorization": "token-1", "cookie": "a=1; name=caf%20%C3%A9"}))
+    print(r.status, r.body)
+    r = server.handle(http.test_request("GET", "/me", headers={"X-User": "ann"}))
+    print(r.status, r.body)
+    r = server.handle(http.test_request("GET", "/me"))
+    print(r.status, r.body)
+
+    # A real connection: two Set-Cookie headers, a cookie sent back, a form body.
+    ports: Channel[int] = Channel(1)
+    task = spawn serve(ports)
+    base = f"http://127.0.0.1:{ports.recv().unwrap()}"
+    got = http.get(f"{base}/cookies").unwrap()
+    print(got.status, got.text().unwrap())
+    for line in got.header("Set-Cookie").unwrap().split("\n"):
+        print(line)
+    got = http.fetch("GET", f"{base}/app/back", headers={"Cookie": "sid=a%20b%3Bc"}).unwrap()
+    print(got.status, got.text().unwrap())
+    fields = [("grant_type", "authorization_code"), ("code", "4/0Ab+c"), ("redirect_uri", "http://localhost:8080/cb")]
+    got = http.post_form(f"{base}/form", fields).unwrap()
+    print(got.status, got.text().unwrap())
+    got = http.get(f"{base}/two").unwrap()
+    print("X-Test:", got.header("X-Test").unwrap().replace("\n", "|"))
+    http.Server().stop()
+    task.join()
