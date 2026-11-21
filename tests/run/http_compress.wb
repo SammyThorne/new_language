@@ -1,0 +1,92 @@
+# Compression (docs/14, milestone 4): `http.compress` with test requests, and a round trip
+# through the client over a real socket, which asks for gzip and decodes it.
+# expect: gzip: 200 gzip Accept-Encoding W/"v1" True
+# expect: small: None - | type: None None | refused: None | not asked: None Accept-Encoding
+# expect: q-values: None gzip gzip | identity refused: gzip small
+# expect: kept: br 304 None 206 None
+# expect: binary data: gzip True
+# expect: client: 200 True None
+# expect: own header: gzip True
+# expect: static: None 14
+
+import http
+
+const ROOT = "tests/fixtures/static"
+
+def page(req: http.Request) -> Result[http.Response]:
+    response = http.html("<p>" + "hello, compression " * 200 + "</p>")
+    response.headers["ETag"] = "\"v1\""
+    return Ok(response)
+
+def tiny(req: http.Request) -> Result[http.Response]:
+    return Ok(http.text("short"))
+
+def picture(req: http.Request) -> Result[http.Response]:
+    return Ok(http.binary(("p" * 4000).encode(), "image/png"))
+
+def data(req: http.Request) -> Result[http.Response]:
+    return Ok(http.binary(("7" * 4000).encode(), "application/json"))
+
+def already(req: http.Request) -> Result[http.Response]:
+    response = http.text("x" * 4000)
+    response.headers["Content-Encoding"] = "br"
+    return Ok(response)
+
+def not_modified(req: http.Request) -> Result[http.Response]:
+    return Ok(http.Response(304, "y" * 4000, "text/plain; charset=utf-8"))
+
+def partial(req: http.Request) -> Result[http.Response]:
+    return Ok(http.Response(206, "y" * 4000, "text/plain; charset=utf-8"))
+
+def make() -> http.Server:
+    server = http.Server()
+    server.use(http.compress())
+    server.get("/page", page)
+    server.get("/tiny", tiny)
+    server.get("/picture", picture)
+    server.get("/data", data)
+    server.get("/already", already)
+    server.get("/not-modified", not_modified)
+    server.get("/partial", partial)
+    server.static("/files", ROOT)
+    return server
+
+def encoding(r: http.Response) -> str?:
+    return r.headers.get("Content-Encoding")
+
+def get(server: http.Server, path: str, accept: str?) -> http.Response:
+    match accept:
+        case Some(value):
+            return server.handle(http.test_request("GET", path, headers={"Accept-Encoding": value}))
+        case None:
+            return server.handle(http.test_request("GET", path))
+
+def serve(ports: Channel[int]):
+    server = make()
+    ports.send(server.bind("127.0.0.1:0").unwrap())
+    server.serve()
+
+def main():
+    server = make()
+    r = get(server, "/page", Some("gzip, deflate, br"))
+    print("gzip:", r.status, encoding(r), r.headers["Vary"], r.headers["ETag"], len(r.body_bytes()) < 400)
+    small = get(server, "/tiny", Some("gzip"))
+    picture = get(server, "/picture", Some("gzip"))
+    plain = get(server, "/page", None)
+    print("small:", encoding(small), small.headers.get("Vary").unwrap_or("-"), "| type:", encoding(picture), picture.headers.get("Vary"), "| refused:", encoding(get(server, "/page", Some("gzip;q=0"))), "| not asked:", encoding(plain), plain.headers["Vary"])
+    print("q-values:", encoding(get(server, "/page", Some("br, gzip;q=0.0"))), encoding(get(server, "/page", Some("*"))), encoding(get(server, "/page", Some("GZIP;q=0.5"))), "| identity refused:", encoding(get(server, "/tiny", Some("gzip, identity;q=0"))), "small")
+    print("kept:", encoding(get(server, "/already", Some("gzip"))), get(server, "/not-modified", Some("gzip")).status, encoding(get(server, "/not-modified", Some("gzip"))), get(server, "/partial", Some("gzip")).status, encoding(get(server, "/partial", Some("gzip"))))
+    binary = get(server, "/data", Some("gzip"))
+    print("binary data:", encoding(binary), len(binary.body_bytes()) < 100)
+
+    ports: Channel[int] = Channel(1)
+    task = spawn serve(ports)
+    base = f"http://127.0.0.1:{ports.recv().unwrap()}"
+    got = http.get(f"{base}/page").unwrap()
+    print("client:", got.status, got.text().unwrap() == plain.body, got.header("Content-Encoding"))
+    raw = http.fetch("GET", f"{base}/page", headers={"Accept-Encoding": "gzip"}).unwrap()
+    print("own header:", raw.header("Content-Encoding").unwrap(), len(raw.body) < 400)
+    files = get(server, "/files/index.html", Some("gzip"))
+    print("static:", encoding(files), len(files.body_bytes()))
+    http.Server().stop()
+    task.join()

@@ -19,6 +19,7 @@ pub mod dict;
 pub mod docs;
 pub mod fiber;
 pub mod gc;
+pub mod gzip;
 pub mod http;
 pub mod json;
 pub mod list;

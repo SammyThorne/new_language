@@ -1107,6 +1107,18 @@ Milestone 3 of the [production web plan](14-production-web-plan.md): `server.sta
 
 **Cost.** The Rust `Request` gained two optional fields (the file plan and a pending stream), which are not collected memory; servers without static files allocate the same as before.
 
+### D108. Compression (production web plan, milestone 4)
+
+Milestone 4 of the [production web plan](14-production-web-plan.md): `http.compress(...)`, and gzip in the HTTP client.
+
+**The encoder.** `miniz_oxide` 0.9 (owner decision 1 in the plan: pure Rust, no C, MIT, Apache-2.0 or Zlib), with only its allocation feature, for raw deflate both ways. The gzip framing (RFC 1952: a ten-byte header, the CRC-32 and the length) is forty lines in `lang_rt/src/gzip.rs`, with the CRC table built at compile time; `flate2` would have added a crate for that alone. The decoder reads several members in a row, as `cat a.gz b.gz` makes, and checks each trailer.
+
+**Middleware, not the runtime.** Compression is a policy (which types, what size, which responses), and middleware already sees the finished response, so `http.compress` is ordinary middleware that replaces the body with gzip bytes through `lrt_gzip`. It costs nothing when unused, and the per-request counts are unchanged. Errors returned as `Err` become responses after the middleware has returned, so they are not compressed; they are short. Files from `server.static` reach the middleware with an empty body (the runtime sends the file afterwards, D107), so they are left alone, and their pre-compressed `.gz` files do the job.
+
+**Choosing.** `Accept-Encoding` is read in the runtime, sharing the static file server's q-value parser: gzip is chosen when it, or `*`, has a q-value above 0. A client that also refuses the body as it is (`identity;q=0`, or `*;q=0` without `identity`) gets gzip even below `min_size` or for other types, rather than a 406. `Vary: Accept-Encoding` is added to every response that could be compressed, whether or not this client asked, so a shared cache never gives a compressed body to a client that cannot read it. A strong `ETag` becomes weak, since the bytes differ from the uncompressed ones. `Cache-Control: no-transform` is honoured.
+
+**The client.** `http.get`, `post` and `fetch` send `Accept-Encoding: gzip` and decode a gzip body, removing `Content-Encoding` and `Content-Length` from the headers, as Go's client does; a caller that sets `Accept-Encoding` itself gets the body as sent. A decoded body is limited to 1 GiB, so a small body cannot expand without bound.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

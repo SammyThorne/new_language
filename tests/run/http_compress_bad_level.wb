@@ -1,0 +1,9 @@
+# `http.compress` refuses a level outside 0 to 9 at setup (docs/14, milestone 4).
+# expect-exit: 101
+# expect-stderr: panic: `http.compress` level 11 is not between 0 and 9
+
+import http
+
+def main():
+    server = http.Server()
+    server.use(http.compress(level=11))

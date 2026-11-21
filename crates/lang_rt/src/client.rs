@@ -16,6 +16,8 @@ use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// The most a gzip body may decode to: a small body must not become an unbounded one.
+const MAX_DECODED: usize = 1 << 30;
 const MAX_RESPONSE: usize = 64 * 1024 * 1024;
 
 #[derive(Default)]
@@ -115,6 +117,12 @@ fn request(method: &str, url: &str, headers: &str, body: &[u8]) -> Result<(i64, 
     if !lower.contains("user-agent:") {
         head.push_str(&format!("User-Agent: {}\r\n", lang_names::CLI_NAME));
     }
+    // Ask for gzip and decode it, unless the caller chose encodings itself (then the body is
+    // left as sent), as Go's client does.
+    let wants_gzip = !lower.contains("accept-encoding:");
+    if wants_gzip {
+        head.push_str("Accept-Encoding: gzip\r\n");
+    }
     if !body.is_empty() || matches!(method, "POST" | "PUT" | "PATCH") {
         head.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
@@ -141,7 +149,7 @@ fn request(method: &str, url: &str, headers: &str, body: &[u8]) -> Result<(i64, 
         .nth(1)
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| format!("not an HTTP response: `{status_line}`"))?;
-    let header_lines: Vec<(String, String)> = lines
+    let mut header_lines: Vec<(String, String)> = lines
         .filter_map(|line| line.split_once(':').map(|(n, v)| (n.trim().to_ascii_lowercase(), v.trim().to_string())))
         .collect();
     let header = |name: &str| header_lines.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str());
@@ -189,6 +197,14 @@ fn request(method: &str, url: &str, headers: &str, body: &[u8]) -> Result<(i64, 
         rest
     };
     socket.shutdown();
+    let gzipped = header("content-encoding").is_some_and(|v| v.trim().eq_ignore_ascii_case("gzip"));
+    let body = if wants_gzip && gzipped && !body.is_empty() {
+        let body = crate::gzip::decode(&body, MAX_DECODED).map_err(|e| format!("{e} (Content-Encoding: gzip)"))?;
+        header_lines.retain(|(n, _)| n != "content-encoding" && n != "content-length");
+        body
+    } else {
+        body
+    };
     let headers = header_lines.iter().map(|(n, v)| format!("{n}: {v}\n")).collect();
     Ok((status, Response { headers, body }))
 }

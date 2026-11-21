@@ -69,6 +69,12 @@ def static_root_raw(root: str) -> str
 @extern("lrt_http_static")
 def static_raw(handle: int, path: str, depth: int, settings: str, flags: int, max_age: int, conditions: str) -> str
 
+@extern("lrt_gzip")
+def gzip_raw(data: str, level: int) -> str
+
+@extern("lrt_http_gzip_choice")
+def gzip_choice_raw(accept_encoding: str) -> int
+
 @extern("lrt_http_set_trusted_proxies")
 def set_trusted_proxies_raw(networks: str) -> str
 
@@ -995,6 +1001,110 @@ def add_vary(response: Response, name: str):
                 response.headers[key] = f"{value}, {name}"
         case None:
             response.headers[key] = name
+
+def find_header(response: Response, name: str) -> str?:
+    """A response header, with the name in any case."""
+    lowered = name.lower()
+    for key, value in response.headers.items():
+        if key.lower() == lowered:
+            return value
+    return None
+
+# ---- compression ---------------------------------------------------------------------------
+
+@frozen
+struct Compression:
+    min_size: int
+    level: int
+    types: tuple[str, ...]
+
+pub def compress(
+    min_size: int = 1024,
+    level: int = 6,
+    types: list[str] = ["text/*", "application/json", "application/javascript", "image/svg+xml"],
+) -> Middleware:
+    """
+    Middleware that sends response bodies gzip-compressed to clients that accept it:
+
+        server.use(http.compress())
+
+    A body is compressed when the request's `Accept-Encoding` allows `gzip`, the body is at
+    least `min_size` bytes, its content type matches one of `types` (`"text/*"` matches every
+    `text/` type), and the response has no `Content-Encoding` of its own. A client that refuses
+    uncompressed bodies (`identity;q=0`) gets gzip whatever the size and type. 1xx, 204, 206
+    and 304 responses, responses with `Cache-Control: no-transform`, errors returned as `Err`
+    and files from `server.static` (which sends `.gz` files beside them instead) are left
+    alone. `level` runs from 1 (fastest) to 9 (smallest); 0 stores without compressing.
+
+    Compressed responses get `Content-Encoding: gzip`, and their `ETag`, if any, becomes weak
+    (`W/`), since the bytes differ from the uncompressed ones. Every response that could be
+    compressed gets `Vary: Accept-Encoding`, so caches keep the two forms apart.
+    """
+    if level < 0 or level > 9:
+        panic(f"`http.compress` level {level} is not between 0 and 9")
+    if min_size < 0:
+        panic(f"`http.compress` min_size {min_size} is negative")
+    policy = Compression(min_size, level, tuple([kind.lower() for kind in types]))
+    return lambda req, next: policy.handle(req, next)
+
+impl Compression:
+    def handle(self, req: Request, next: Handler) -> Result[Response]:
+        result = next(req)
+        match result:
+            case Ok(response):
+                self.apply(req, response)
+            case Err(_):
+                pass
+        return result
+
+    def fits(self, content_type: str) -> bool:
+        kind = content_type.partition(";")[0].strip().lower()
+        for wanted in self.types:
+            if wanted == kind or (wanted.ends_with("/*") and kind.starts_with(wanted[0:len(wanted) - 1])):
+                return True
+        return False
+
+    def apply(self, req: Request, response: Response):
+        status = response.status
+        if status < 200 or status == 204 or status == 206 or status == 304:
+            return
+        match find_header(response, "Content-Encoding"):
+            case Some(_):
+                return
+            case None:
+                pass
+        size = len(response.body)
+        match response.data:
+            case Some(data):
+                size = len(data)
+            case None:
+                pass
+        if size == 0:
+            return
+        eligible = size >= self.min_size and self.fits(response.content_type)
+        if eligible:
+            add_vary(response, "Accept-Encoding")
+        choice = 0
+        match req.header("Accept-Encoding"):
+            case Some(accepted):
+                choice = gzip_choice_raw(accepted)
+            case None:
+                pass
+        if choice == 0 or (choice == 1 and not eligible):
+            return
+        match find_header(response, "Cache-Control"):
+            case Some(control):
+                if control.lower().contains("no-transform"):
+                    return
+            case None:
+                pass
+        response.data = __bytes(gzip_raw(__bytes_data(response.body_bytes()), self.level))
+        response.body = ""
+        response.headers["Content-Encoding"] = "gzip"
+        add_vary(response, "Accept-Encoding")
+        for key, value in response.headers.items():
+            if key.lower() == "etag" and not value.starts_with("W/"):
+                response.headers[key] = "W/" + value
 
 struct DocOperation:
     """A route `mount` documented: `operation` is its OpenAPI operation object as JSON text,

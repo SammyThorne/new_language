@@ -263,7 +263,7 @@ fn matches_etag(list: &str, etag: &str, weak: bool) -> bool {
 }
 
 /// Whether `Accept-Encoding` allows `name` (with a q-value above 0, or through `*`).
-fn accepts_encoding(header: Option<&str>, name: &str) -> bool {
+pub(crate) fn accepts_encoding(header: Option<&str>, name: &str) -> bool {
     let Some(header) = header else { return false };
     let mut star = None;
     for item in header.split(',') {

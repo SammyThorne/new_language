@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 3 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 4 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -935,6 +935,14 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - `Vary`.
 - **Docs:** docs/05.
 - If the owner declines the crate, this milestone becomes a short note in Milestone 3's docs, and is skipped.
+
+**Done** (D108). Everything listed, with these differences:
+- `miniz_oxide` 0.9.1 gives raw deflate; the gzip header, CRC-32 and trailer are written by hand rather than through `flate2`. The decoder accepts several members and checks each trailer, and limits a decoded body to 1 GiB.
+- `Accept-Encoding` is parsed by the runtime (`lrt_http_gzip_choice`), sharing the static file server's parser. `identity;q=0` (or `*;q=0`) means a non-empty body is compressed whatever its size and type.
+- Also: `Cache-Control: no-transform` is honoured; `Vary` is added to every response that could be compressed, not only compressed ones; a body made by `http.binary` is compressed like a text one; errors returned as `Err` and `server.static` files are left alone (D108 says why); setup panics for a level outside 0 to 9 or a negative `min_size`.
+- The client sends `Accept-Encoding: gzip` only when the caller sets no `Accept-Encoding`, and then decodes, dropping `Content-Encoding` and `Content-Length`.
+- Tests: `tests/run/http_compress.wb` (gzip with `Vary` and a weak `ETag`; bodies under `min_size`, other types, refused and absent encodings; q-values, `*` and `identity;q=0`; responses with their own encoding, 304 and 206; binary bodies; a round trip through the client over a socket, with and without its own header; a static file), a setup-panic program, and unit tests for the CRC, round trips at four levels, two members, a body made by `gzip -9 -n`, corrupt, truncated and oversized bodies, and the encoding choice.
+- Gates: all pass, with the counts unchanged (`http.compress` is middleware; servers without it run the same code).
 
 ### Track B: dates, times and UUIDs
 
