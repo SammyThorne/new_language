@@ -57,6 +57,24 @@ def req_header(handle: int, name: str) -> str?
 @extern("lrt_http_req_body")
 def req_body(handle: int) -> str?
 
+@extern("lrt_http_req_body_bytes")
+def req_body_bytes(handle: int) -> str
+
+@extern("lrt_http_req_client_ip")
+def req_client_ip(handle: int) -> str
+
+@extern("lrt_http_set_trusted_proxies")
+def set_trusted_proxies_raw(networks: str) -> str
+
+@extern("lrt_log_set_request_id")
+def set_request_id_raw(id: str)
+
+@extern("lrt_log_new_request_id")
+def new_request_id_raw() -> str
+
+@extern("lrt_time_monotonic")
+def monotonic_raw() -> float
+
 @extern("lrt_http_respond")
 def respond_raw(handle: int, status: int, content_type: str, headers: str, body: str)
 
@@ -278,11 +296,32 @@ impl Request:
             case Err(error):
                 return Err(HttpError(400, f"invalid JSON body: {error.message()}"))
 
+    def body(self) -> bytes:
+        """The body as bytes, whether or not it is text: for uploads and binary formats."""
+        if self.handle < 0:
+            match self.test_parts():
+                case Some(parts):
+                    return parts.body.encode()
+                case None:
+                    return "".encode()
+        return __bytes(req_body_bytes(self.handle))
+
     def remote_addr(self) -> str:
-        """The client's address and port."""
+        """The address and port of the other end of the connection: the client's, or a proxy's
+        when there is one in front. `""` for a test request."""
         if self.handle < 0:
             return ""
         return req_remote(self.handle)
+
+    def client_ip(self) -> str:
+        """The client's IP address, without a port. When the connection comes from one of the
+        server's `trusted_proxies`, this is the address the proxies say they forwarded the
+        request for (`X-Forwarded-For`, read from the right, past the trusted ones); otherwise
+        it is the connection's. A client cannot choose it by sending the header itself. `""`
+        for a test request."""
+        if self.handle < 0:
+            return ""
+        return req_client_ip(self.handle)
 
     def cookie(self, name: str) -> str?:
         """A cookie sent with the request (from its `Cookie` header), or `None`. `%XX` escapes
@@ -440,8 +479,19 @@ pub struct Response:
     body: str = ""
     content_type: str = "text/plain; charset=utf-8"
     headers: dict[str, str] = {}
+    # The body of a response made by `http.binary`, sent instead of `body`.
+    priv data: bytes? = None
 
 impl Response:
+    def body_bytes(self) -> bytes:
+        """The body as sent: the data of a response made by `http.binary`, otherwise `body` in
+        UTF-8. For tests."""
+        match self.data:
+            case Some(data):
+                return data
+            case None:
+                return self.body.encode()
+
     def with_header(self, name: str, value: str) -> Response:
         """Set a header, replacing any value it had, and return the response for chaining."""
         self.headers[name] = value
@@ -529,6 +579,12 @@ pub def html(body: str, status: int = 200) -> Response:
 pub def json[T: ToJson](value: T, status: int = 200) -> Response:
     """A JSON response."""
     return Response(status, jsonlib.encode(value), "application/json")
+
+pub def binary(data: bytes, content_type: str = "application/octet-stream", status: int = 200) -> Response:
+    """A response whose body is any bytes: an image, a download, a binary format."""
+    response = Response(status, "", content_type)
+    response.data = data
+    return response
 
 pub def error(status: int, message: str) -> Response:
     """A JSON error response: `{"error": message}`."""
@@ -649,6 +705,73 @@ def not_routed(req: Request, fitting: list[Route]) -> Result[Response]:
 def wrap(middleware: Middleware, next: Handler) -> Handler:
     return lambda req: middleware(req, next)
 
+# ---- request logs -------------------------------------------------------------------------
+
+# The request local that holds the request's ID.
+const REQUEST_ID = "request_id"
+
+pub def request_log(skip: list[str] = []) -> Middleware:
+    """
+    Middleware that gives each request an ID and logs one line for it when it is answered:
+
+        2026-11-20T09:30:00.123Z INFO  GET /photos/7 200 request_id=6f1c0e2a9b3d4c58 method=GET path=/photos/7 status=200 ms=1.84 client=203.0.113.9
+
+    The ID is the client's `X-Request-Id` if it sent a usable one (up to 128 letters, digits,
+    `.`, `_` and `-`), otherwise a new one. It is sent back in `X-Request-Id`, kept as the
+    request local `"request_id"`, and added to every log line written while the request is
+    handled, including by tasks the handler spawns. The path is logged without its query
+    string, which often holds tokens. Requests for the paths in `skip` (exactly) are passed
+    on without an ID or a line. Add it first, so that it times the other middleware too.
+    """
+    skipped: tuple[str, ...] = tuple(skip)
+    return lambda req, next: log_request(req, next, skipped)
+
+def log_request(req: Request, next: Handler, skipped: tuple[str, ...]) -> Result[Response]:
+    if req.path in skipped:
+        return next(req)
+    id = request_id_from(req.header("X-Request-Id"))
+    set_request_id_raw(id)
+    req.set_local(REQUEST_ID, id)
+    start = monotonic_raw()
+    result = next(req)
+    ms = (monotonic_raw() - start) * 1000.0
+    status = 200
+    match result:
+        case Ok(response):
+            status = response.status
+            response.headers["X-Request-Id"] = id
+        case Err(problem):
+            status = problem.status()
+    fields = {"method": req.method, "path": req.path, "status": str(status), "ms": f"{ms:.2f}"}
+    client = req.client_ip()
+    if client != "":
+        fields["client"] = client
+    if status >= 500:
+        log.error(f"{req.method} {req.path} {status}", fields)
+    else:
+        log.info(f"{req.method} {req.path} {status}", fields)
+    set_request_id_raw("")
+    return result
+
+def request_id_from(sent: str?) -> str:
+    match sent:
+        case Some(id):
+            if usable_request_id(id):
+                return id
+        case None:
+            pass
+    return new_request_id_raw()
+
+def usable_request_id(id: str) -> bool:
+    if id == "" or len(id) > 128:
+        return False
+    for c in id:
+        code = ord(c)
+        ascii_alnum = (code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        if not (ascii_alnum or c == "." or c == "_" or c == "-"):
+            return False
+    return True
+
 struct DocOperation:
     """A route `mount` documented: `operation` is its OpenAPI operation object as JSON text,
     without the `operationId`, which the document makes unique."""
@@ -721,6 +844,7 @@ pub struct Server:
     max_body: int = 8388608
     max_message: int = 16777216
     ping_interval: int = 30
+    trusted_proxies: list[str] = []
     priv routes: list[Route] = []
     priv middleware: list[Middleware] = []
     priv error_handler: (def(Request, HttpError) -> Response)? = None
@@ -833,11 +957,19 @@ impl Server:
                     log.error(f"{req.method} {req.path}: {problem.message()}")
                 message = problem.message() if status < 500 else "internal server error"
                 failure = HttpError(status, message)
+                response = error(status, message)
                 match self.error_handler:
                     case Some(custom):
-                        return custom(req, failure)
+                        response = custom(req, failure)
                     case None:
-                        return error(status, message)
+                        pass
+                # `request_log` could not add its header to a response that did not exist yet.
+                match req.local(REQUEST_ID):
+                    case Some(id):
+                        response.headers["X-Request-Id"] = id
+                    case None:
+                        pass
+                return response
 
     def compose(self) -> Handler:
         match self.chain:
@@ -867,6 +999,9 @@ impl Server:
         if listener < 0:
             return Err(HttpError(500, last_error()))
         self.listener = listener
+        problem = set_trusted_proxies_raw(",".join(self.trusted_proxies))
+        if problem != "":
+            panic(f"`trusted_proxies` holds {problem!r}, which is not an IP address or a network such as \"10.0.0.0/8\"")
         set_max_body_raw(self.max_body)
         ws_set_limits(self.max_message, self.ping_interval)
         return port_raw(listener)
@@ -893,7 +1028,11 @@ impl Server:
                     else:
                         header_lines.append(f"{name}: {value}\r\n")
                 headers = "".join(header_lines)
-            respond_raw(handle, response.status, response.content_type, headers, response.body)
+            match response.data:
+                case Some(data):
+                    respond_raw(handle, response.status, response.content_type, headers, __bytes_data(data))
+                case None:
+                    respond_raw(handle, response.status, response.content_type, headers, response.body)
         __http_serve(self.listener, serve_one)
 
     def listen(self, address: str) -> Result[None, HttpError]:

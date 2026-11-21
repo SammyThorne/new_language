@@ -43,9 +43,37 @@ def main():
 | Module | Functions and types |
 |---|---|
 | `io` | `read_file(path) -> Result[str, IoError]`, `read_lines`, `write_file(path, text)`, `append_file`, `exists`, `remove`, `list_dir`, `read_line() -> str?` (standard input), `eprint(text)` (standard error), `open(path, mode="r") -> Result[File, IoError]`; `File` has `read`, `read_line`, `lines`, `write`, `close`, and closes itself at the end of a `with` block; `IoError` implements `Error` |
-| `os` | `args() -> list[str]`, `getenv(name) -> str?`, `exit(code)`, `cwd()` |
+| `os` | `args() -> list[str]`, `getenv(name) -> str?`, `setenv(name, value)` (at startup, before starting tasks: the environment is not safe to change while other threads read it), `exit(code)`, `cwd()` |
 
 `input(prompt)` is also built in, returning `str?` (`None` at the end of input).
+
+## Logging (docs/14)
+
+```python
+import log
+
+log.info("listening", {"port": "8080"})
+log.warn("slow query", {"ms": f"{ms:.1f}", "table": "orders"})
+
+jobs = log.with_fields({"component": "billing"})       # a Logger, shareable between tasks
+jobs.error("charge failed", {"customer": customer_id})
+```
+
+```
+2026-11-20T09:30:00.123Z INFO  listening port=8080
+2026-11-20T09:30:01.456Z WARN  slow query request_id=6f1c0e2a9b3d4c58 ms=812.4 table=orders
+```
+
+| Item | Shape |
+|---|---|
+| `log.debug/info/warn/error(message, fields={})` | One line to standard error. `fields` (`dict[str, str]`) follow the message as `name=value`, in logfmt's form: a value with a space, `=`, `"` or a control character is quoted with JSON's escapes |
+| `log.set_level(level)` | `debug`, `info` (the default), `warn`, `error` or `off`; also the `LOG` environment variable, with the language's prefix |
+| `log.set_format(format)` | `"text"` (the default) or `"json"`: one object per line, `{"time":..., "level":"info", "msg":..., "request_id":..., ...fields}`. Also the `LOG_FORMAT` environment variable, with the language's prefix. A field named `time`, `level`, `msg` or `request_id` is written as `_time` and so on |
+| `log.with_fields(fields) -> log.Logger` | A logger that adds `fields` to every line; it has the same four methods and its own `with_fields`. Fields given to a call win over the logger's |
+
+**The request ID.** While `http.request_log()` handles a request, every line logged by the handler, by middleware and by tasks the handler spawns carries the request's `request_id`, without passing it around: the runtime keeps it with the running task, and a new task starts with its parent's.
+
+**Buffering.** While a server runs and standard error is not a terminal (a pipe to a log collector, or a file), lines are gathered and written in blocks of up to 16 KiB, at the latest when the server's accept loop next wakes (every 200 ms). `warn` and `error` lines are written at once, and everything is written when the program exits, panics or calls `io.eprint`. On a terminal every line appears as it is logged.
 
 ## Core types
 
@@ -292,6 +320,8 @@ def remove(self, id: int): ...
 | `server.route(method, path, handler)` | General form |
 | `server.group(prefix)` | Returns a sub-router sharing a prefix and its own middleware |
 | `server.use(middleware)` | Middleware has the type `def(http.Request, http.Handler) -> Result[http.Response]` |
+| `http.request_log(skip=[])` | Middleware that gives each request an ID and logs one line when it is answered: `GET /photos/7 200` with the fields `method`, `path` (without the query string), `status`, `ms` and, for a request from a connection, `client` (`req.client_ip()`); `error` for a 5xx, otherwise `info`. The ID is the client's `X-Request-Id` when it is 1 to 128 ASCII letters, digits, `.`, `_` and `-`, otherwise a new one; it is sent back in `X-Request-Id` (error responses included), kept as the request local `"request_id"`, and carried by log lines (see "Logging"). Paths in `skip` get neither. Add it first, so it times the other middleware too. A handler that panics gets no line: the panic is reported instead |
+| `server.trusted_proxies` | `list[str]` of addresses and networks (`"10.0.0.0/8"`, `"::1"`) whose `X-Forwarded-For` header is believed, for `req.client_ip()`; empty by default. Set it before `bind`. It applies to every server in the process |
 | `server.ws(path, handler)` | WebSocket endpoint in call style (below) |
 | `server.docs(path="/docs", title, version, description, servers, tags, security, ui, try_it_out, hide_ws)` | Serves the API documentation page and the OpenAPI document (above) |
 | `server.openapi_json(title, version, description, servers, tags, security, hide_ws)` | The OpenAPI document as JSON text |
@@ -300,8 +330,8 @@ def remove(self, id: int): ...
 | `server.security_scheme(name, scheme)` | A scheme documented on every page of the server, for libraries |
 | `server.listen(addr)` | Blocks, serving until shutdown. Options: read and write timeouts, maximum header and body sizes, graceful shutdown on SIGTERM |
 | `http.Handler` | `def(http.Request) -> Result[http.Response]` |
-| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `query_string() -> str` (as sent, without `?`), `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes`, `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr`; `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13) |
-| `http.Response` | `status`, `headers`, `body`; built with `http.text`, `http.json`, `http.bytes`, `http.error`, `http.redirect`, `http.no_content`. `with_header(name, value)` sets a header; `add_header(name, value)` adds another value, sent as its own line (in `headers`, the values are joined by newlines) |
+| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `query_string() -> str` (as sent, without `?`), `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes` (any bytes, for binary uploads), `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr() -> str` (the connection's other end, `host:port`), `client_ip() -> str` (the client's address without a port: through `server.trusted_proxies`, the rightmost address in `X-Forwarded-For` that is not one of them, so a client cannot choose it; otherwise the connection's; `""` for a test request); `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13) |
+| `http.Response` | `status`, `headers`, `body`; built with `http.text`, `http.json`, `http.binary(data, content_type="application/octet-stream", status=200)` (a body of any bytes), `http.error`, `http.redirect`, `http.no_content`; `body_bytes()` is the body as sent, for tests. `with_header(name, value)` sets a header; `add_header(name, value)` adds another value, sent as its own line (in `headers`, the values are joined by newlines) |
 | `response.set_cookie(name, value, max_age=-1, path="/", http_only=True, secure=False, same_site="Lax")` | Adds a `Set-Cookie` header; any number per response. Characters a cookie cannot hold, and `%`, are sent as `%XX`, which `req.cookie` decodes. `__Host-` and `__Secure-` cookies, and `same_site="None"`, are always `Secure`. An invalid name, path or `same_site` is a bug and panics (a 500). `delete_cookie(name, path="/")` expires one; `response.cookie(name) -> str?` reads one back, for tests |
 | `http.url_encode(text)`, `http.url_decode(text, plus_is_space=True) -> str?`, `http.form_encode([(name, value), ...])` | Percent-encoding: everything but ASCII letters, digits and `-._~` as `%XX` of its UTF-8 bytes. `form_encode` makes a query string or an `application/x-www-form-urlencoded` body |
 | `http.test_request(method, path, body="", headers={})` | A request without a connection, for `server.handle(...)` in tests. A query string on `path` is what `query` reads; `headers` are what `header` and `cookie` read |
@@ -665,6 +695,7 @@ Cancellation is not in the prototype. The intended design is a deadline carried 
 | `crypto` | | `ring` digests, HMAC, RSA; base64 | API |
 | `auth` | `on_login` and `protect` checked shareable | | everything |
 | PostgreSQL | | protocol, pool | `Db`, `Row`, `query_as` |
-| `log`, `time`, `io`, `os` | | system calls | API |
+| `log` | | formatting, the request context, buffering | API, `Logger` |
+| `time`, `io`, `os` | | system calls | API |
 
 The direction of travel is rightwards: as generics, byte buffers and the optimiser mature, implementations move from the runtime column to the Weby column, which makes them inlinable and lets the language test itself.

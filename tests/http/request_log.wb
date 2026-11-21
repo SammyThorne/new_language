@@ -1,0 +1,40 @@
+# Request IDs, structured log lines and their buffering (docs/14, milestone 1). Run by
+# crates/lang_cli/tests/logging.rs, which reads what it writes to standard error.
+
+import http
+import io
+import log
+
+def helper(note: str):
+    log.info("in task", {"note": note})
+
+def work(req: http.Request) -> Result[http.Response]:
+    log.info("in handler", {"user": "Ann Lee", "client": req.client_ip()})
+    task = spawn helper("from the handler")
+    task.join()
+    return http.text("ok")
+
+def boom(req: http.Request) -> Result[http.Response]:
+    panic("boom")
+
+def plain(req: http.Request) -> Result[http.Response]:
+    log.info("plain")
+    return http.text("plain")
+
+def fail(req: http.Request) -> Result[http.Response]:
+    return Err(http.Error(503, "busy"))
+
+def main():
+    jobs = log.with_fields({"component": "setup"})
+    jobs.info("starting", {"version": "1"})
+    server = http.Server()
+    server.trusted_proxies = ["127.0.0.1", "::1"]
+    server.use(http.request_log(skip=["/plain"]))
+    server.get("/work", work)
+    server.get("/boom", boom)
+    server.get("/plain", plain)
+    server.get("/fail", fail)
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()
+    log.info("stopped")

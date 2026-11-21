@@ -1,0 +1,78 @@
+# Binary bodies, the client's address behind a trusted proxy, and setting environment
+# variables (docs/14, milestone 1).
+# expect: test: 3 00ff80 | body 7 bytes: 68c3a96c6c6f21
+# expect: binary: 200 application/octet-stream 00ff8001
+# expect: upload: 200 6 bytes, starts 68c3
+# expect: direct: 200 127.0.0.1 | forged header ignored: 127.0.0.1
+# expect: proxied: 200 203.0.113.9 | remote 127.0.0.1
+# expect: test request: '' ''
+# expect: setenv: 'a=b c' | replaced: '2'
+# expect: request id kept: 200 abc.DEF_1-2 | made: 16
+
+import crypto
+import http
+import log
+import os
+
+def binary(req: http.Request) -> Result[http.Response]:
+    return http.binary(crypto.base64_decode("AP+AAQ==").unwrap())
+
+def upload(req: http.Request) -> Result[http.Response]:
+    data = req.body()
+    return http.text(f"{len(data)} bytes, starts {data.slice(0, 2).hex()}")
+
+def who(req: http.Request) -> Result[http.Response]:
+    return http.text(f"{req.client_ip()} {req.remote_addr().partition(':')[0]}")
+
+def serve(trusted: tuple[str, ...], ports: Channel[int]):
+    server = http.Server()
+    server.trusted_proxies = list(trusted)
+    server.use(http.request_log())
+    server.get("/binary", binary)
+    server.post("/upload", upload)
+    server.get("/who", who)
+    ports.send(server.bind("127.0.0.1:0").unwrap())
+    server.serve()
+
+def main():
+    log.set_level("warn")
+    # A response made from bytes, and a request's body as bytes, in a test.
+    made = http.binary(crypto.base64_decode("AP+A").unwrap(), "image/png")
+    req = http.test_request("POST", "/upload", body="héllo!")
+    print("test:", len(made.body_bytes()), made.body_bytes().hex(), "|", f"body {len(req.body())} bytes: {req.body().hex()}")
+
+    # The same over a real connection. No proxy is trusted, so `X-Forwarded-For` is ignored.
+    ports: Channel[int] = Channel(2)
+    nobody: list[str] = []
+    direct_task = spawn serve(tuple(nobody), ports)
+    direct = f"http://127.0.0.1:{ports.recv().unwrap()}"
+    got = http.get(f"{direct}/binary").unwrap()
+    print("binary:", got.status, got.header("Content-Type").unwrap(), got.body.hex())
+    got = http.post(f"{direct}/upload", "héllo", content_type="text/plain").unwrap()
+    print("upload:", got.status, got.text().unwrap())
+    plain = http.get(f"{direct}/who").unwrap().text().unwrap().split(" ")[0]
+    forged = http.fetch("GET", f"{direct}/who", headers={"X-Forwarded-For": "6.6.6.6"}).unwrap()
+    print("direct:", 200, plain, "| forged header ignored:", forged.text().unwrap().split(" ")[0])
+
+    # Behind a trusted proxy (this program, on 127.0.0.1), the forwarded address is the client.
+    proxied_task = spawn serve(tuple(["127.0.0.0/8"]), ports)
+    proxied = f"http://127.0.0.1:{ports.recv().unwrap()}"
+    got = http.fetch("GET", f"{proxied}/who", headers={"X-Forwarded-For": "1.2.3.4, 203.0.113.9"}).unwrap()
+    ip, _, remote = got.text().unwrap().partition(" ")
+    print("proxied:", got.status, ip, "| remote", remote)
+
+    test = http.test_request("GET", "/who")
+    print("test request:", f"{test.client_ip()!r} {test.remote_addr()!r}")
+
+    os.setenv("M1_TEST_VALUE", "a=b c")
+    first = os.getenv("M1_TEST_VALUE")
+    os.setenv("M1_TEST_VALUE", "2")
+    print("setenv:", f"{first!r}", "| replaced:", f"{os.getenv('M1_TEST_VALUE')!r}")
+
+    kept = http.fetch("GET", f"{direct}/who", headers={"X-Request-Id": "abc.DEF_1-2"}).unwrap()
+    made_id = http.fetch("GET", f"{direct}/who", headers={"X-Request-Id": "x" * 129}).unwrap()
+    print("request id kept:", kept.status, kept.header("X-Request-Id").unwrap(), "| made:", len(made_id.header("X-Request-Id").unwrap()))
+
+    http.Server().stop()
+    direct_task.join()
+    proxied_task.join()

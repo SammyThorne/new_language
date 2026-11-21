@@ -2,29 +2,105 @@
 Levelled logging to standard error, one line per message with a UTC timestamp:
 
     2026-11-18T12:00:00.123Z INFO  listening on port 8080
+    2026-11-18T12:00:01.456Z INFO  saved order request_id=6f1c0e2a9b3d4c58 order=42 customer="Ann Lee"
 
-The level is `info` unless the `LOG` environment variable (with the language's prefix) or `log.set_level` says
-`debug`, `warn`, `error` or `off`.
+Each function takes optional `fields`, written after the message as `name=value` (quoted when
+the value has a space, `=`, `"` or a control character). A line written while a request is
+handled by `http.request_log()` carries its `request_id`, and so do lines from tasks the handler
+spawns.
+
+`set_format("json")`, or the `LOG_FORMAT` environment variable (with the language's prefix) set to
+`json`, writes one JSON object per line instead, for log collectors:
+
+    {"time":"2026-11-18T12:00:01.456Z","level":"info","msg":"saved order","request_id":"6f1c0e2a9b3d4c58","order":"42"}
+
+The level is `info` unless the `LOG` environment variable (with the language's prefix) or
+`log.set_level` says `debug`, `warn`, `error` or `off`. While a server runs and standard error is
+not a terminal, lines are written in blocks, within 200 ms; `warn` and `error` lines at once.
 """
 
 @extern("lrt_log_write")
 def write(level: str, message: str)
 
+@extern("lrt_log_write_fields")
+def write_fields_raw(level: str, message: str, fields: str)
+
+@extern("lrt_log_enabled")
+def enabled_raw(level: str) -> int
+
 @extern("lrt_log_set_level")
 def set_level_raw(level: str)
 
-pub def debug(message: str):
-    write("debug", message)
+@extern("lrt_log_set_format")
+def set_format_raw(format: str)
 
-pub def info(message: str):
-    write("info", message)
+def emit(level: str, message: str, fields: dict[str, str]):
+    if len(fields) == 0:
+        write(level, message)
+    elif enabled_raw(level) == 1:
+        write_fields_raw(level, message, encode_fields(fields))
 
-pub def warn(message: str):
-    write("warn", message)
+def encode_fields(fields: dict[str, str]) -> str:
+    # Names and values, each followed by a NUL, for the runtime to format.
+    parts: list[str] = []
+    for name, value in fields.items():
+        parts.append(name.replace("\0", ""))
+        parts.append(value.replace("\0", ""))
+    return "\0".join(parts) + "\0"
 
-pub def error(message: str):
-    write("error", message)
+pub def debug(message: str, fields: dict[str, str] = {}):
+    emit("debug", message, fields)
+
+pub def info(message: str, fields: dict[str, str] = {}):
+    emit("info", message, fields)
+
+pub def warn(message: str, fields: dict[str, str] = {}):
+    emit("warn", message, fields)
+
+pub def error(message: str, fields: dict[str, str] = {}):
+    emit("error", message, fields)
 
 pub def set_level(level: str):
     """The lowest level to write: `debug`, `info`, `warn`, `error` or `off`."""
     set_level_raw(level)
+
+pub def set_format(format: str):
+    """`"text"` (the default) or `"json"`: one JSON object per line."""
+    if format != "text" and format != "json":
+        panic(f"the log format is \"text\" or \"json\", not {format!r}")
+    set_format_raw(format)
+
+@frozen
+pub struct Logger:
+    """A logger that adds the same fields to every line: `log.with_fields({"job": "nightly"})`.
+    Fields given to a call are added after these, and win over one of the same name."""
+    fields: frozendict[str, str]
+
+impl Logger:
+    priv def merged(self, fields: dict[str, str]) -> dict[str, str]:
+        all: dict[str, str] = {}
+        for name, value in self.fields.items():
+            all[name] = value
+        for name, value in fields.items():
+            all[name] = value
+        return all
+
+    def debug(self, message: str, fields: dict[str, str] = {}):
+        emit("debug", message, self.merged(fields))
+
+    def info(self, message: str, fields: dict[str, str] = {}):
+        emit("info", message, self.merged(fields))
+
+    def warn(self, message: str, fields: dict[str, str] = {}):
+        emit("warn", message, self.merged(fields))
+
+    def error(self, message: str, fields: dict[str, str] = {}):
+        emit("error", message, self.merged(fields))
+
+    def with_fields(self, fields: dict[str, str]) -> Logger:
+        """This logger's fields and these."""
+        return Logger(frozendict(self.merged(fields)))
+
+pub def with_fields(fields: dict[str, str]) -> Logger:
+    """A logger that adds `fields` to every line. It can be shared between tasks."""
+    return Logger(frozendict(fields))

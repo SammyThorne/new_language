@@ -17,6 +17,9 @@ def arg(index: int) -> str
 @extern("lrt_os_getenv")
 def getenv_raw(name: str) -> str?
 
+@extern("lrt_os_setenv")
+def setenv_raw(name: str, value: str) -> int
+
 @extern("lrt_os_exit")
 def exit_raw(code: int)
 
@@ -30,6 +33,14 @@ pub def args() -> list[str]:
 pub def getenv(name: str) -> str?:
     """An environment variable, or `None` if it is not set."""
     return getenv_raw(name)
+
+pub def setenv(name: str, value: str):
+    """Set an environment variable for this program and the programs it starts. Set variables
+    at startup, before starting tasks or a server: the environment is not safe to change while
+    other threads may read it. A name that is empty or holds `=`, or a NUL character in either,
+    panics."""
+    if setenv_raw(name, value) < 0:
+        panic(f"cannot set the environment variable {name!r}: a name must be non-empty, without `=`, and neither may hold a NUL character")
 
 pub def exit(code: int):
     """End the program now with an exit status. Standard output is flushed first."""

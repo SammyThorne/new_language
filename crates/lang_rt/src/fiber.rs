@@ -457,6 +457,8 @@ pub(crate) struct Fiber {
     /// See [`REFS`]: `refs[0..2]` are for the entry point, the rest the held mutexes.
     refs: UnsafeCell<[*mut u8; REFS]>,
     held: Cell<usize>,
+    /// The request ID its log lines carry (`crate::log`); a new fiber starts with its parent's.
+    pub(crate) context: crate::log::Context,
 }
 
 // SAFETY: a fiber's mutable fields are touched only by the thread running it or by the worker
@@ -593,6 +595,7 @@ pub(crate) fn spawn(refs: [*mut u8; 2], entry: Entry) -> FiberRef {
         entry: UnsafeCell::new(Some(entry)),
         refs: UnsafeCell::new(all_refs),
         held: Cell::new(0),
+        context: crate::log::Context::inherited(),
     };
     // SAFETY: the top of a stack no fiber uses, with room for the record.
     let fiber = unsafe {

@@ -1061,6 +1061,24 @@ Milestone 5 of the [Google sign-in plan](13-google-oauth-plan.md). When a progra
 
 **The documentation names the real cookie.** `install` registers the `googleSession` scheme with `server.security_scheme`, a new public method for libraries, rather than the compiler writing a fixed cookie name, which would be wrong for `https` (`__Host-session`). The compiler adds `googleSession` to each protected route's `security` and a `401` to its responses. `docs(security=...)` overrides a scheme of the same name.
 
+### D105. Binary bodies, client addresses, request IDs and structured logs (production web plan, milestone 1)
+
+Milestone 1 of the [production web plan](14-production-web-plan.md).
+
+**`http.binary`, not `http.bytes`.** A function named `bytes` in the `http` module hides the prelude type of the same name inside the module, so the response constructor is `http.binary(data, content_type, status)`. docs/05 had listed `http.bytes` and `req.body() -> bytes` since the first design without either being built; both now exist under these names. The response keeps the data in a private `bytes?` field and `serve` passes it to the same `lrt_http_respond`, which never treated the body as text, so there is no second entry point.
+
+**The request ID lives with the task, inline.** The runtime keeps a 129-byte context (a length and up to 128 bytes) in each fiber's record, and a new fiber copies its parent's, so tasks a handler spawns log with its ID. It is inline rather than a collected string because code outside the fiber runtime keeps it in a thread-local, which the collector does not scan. A handler that panics leaves it set; `serve_connection` clears it then, so the connection's next request cannot log with a stale ID. A request that panics gets no access line, since the middleware never resumes; the panic report is the record.
+
+**Fields are NUL-separated text to the runtime.** `log` passes the fields as `name\0value\0...`, and the runtime formats both forms, so the standard library needs no JSON or quoting code and `log.info(message)` without fields costs what it did. NUL characters in a field are dropped. `lrt_log_enabled` lets a disabled level skip building the fields.
+
+**Buffering only while a server runs, through one lock.** A per-thread buffer would reorder a task's lines when the task moves between worker threads, so lines go to one buffer under a mutex, flushed at 16 KiB, at once for `warn` and above, on each wake of the accept loop (at most 200 ms apart, which needs no timer), and by `out::flush`, which the exit, panic and `io.eprint` paths already call. Outside `serve`, or when standard error is a terminal, each line is written as before. The plan said 100 ms through the timer thread; the accept loop's 200 ms needs no new machinery.
+
+**Request IDs without a system call.** Until `uuid` exists (milestone 6), an ID is a process counter put through SplitMix64's finaliser, keyed by 8 random bytes read once: 16 hex digits, distinct within the process and unpredictable across processes. The plan suggested a random token, which would cost a `getrandom` per request.
+
+**`client_ip` and `trusted_proxies`.** `X-Forwarded-For` is believed only from a peer in `server.trusted_proxies`, walked from the right past trusted hops, so a client's own entries never win. The list is process-wide, set by `bind` like `max_body`, because a request holds no reference to its server. An entry that is not an address ends the walk at the hop before it. `LOG_FORMAT`, like `LOG`, takes the language's prefix, which the plan left out.
+
+**Not done here:** the access line has no route pattern or response size; both come with the metrics milestone, where the runtime knows the matched route and writes the body. `os.setenv` is unsafe in the presence of other threads reading the environment, as in every C runtime; its docstring says to call it at startup.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

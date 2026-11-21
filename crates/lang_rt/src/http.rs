@@ -175,7 +175,10 @@ pub unsafe extern "C-unwind" fn lrt_http_serve(listener: i64, entry: Entry, code
     let roots = tasks::roots(code, env);
     let callback = Callback { entry, roots: roots as usize };
     let fd = listener.as_raw_fd();
+    crate::log::start_buffering();
     while !SHUTDOWN.load(Ordering::SeqCst) {
+        // Log lines wait here at most until the loop next wakes.
+        crate::log::flush();
         let mut pfd = Pollfd { fd, events: 1, revents: 0 };
         // SAFETY: one valid pollfd; wake every 200 ms to notice a shutdown.
         let ready = unsafe { poll(&mut pfd, 1, 200) };
@@ -208,6 +211,7 @@ pub unsafe extern "C-unwind" fn lrt_http_serve(listener: i64, entry: Entry, code
         poll::wake_all_io();
         std::thread::sleep(Duration::from_millis(20));
     }
+    crate::log::stop_buffering();
     tasks::free_roots(roots);
 }
 
@@ -662,7 +666,7 @@ impl Request {
             .map(|h| self.text(h.value))
     }
 
-    fn body(&self) -> &[u8] {
+    pub(crate) fn body(&self) -> &[u8] {
         match &self.body {
             Body::InBuffer(span) => self.bytes(*span),
             Body::Owned(bytes) => bytes,
@@ -1161,7 +1165,7 @@ fn push_http_date(out: &mut Vec<u8>) {
 }
 
 /// Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
-fn civil(days: i64) -> (i64, u32, u32) {
+pub(crate) fn civil(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -1247,6 +1251,7 @@ fn serve_connection(
             if let Some(me) = fiber::current() {
                 fiber::release_held(me);
             }
+            crate::log::clear_request_id();
             request.responded = false;
         }
         if let Some(id) = request.upgraded {
@@ -1363,12 +1368,131 @@ pub unsafe extern "C-unwind" fn lrt_http_req_body(handle: i64) -> Str {
     optional(std::str::from_utf8(unsafe { request(handle) }.body()).ok())
 }
 
+/// The body's bytes, whether or not they are text (the data of a `bytes` value).
+///
+/// # Safety
+/// `handle` is a live request.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_req_body_bytes(handle: i64) -> Str {
+    Str::from_bytes(unsafe { request(handle) }.body())
+}
+
+/// The client's IP address: the peer's, or, when the peer is a trusted proxy (see
+/// [`lrt_http_set_trusted_proxies`]), the address it forwarded the request for.
+///
+/// # Safety
+/// `handle` is a live request.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_req_client_ip(handle: i64) -> Str {
+    let request = unsafe { request(handle) };
+    let peer = request.connection().peer.ip().to_canonical();
+    let trusted = TRUSTED_PROXIES.read().unwrap_or_else(|p| p.into_inner());
+    let forwarded = request
+        .header_list()
+        .filter(|h| request.bytes(h.name).eq_ignore_ascii_case(b"x-forwarded-for"))
+        .map(|h| request.text(h.value));
+    Str::from_bytes(client_ip(peer, forwarded, &trusted).to_string().as_bytes())
+}
+
+/// Addresses and networks whose `X-Forwarded-For` is believed, for every server in the process.
+static TRUSTED_PROXIES: std::sync::RwLock<Vec<Network>> = std::sync::RwLock::new(Vec::new());
+
+/// An address with a prefix length: `10.0.0.0/8`, or `127.0.0.1` for `/32`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Network {
+    address: std::net::IpAddr,
+    prefix: u8,
+}
+
+impl Network {
+    fn parse(text: &str) -> Option<Network> {
+        let (address, prefix) = match text.split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix)),
+            None => (text, None),
+        };
+        let address: std::net::IpAddr = address.trim().parse().ok()?;
+        let address = address.to_canonical();
+        let bits = if address.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            Some(p) => p.trim().parse::<u8>().ok().filter(|p| *p <= bits)?,
+            None => bits,
+        };
+        Some(Network { address, prefix })
+    }
+
+    fn contains(&self, address: std::net::IpAddr) -> bool {
+        use std::net::IpAddr;
+        match (self.address, address.to_canonical()) {
+            (IpAddr::V4(net), IpAddr::V4(a)) => {
+                let mask = if self.prefix == 0 { 0 } else { u32::MAX << (32 - self.prefix) };
+                u32::from(net) & mask == u32::from(a) & mask
+            }
+            (IpAddr::V6(net), IpAddr::V6(a)) => {
+                let mask = if self.prefix == 0 { 0 } else { u128::MAX << (128 - self.prefix) };
+                u128::from(net) & mask == u128::from(a) & mask
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The client behind `peer`: walking `X-Forwarded-For` from the right (the nearest hop) past
+/// trusted proxies, the first address that is not one. An entry that is not an address ends
+/// the walk at the hop before it, which is the last one known.
+fn client_ip<'a>(
+    peer: std::net::IpAddr,
+    forwarded: impl Iterator<Item = &'a str>,
+    trusted: &[Network],
+) -> std::net::IpAddr {
+    if !trusted.iter().any(|n| n.contains(peer)) {
+        return peer;
+    }
+    let hops: Vec<&str> =
+        forwarded.flat_map(|value| value.split(',')).map(str::trim).filter(|h| !h.is_empty()).collect();
+    let mut client = peer;
+    for hop in hops.iter().rev() {
+        let Some(address) = parse_hop(hop) else { break };
+        client = address;
+        if !trusted.iter().any(|n| n.contains(address)) {
+            break;
+        }
+    }
+    client
+}
+
+/// An address in `X-Forwarded-For`: plain, or with a port (`1.2.3.4:80`, `[::1]:80`).
+fn parse_hop(hop: &str) -> Option<std::net::IpAddr> {
+    if let Ok(address) = hop.parse::<std::net::IpAddr>() {
+        return Some(address.to_canonical());
+    }
+    hop.parse::<std::net::SocketAddr>().ok().map(|s| s.ip().to_canonical())
+}
+
+/// Trust these proxies' `X-Forwarded-For`: addresses or networks separated by commas. Returns
+/// `""`, or the first entry that is neither, leaving the list as it was.
+///
+/// # Safety
+/// `ptr` and `len` describe a UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_set_trusted_proxies(ptr: *const u8, len: i64) -> Str {
+    let text = unsafe { Str::from_raw(ptr, len) };
+    let mut networks = Vec::new();
+    for entry in text.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        match Network::parse(entry) {
+            Some(network) => networks.push(network),
+            None => return Str::from_bytes(entry.as_bytes()),
+        }
+    }
+    *TRUSTED_PROXIES.write().unwrap_or_else(|p| p.into_inner()) = networks;
+    Str::empty()
+}
+
 /// Leave the response: its status, content type (none if empty), other header lines
 /// (`Name: value\r\n` each) and body. It is written into the connection's output at once,
 /// while the body is reachable, so the body is copied once. A second call replaces the first.
 ///
 /// # Safety
-/// `handle` is a live request; the strings are UTF-8.
+/// `handle` is a live request; the content type and headers are UTF-8, and the body any bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C-unwind" fn lrt_http_respond(
@@ -1383,7 +1507,8 @@ pub unsafe extern "C-unwind" fn lrt_http_respond(
 ) {
     let content_type = unsafe { Str::from_raw(content_type, content_type_len) };
     let headers = unsafe { Str::from_raw(headers, headers_len) };
-    let body = unsafe { Str::from_raw(body, body_len) }.as_bytes();
+    // The body may be `bytes`, so it is not taken as text.
+    let body: &[u8] = if body_len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(body, body_len as usize) } };
     let request = unsafe { request(handle) };
     // SAFETY: the connection outlives the handler call.
     let out = unsafe { &mut (*request.connection).out };
@@ -1450,70 +1575,41 @@ fn write_response(
     }
 }
 
-// ---- logging ----------------------------------------------------------------------------
-
-static LOG_LEVEL: AtomicI64 = AtomicI64::new(-1);
-
-fn level_number(level: &str) -> i64 {
-    match level.to_ascii_lowercase().as_str() {
-        "debug" => 0,
-        "info" => 1,
-        "warn" | "warning" => 2,
-        "error" => 3,
-        "off" | "none" => 4,
-        _ => 1,
-    }
-}
-
-fn log_level() -> i64 {
-    let level = LOG_LEVEL.load(Ordering::Relaxed);
-    if level >= 0 {
-        return level;
-    }
-    let level = std::env::var(lang_names::env_var("LOG")).map(|v| level_number(&v)).unwrap_or(1);
-    LOG_LEVEL.store(level, Ordering::Relaxed);
-    level
-}
-
-/// Set the lowest level that is written: `debug`, `info`, `warn`, `error` or `off`.
-///
-/// # Safety
-/// `ptr` and `len` describe a UTF-8 string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn lrt_log_set_level(ptr: *const u8, len: i64) {
-    LOG_LEVEL.store(level_number(unsafe { Str::from_raw(ptr, len) }), Ordering::Relaxed);
-}
-
-/// Write `2026-11-18T12:00:00.123Z INFO message` to standard error, if the level is enabled.
-///
-/// # Safety
-/// The arguments describe UTF-8 strings.
-#[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn lrt_log_write(level: *const u8, level_len: i64, message: *const u8, message_len: i64) {
-    let level = unsafe { Str::from_raw(level, level_len) };
-    if level_number(level) < log_level() {
-        return;
-    }
-    let message = unsafe { Str::from_raw(message, message_len) };
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    let seconds = now.as_secs();
-    let (year, month, day) = civil((seconds / 86_400) as i64);
-    let rest = seconds % 86_400;
-    let line = format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z {:<5} {message}\n",
-        rest / 3600,
-        rest / 60 % 60,
-        rest % 60,
-        now.subsec_millis(),
-        level.to_ascii_uppercase()
-    );
-    crate::out::flush();
-    let _ = std::io::stderr().lock().write_all(line.as_bytes());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_client_is_the_first_untrusted_hop_from_the_right() {
+        let trusted: Vec<Network> =
+            ["10.0.0.0/8", "::1", "192.168.1.7"].iter().map(|t| Network::parse(t).unwrap()).collect();
+        let ip = |t: &str| t.parse::<std::net::IpAddr>().unwrap();
+        let client = |peer: &str, headers: &[&str]| client_ip(ip(peer), headers.iter().copied(), &trusted).to_string();
+        // An untrusted peer's header is ignored.
+        assert_eq!(client("203.0.113.9", &["1.1.1.1"]), "203.0.113.9");
+        // Through one trusted proxy, and through two, across two header lines.
+        assert_eq!(client("10.1.2.3", &["198.51.100.4"]), "198.51.100.4");
+        assert_eq!(client("10.1.2.3", &["6.6.6.6, 198.51.100.4", "192.168.1.7"]), "198.51.100.4");
+        // A client cannot hide behind a forged entry: the rightmost untrusted one wins.
+        assert_eq!(client("10.1.2.3", &["1.2.3.4, 198.51.100.4"]), "198.51.100.4");
+        // Every hop trusted: the leftmost. Garbage ends the walk at the hop before it.
+        assert_eq!(client("10.1.2.3", &["10.9.9.9"]), "10.9.9.9");
+        assert_eq!(client("10.1.2.3", &["nonsense"]), "10.1.2.3");
+        // Ports, IPv6, and IPv4-mapped IPv6 peers.
+        assert_eq!(client("::1", &["[2001:db8::5]:443"]), "2001:db8::5");
+        assert_eq!(client("::ffff:10.0.0.1", &["198.51.100.4:8080"]), "198.51.100.4");
+        // No header from a trusted proxy: the proxy itself.
+        assert_eq!(client("10.1.2.3", &[]), "10.1.2.3");
+    }
+
+    #[test]
+    fn networks_parse_and_match() {
+        assert!(Network::parse("10.0.0.0/33").is_none());
+        assert!(Network::parse("10.0.0/8").is_none());
+        assert!(Network::parse("fd00::/8").unwrap().contains("fd12::1".parse().unwrap()));
+        assert!(Network::parse("0.0.0.0/0").unwrap().contains("8.8.8.8".parse().unwrap()));
+        assert!(!Network::parse("10.0.0.0/8").unwrap().contains("::1".parse().unwrap()));
+    }
 
     #[test]
     fn dates_are_formatted_as_http_wants() {

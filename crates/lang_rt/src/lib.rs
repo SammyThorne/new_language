@@ -22,6 +22,7 @@ pub mod gc;
 pub mod http;
 pub mod json;
 pub mod list;
+pub mod log;
 pub mod num;
 pub mod out;
 pub mod overflow;

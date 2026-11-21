@@ -345,6 +345,23 @@ pub unsafe extern "C-unwind" fn lrt_os_getenv(name: *const u8, len: i64) -> Str 
     }
 }
 
+/// Set an environment variable. Returns 0, or -1 if the name is empty or holds `=` or NUL, or
+/// the value holds NUL, which the environment cannot store.
+///
+/// # Safety
+/// The arguments must describe UTF-8 strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_os_setenv(name: *const u8, name_len: i64, value: *const u8, value_len: i64) -> i64 {
+    let (name, value) = unsafe { (text(name, name_len), text(value, value_len)) };
+    if name.is_empty() || name.contains(['=', '\0']) || value.contains('\0') {
+        return -1;
+    }
+    // SAFETY: the C library's environment is not thread-safe; the documentation of
+    // `os.setenv` says to set variables at startup, before starting tasks or servers.
+    unsafe { std::env::set_var(name, value) };
+    0
+}
+
 /// End the program with an exit status, after flushing standard output.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_os_exit(code: i64) {

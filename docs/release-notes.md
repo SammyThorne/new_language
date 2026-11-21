@@ -23,9 +23,15 @@ Weby is a compiled, Python-shaped language for web backends. `weby --version` re
 
 **Performance.** On this repository's benchmarks every program runs faster than Go's version (between 1.1 and 3.0 times), and the HTTP endpoints serve 1.8 to 3.1 times Go's request rate at 256 connections with about 40% of its CPU per request. Idle WebSocket connections cost about 19 KiB each. A small program's executable is 0.5 MB and the benchmark web server's 1.3 MB. The numbers, how they were measured and what limits them are in [web-performance.md](web-performance.md) and [bench/README.md](../bench/README.md). `bench/run.py --check` and `bench/http/counts.py --check` fail on a regression.
 
-## Since 1.1.0: signing in with Google
+## Since 1.1.0: signing in with Google, and production web features
 
 Not yet in a numbered release; `weby --version` still says 1.1.0.
+
+**Logs and requests** ([production web plan](14-production-web-plan.md), milestone 1, D105):
+- `log` functions take `fields` (`log.info("saved", {"order": id})`), written as `name=value`, or as one JSON object per line after `log.set_format("json")` or with the `LOG_FORMAT` variable. `log.with_fields(...)` gives a logger with fields of its own.
+- `http.request_log()` gives each request an ID (the client's `X-Request-Id` or a new one), returns it, logs one line per request, and adds the ID to every line logged while the request is handled, including from tasks it spawns.
+- While a server runs, log lines to a pipe or file are written in blocks rather than one system call each.
+- `req.client_ip()` with `server.trusted_proxies`, for servers behind a proxy; `req.body()` as `bytes`; `http.binary(...)` for responses of any bytes; `os.setenv`.
 
 **Signing in with Google** ([plan](13-google-oauth-plan.md), D100 to D104). The new `auth` module signs users in with their Google accounts from the credentials file the Google Cloud console makes, as Passport, Authlib or NextAuth do in other languages:
 

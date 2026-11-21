@@ -302,6 +302,7 @@ The HTTP, HTTPS and WebSocket servers in `tests/http` are driven over real socke
 | [docs/errors.md](docs/errors.md) | Every error and warning code: what it means, a real example, and what to do (`weby explain E0300` prints one) |
 | [docs/11-release-polish-plan.md](docs/11-release-polish-plan.md) | The language and compiler work before release: gaps found by probing, five milestones, all done; what each did and left out is in the decision log (D91 to D95) |
 | [docs/12-openapi-docs-plan.md](docs/12-openapi-docs-plan.md) | Built: `server.docs("/docs")` serves an OpenAPI document generated from the routes and a built-in documentation page (a viewer written for the project, no downloads), like Fastify's swagger plugins |
+| [docs/14-production-web-plan.md](docs/14-production-web-plan.md) | Being built: what a web service needs in production, from CORS and static files to metrics with a dashboard, uploads, templates, SQLite and jobs, in 25 milestones; milestone 1 (structured logs and request IDs) is done |
 | [editors/README.md](editors/README.md) | Editor support and the language server |
 
 The name "Weby" and the `.wb` extension may still change. The name is kept out of crate names and runtime symbols and lives in one small crate of constants, so it can be changed later with a short checklist ([docs/03-compiler-architecture.md](docs/03-compiler-architecture.md#renaming-the-language)).
