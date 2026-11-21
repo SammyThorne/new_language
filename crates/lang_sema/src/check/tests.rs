@@ -121,6 +121,25 @@ def main():
 }
 
 #[test]
+fn lambdas_take_their_types_from_an_optional_function() {
+    ok("\
+def pick(allow: (def(str) -> bool)? = None) -> bool:
+    match allow:
+        case Some(f):
+            return f(\"x\")
+        case None:
+            return False
+
+def main():
+    print(pick(allow=lambda s: s == \"x\"), pick())
+    later: (def(int) -> int)? = None
+    later = lambda n: n + 1
+    print(later.unwrap()(1))
+");
+    assert_eq!(errors("def main():\n    f: int? = lambda n: n\n    print(f)\n"), [codes::CANNOT_INFER]);
+}
+
+#[test]
 fn conditions_must_be_bool() {
     assert_eq!(errors("def main():\n    n = 1\n    if n:\n        print(n)\n"), [codes::NOT_BOOL]);
 }

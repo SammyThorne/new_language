@@ -896,6 +896,14 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - A browser check with the built-in browser against a second origin served by the same program.
 - **Docs:** docs/05, and a site section on CORS.
 
+**Done** (D106). Everything listed, with these differences:
+- A function for origins is a separate `allow=` argument, since `origins` cannot be a list or a function. The checker now gives a lambda its types where an optional function is expected.
+- Group-scoped preflights needed a router change: a group route with middleware keeps that middleware around a 405, and an `OPTIONS` request with `Access-Control-Request-Method` that no route accepts goes to it (D106).
+- Headers for error responses: middleware records them on the request, and `Server.handle` adds them to the response it makes from an `Err`. `request_log`'s `X-Request-Id` now uses the same path.
+- A preflight from a refused origin gets a 204 with only `Vary`; setup also panics for an origin with a path and for no origins.
+- Tests: `tests/run/http_cors.wb` (preflights allowed and refused, actual requests, `Vary` merged with the handler's, errors, `*`, credentials, `allow`, a group policy, a group without one), two setup-panic programs, and a checker unit test. The browser check ran in the built-in browser: a page on 127.0.0.1:8601 called an API on :8602 whose `/api` group allowed it; the preflighted `POST` with a custom header succeeded and read the exposed `X-Request-Id`, a 404 was readable, and a route outside the group was blocked.
+- Gates: all pass, with the counts unchanged.
+
 #### Milestone 3: static files (about 2.5 days)
 
 - `server.static` and `lrt_http_static` as in 4.3: the content-type table, validators, 304s, ranges, pre-compressed files, chunked sending of large files, and `fallback=`.

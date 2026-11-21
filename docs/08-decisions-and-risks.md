@@ -1067,7 +1067,7 @@ Milestone 1 of the [production web plan](14-production-web-plan.md).
 
 **`http.binary`, not `http.bytes`.** A function named `bytes` in the `http` module hides the prelude type of the same name inside the module, so the response constructor is `http.binary(data, content_type, status)`. docs/05 had listed `http.bytes` and `req.body() -> bytes` since the first design without either being built; both now exist under these names. The response keeps the data in a private `bytes?` field and `serve` passes it to the same `lrt_http_respond`, which never treated the body as text, so there is no second entry point.
 
-**The request ID lives with the task, inline.** The runtime keeps a 129-byte context (a length and up to 128 bytes) in each fiber's record, and a new fiber copies its parent's, so tasks a handler spawns log with its ID. It is inline rather than a collected string because code outside the fiber runtime keeps it in a thread-local, which the collector does not scan. A handler that panics leaves it set; `serve_connection` clears it then, so the connection's next request cannot log with a stale ID. A request that panics gets no access line, since the middleware never resumes; the panic report is the record.
+**The request ID lives with the task, counted.** Each fiber's record holds an optional reference-counted string (two words, `None` for a task with no request), and a new fiber takes a reference to its parent's, so tasks a handler spawns log with its ID. It is counted rather than collected because code outside the fiber runtime keeps it in a thread-local, which the collector does not scan. A first version kept the ID inline (129 bytes), which made every task bigger whether or not it served a request. A handler that panics leaves it set; `serve_connection` clears it then, so the connection's next request cannot log with a stale ID. A request that panics gets no access line, since the middleware never resumes; the panic report is the record.
 
 **Fields are NUL-separated text to the runtime.** `log` passes the fields as `name\0value\0...`, and the runtime formats both forms, so the standard library needs no JSON or quoting code and `log.info(message)` without fields costs what it did. NUL characters in a field are dropped. `lrt_log_enabled` lets a disabled level skip building the fields.
 
@@ -1078,6 +1078,20 @@ Milestone 1 of the [production web plan](14-production-web-plan.md).
 **`client_ip` and `trusted_proxies`.** `X-Forwarded-For` is believed only from a peer in `server.trusted_proxies`, walked from the right past trusted hops, so a client's own entries never win. The list is process-wide, set by `bind` like `max_body`, because a request holds no reference to its server. An entry that is not an address ends the walk at the hop before it. `LOG_FORMAT`, like `LOG`, takes the language's prefix, which the plan left out.
 
 **Not done here:** the access line has no route pattern or response size; both come with the metrics milestone, where the runtime knows the matched route and writes the body. `os.setenv` is unsafe in the presence of other threads reading the environment, as in every C runtime; its docstring says to call it at startup.
+
+**Counts.** `Response`'s `data` field moves every response into the next allocation size class, 16 bytes more per request on every benchmark endpoint, and even a one-word field does. The owner approved re-recording `bench/http/counts.json` for it; it is the one exception so far to docs/14's rule that unused features leave the counts unchanged.
+
+### D106. CORS (production web plan, milestone 2)
+
+Milestone 2 of the [production web plan](14-production-web-plan.md): `http.cors(...)`.
+
+**`allow` beside `origins`.** The plan let `origins` be a list or a function; the language has no union types, so the function is a separate `allow: (def(str) -> bool)?` argument, consulted for origins the list does not name. Passing a lambda there needed the checker to see through the optional: a lambda where `F?` is expected now takes its parameter types from `F`.
+
+**Preflights through a group.** Middleware on a group wraps each of its route handlers, so it never sees a request the router refuses, and the router refuses every preflight (no route accepts `OPTIONS`). A route registered by a group with middleware now also keeps that middleware wrapped around a 405; when no route accepts an `OPTIONS` request that carries `Access-Control-Request-Method`, the router hands it to the route that accepts the method asked about, if it has one. The group's `cors` answers it; a group without `cors` sends the same 405 through its middleware. Routes never pay for this: it runs only where the router would have answered 405.
+
+**Headers on error responses.** A handler's `Err` becomes a response in `Server.handle`, after the middleware has returned. Middleware now records headers for that response on the request (`RequestExtra.error_headers`, allocated only when used), which `request_log`'s `X-Request-Id` also uses instead of its own special case. So a browser can read a 404's body from another origin.
+
+**Smaller choices.** `*` is sent only for `origins=["*"]` without credentials, and then without `Vary: Origin`; a named origin is echoed with `Vary: Origin` (added to any `Vary` the handler set). A preflight from a refused origin gets a 204 with only `Vary`, never reaching a route. An `OPTIONS` request without `Access-Control-Request-Method` is not a preflight and is routed as before. Setup panics for no origins, for an origin with a path (a trailing `/` is the usual mistake, and browsers never send one), and for credentials with `*`.
 
 ## Risks
 

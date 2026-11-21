@@ -70,6 +70,12 @@ impl Checker<'_, '_> {
         expected: Option<Ty>,
         span: Span,
     ) -> hir::Expr {
+        // Where an optional function is expected (`allow: (def(str) -> bool)? = None`), the
+        // lambda is the function, and the conversion to the optional happens as for any value.
+        let expected = expected.map(|t| match self.types.kind(t) {
+            &TyKind::Option(inner) if matches!(self.types.kind(inner), TyKind::Func(..)) => inner,
+            _ => t,
+        });
         let expected_func = expected.and_then(|t| match self.types.kind(t).clone() {
             TyKind::Func(ps, r) => Some((ps, r)),
             _ => None,

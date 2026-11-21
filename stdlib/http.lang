@@ -179,6 +179,9 @@ struct RequestExtra:
     # A test request's body, query string and headers; `None` for a request from a connection.
     test: TestParts?
     locals: dict[str, str]?
+    # Headers middleware asked for on the response `Server.handle` makes from an error, which
+    # did not exist when the middleware saw the request.
+    error_headers: dict[str, str]? = None
 
 struct TestParts:
     body: str
@@ -269,6 +272,24 @@ impl Request:
                         return values.get(name)
                     case None:
                         return None
+            case None:
+                return None
+
+    priv def add_error_header(self, name: str, value: str):
+        match self.extra:
+            case Some(extra):
+                match extra.error_headers:
+                    case Some(headers):
+                        headers[name] = value
+                    case None:
+                        extra.error_headers = {name: value}
+            case None:
+                self.extra = RequestExtra(None, None, {name: value})
+
+    priv def error_headers(self) -> dict[str, str]?:
+        match self.extra:
+            case Some(extra):
+                return extra.error_headers
             case None:
                 return None
 
@@ -639,6 +660,10 @@ struct Route:
     names: list[str]
     # Whether the pattern has parameters; if not, every path it matches is the same.
     has_params: bool
+    # For a route of a group with middleware: that middleware around a 405, which answers a
+    # CORS preflight for this route (an `OPTIONS` request no route accepts), so that the group's
+    # `http.cors` can. `Server.unrouted` calls it.
+    preflight: Handler? = None
 
 def new_route(method: str, pattern: str, handler: Handler) -> Route:
     kinds: list[int] = []
@@ -742,6 +767,7 @@ def log_request(req: Request, next: Handler, skipped: tuple[str, ...]) -> Result
             response.headers["X-Request-Id"] = id
         case Err(problem):
             status = problem.status()
+            req.add_error_header("X-Request-Id", id)
     fields = {"method": req.method, "path": req.path, "status": str(status), "ms": f"{ms:.2f}"}
     client = req.client_ip()
     if client != "":
@@ -771,6 +797,162 @@ def usable_request_id(id: str) -> bool:
         if not (ascii_alnum or c == "." or c == "_" or c == "-"):
             return False
     return True
+
+# ---- CORS ---------------------------------------------------------------------------------
+
+@frozen
+struct CorsPolicy:
+    origins: tuple[str, ...]
+    any_origin: bool
+    allow: (def(str) -> bool)?
+    methods: str
+    # Lower-cased.
+    headers: tuple[str, ...]
+    any_header: bool
+    expose: str
+    credentials: bool
+    max_age: int
+
+pub def cors(
+    origins: list[str] = [],
+    allow: (def(str) -> bool)? = None,
+    methods: list[str] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+    headers: list[str] = ["Content-Type", "Authorization"],
+    expose: list[str] = [],
+    credentials: bool = False,
+    max_age: int = 600,
+) -> Middleware:
+    """
+    Middleware that lets pages from other origins call this server from a browser
+    (cross-origin resource sharing):
+
+        server.use(http.cors(origins=["https://app.example.com"], expose=["X-Request-Id"]))
+
+    `origins` lists the origins allowed, exactly as browsers send them (`https://host` or
+    `https://host:port`, no path), or `["*"]` for any. `allow` decides instead, or as well,
+    for origins not listed: `allow=lambda origin: origin.ends_with(".example.com")`.
+
+    A preflight (an `OPTIONS` request with `Origin` and `Access-Control-Request-Method`) is
+    answered here with a 204 and never reaches a route: it allows `methods`, the requested
+    headers that are in `headers` (`["*"]` allows any), and is cached by the browser for
+    `max_age` seconds. Other requests from an allowed origin get `Access-Control-Allow-Origin`
+    and `Access-Control-Expose-Headers` for `expose`, on errors too. `credentials=True` lets
+    the browser send cookies and read the response; it needs listed origins, not `"*"`.
+    Requests from other origins get no CORS headers, so the browser keeps the response from
+    the page. Use it on a group (`api.use(http.cors(...))`) to allow only that group's routes.
+    """
+    if len(origins) == 0 and allow is None:
+        panic("`http.cors` needs `origins` or `allow`, or it allows no origin")
+    for origin in origins:
+        if origin != "*" and (not origin.contains("://") or origin.partition("://")[2].contains("/")):
+            panic(f"`http.cors` origin {origin!r} is not an origin such as \"https://app.example.com\" (a scheme and a host, with no path)")
+    any_origin = "*" in origins
+    if credentials and any_origin:
+        panic("`http.cors` cannot allow credentials from any origin (`\"*\"`): browsers refuse that combination, so list the origins")
+    lowered = [header.lower() for header in headers]
+    policy = CorsPolicy(
+        tuple(origins),
+        any_origin,
+        allow,
+        ", ".join([method.upper() for method in methods]),
+        tuple(lowered),
+        "*" in lowered,
+        ", ".join(expose),
+        credentials,
+        max_age,
+    )
+    return lambda req, next: policy.handle(req, next)
+
+impl CorsPolicy:
+    def allows(self, origin: str) -> bool:
+        if self.any_origin or origin in self.origins:
+            return True
+        match self.allow:
+            case Some(decide):
+                return decide(origin)
+            case None:
+                return False
+
+    def handle(self, req: Request, next: Handler) -> Result[Response]:
+        origin = ""
+        match req.header("Origin"):
+            case Some(sent):
+                origin = sent
+            case None:
+                return next(req)
+        allowed = self.allows(origin)
+        if req.method == "OPTIONS":
+            match req.header("Access-Control-Request-Method"):
+                case Some(_):
+                    return self.preflight(req, origin, allowed)
+                case None:
+                    pass
+        if not allowed:
+            return next(req)
+        result = next(req)
+        match result:
+            case Ok(response):
+                for name, value in self.actual_headers(origin):
+                    if name == "Vary":
+                        add_vary(response, value)
+                    else:
+                        response.headers[name] = value
+            case Err(_):
+                for name, value in self.actual_headers(origin):
+                    req.add_error_header(name, value)
+        return result
+
+    def allow_origin(self, origin: str) -> str:
+        """The `Access-Control-Allow-Origin` value: `*` only when any origin is allowed without
+        credentials, since a response that names the origin must not be cached for another."""
+        return "*" if self.any_origin and not self.credentials else origin
+
+    def actual_headers(self, origin: str) -> list[tuple[str, str]]:
+        headers = [("Access-Control-Allow-Origin", self.allow_origin(origin))]
+        if self.allow_origin(origin) != "*":
+            headers.append(("Vary", "Origin"))
+        if self.credentials:
+            headers.append(("Access-Control-Allow-Credentials", "true"))
+        if self.expose != "":
+            headers.append(("Access-Control-Expose-Headers", self.expose))
+        return headers
+
+    def preflight(self, req: Request, origin: str, allowed: bool) -> Result[Response]:
+        response = no_content()
+        response.headers["Vary"] = "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+        if not allowed:
+            return response
+        response.headers["Access-Control-Allow-Origin"] = self.allow_origin(origin)
+        response.headers["Access-Control-Allow-Methods"] = self.methods
+        match req.header("Access-Control-Request-Headers"):
+            case Some(requested):
+                granted: list[str] = []
+                for name in requested.split(","):
+                    name = name.strip()
+                    if name != "" and (self.any_header or name.lower() in self.headers):
+                        granted.append(name)
+                if len(granted) > 0:
+                    response.headers["Access-Control-Allow-Headers"] = ", ".join(granted)
+            case None:
+                pass
+        if self.credentials:
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        if self.max_age >= 0:
+            response.headers["Access-Control-Max-Age"] = str(self.max_age)
+        return response
+
+def add_vary(response: Response, name: str):
+    """Add `name` to the response's `Vary` header."""
+    key = "Vary"
+    for existing in response.headers.keys():
+        if existing.lower() == "vary":
+            key = existing
+    match response.headers.get(key):
+        case Some(value):
+            if name.lower() not in [part.strip().lower() for part in value.split(",")]:
+                response.headers[key] = f"{value}, {name}"
+        case None:
+            response.headers[key] = name
 
 struct DocOperation:
     """A route `mount` documented: `operation` is its OpenAPI operation object as JSON text,
@@ -921,7 +1103,7 @@ impl Server:
                     if accepts(candidate.route, req.method):
                         req.params = candidate.params
                         return candidate.route.handler(req)
-                return not_routed(req, [candidate.route for candidate in candidates])
+                return self.unrouted(req, [candidate.route for candidate in candidates])
             case None:
                 pass
         segments = split_path(req.path)
@@ -929,7 +1111,26 @@ impl Server:
             if fits(route, segments) and accepts(route, req.method):
                 req.params = params_of(route, segments) if route.has_params else self.no_params
                 return route.handler(req)
-        return not_routed(req, [route for route in self.routes if fits(route, segments)])
+        return self.unrouted(req, [route for route in self.routes if fits(route, segments)])
+
+    def unrouted(self, req: Request, fitting: list[Route]) -> Result[Response]:
+        """The answer when no route accepts the method. A CORS preflight goes to the route that
+        accepts the method it asks about, if that route is in a group with middleware: the
+        group's `http.cors` answers it (and without one, the 405 below comes back through it)."""
+        if req.method == "OPTIONS":
+            match req.header("Access-Control-Request-Method"):
+                case Some(wanted):
+                    for route in fitting:
+                        if accepts(route, wanted):
+                            match route.preflight:
+                                case Some(preflight):
+                                    return preflight(req)
+                                case None:
+                                    pass
+                            break
+                case None:
+                    pass
+        return not_routed(req, fitting)
 
     def build_fixed(self):
         fixed: dict[str, list[Candidate]] = {}
@@ -963,10 +1164,12 @@ impl Server:
                         response = custom(req, failure)
                     case None:
                         pass
-                # `request_log` could not add its header to a response that did not exist yet.
-                match req.local(REQUEST_ID):
-                    case Some(id):
-                        response.headers["X-Request-Id"] = id
+                # Middleware (`request_log`, `cors`) could not add its headers to a response
+                # that did not exist yet.
+                match req.error_headers():
+                    case Some(headers):
+                        for name, value in headers.items():
+                            response.headers[name] = value
                     case None:
                         pass
                 return response
@@ -1235,6 +1438,12 @@ impl Group:
         for i in range(len(self.middleware) - 1, -1, -1):
             wrapped = wrap(self.middleware[i], wrapped)
         self.server.route(method, self.prefix + path, wrapped)
+        if len(self.middleware) > 0:
+            server = self.server
+            preflight: Handler = lambda req: not_routed(req, [r for r in server.routes if fits(r, split_path(req.path))])
+            for i in range(len(self.middleware) - 1, -1, -1):
+                preflight = wrap(self.middleware[i], preflight)
+            server.routes[len(server.routes) - 1].preflight = preflight
 
     def get(self, path: str, handler: Handler):
         self.route("GET", path, handler)

@@ -1,0 +1,106 @@
+# CORS (docs/14, milestone 2): preflights allowed and refused, actual requests, credentials,
+# `Vary`, errors, and a policy scoped to a group.
+# expect: preflight: 204 | origin https://app.example.com | methods GET, HEAD, POST, PUT, PATCH, DELETE | headers Content-Type, authorization | age 600
+# expect: preflight vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers
+# expect: preflight refused: 204 | origin None | methods None | handler not run: True
+# expect: actual: 200 | origin https://app.example.com | vary Accept, Origin | expose X-Request-Id | credentials None
+# expect: other origin: 200 | origin None
+# expect: no origin: 200 | origin None
+# expect: plain options: 405
+# expect: error: 404 | origin https://app.example.com
+# expect: any: * | vary None | preflight * | headers X-Anything
+# expect: credentials: https://a.test | true | preflight true
+# expect: allow function: https://x.example.com | https://example.org None
+# expect: group preflight: 204 https://app.example.com | outside group: 405 None
+# expect: group actual: 200 https://app.example.com | outside group: 200 None
+# expect: group without cors: 405 None
+
+import http
+
+def items(req: http.Request) -> Result[http.Response]:
+    return http.text("items").with_header("Vary", "Accept")
+
+def missing(req: http.Request) -> Result[http.Response]:
+    return Err(http.Error(404, "no such item"))
+
+def remember(req: http.Request) -> Result[http.Response]:
+    return http.text("posted")
+
+def get(server: http.Server, method: str, path: str, headers: dict[str, str]) -> http.Response:
+    return server.handle(http.test_request(method, path, headers=headers))
+
+def preflight_headers(origin: str, method: str = "POST") -> dict[str, str]:
+    return {
+        "Origin": origin,
+        "Access-Control-Request-Method": method,
+        "Access-Control-Request-Headers": "Content-Type, authorization, X-Secret",
+    }
+
+def main():
+    server = http.Server()
+    server.use(http.cors(origins=["https://app.example.com"], expose=["X-Request-Id"]))
+    server.get("/items", items)
+    server.post("/items", remember)
+    server.get("/missing", missing)
+
+    r = get(server, "OPTIONS", "/items", preflight_headers("https://app.example.com"))
+    print("preflight:", r.status, "| origin", r.headers.get("Access-Control-Allow-Origin").unwrap(), "| methods", r.headers.get("Access-Control-Allow-Methods").unwrap(), "| headers", r.headers.get("Access-Control-Allow-Headers").unwrap(), "| age", r.headers.get("Access-Control-Max-Age").unwrap())
+    print("preflight vary:", r.headers.get("Vary").unwrap())
+
+    r = get(server, "OPTIONS", "/items", preflight_headers("https://evil.example"))
+    print("preflight refused:", r.status, "| origin", r.headers.get("Access-Control-Allow-Origin"), "| methods", r.headers.get("Access-Control-Allow-Methods"), "| handler not run:", r.body == "")
+
+    r = get(server, "GET", "/items", {"Origin": "https://app.example.com"})
+    print("actual:", r.status, "| origin", r.headers.get("Access-Control-Allow-Origin").unwrap(), "| vary", r.headers.get("Vary").unwrap(), "| expose", r.headers.get("Access-Control-Expose-Headers").unwrap(), "| credentials", r.headers.get("Access-Control-Allow-Credentials"))
+    r = get(server, "GET", "/items", {"Origin": "https://evil.example"})
+    print("other origin:", r.status, "| origin", r.headers.get("Access-Control-Allow-Origin"))
+    r = get(server, "GET", "/items", {})
+    print("no origin:", r.status, "| origin", r.headers.get("Access-Control-Allow-Origin"))
+    # An `OPTIONS` request that is not a preflight goes to the routes as before.
+    r = get(server, "OPTIONS", "/items", {"Origin": "https://app.example.com"})
+    print("plain options:", r.status)
+    r = get(server, "GET", "/missing", {"Origin": "https://app.example.com"})
+    print("error:", r.status, "| origin", r.headers.get("Access-Control-Allow-Origin").unwrap())
+
+    anyone = http.Server()
+    anyone.use(http.cors(origins=["*"], headers=["*"]))
+    anyone.get("/items", items)
+    r = get(anyone, "GET", "/items", {"Origin": "https://a.test"})
+    p = get(anyone, "OPTIONS", "/items", {"Origin": "https://a.test", "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "X-Anything"})
+    print("any:", r.headers.get("Access-Control-Allow-Origin").unwrap(), "| vary", r.headers.get("Vary").unwrap() if r.headers.get("Vary").unwrap() != "Accept" else "None", "| preflight", p.headers.get("Access-Control-Allow-Origin").unwrap(), "| headers", p.headers.get("Access-Control-Allow-Headers").unwrap())
+
+    trusted = http.Server()
+    trusted.use(http.cors(origins=["https://a.test"], credentials=True))
+    trusted.get("/items", items)
+    r = get(trusted, "GET", "/items", {"Origin": "https://a.test"})
+    p = get(trusted, "OPTIONS", "/items", preflight_headers("https://a.test", "GET"))
+    print("credentials:", r.headers.get("Access-Control-Allow-Origin").unwrap(), "|", r.headers.get("Access-Control-Allow-Credentials").unwrap(), "| preflight", p.headers.get("Access-Control-Allow-Credentials").unwrap())
+
+    decided = http.Server()
+    decided.use(http.cors(allow=lambda origin: origin.ends_with(".example.com")))
+    decided.get("/items", items)
+    yes = get(decided, "GET", "/items", {"Origin": "https://x.example.com"})
+    no = get(decided, "GET", "/items", {"Origin": "https://example.org"})
+    print("allow function:", yes.headers.get("Access-Control-Allow-Origin").unwrap(), "| https://example.org", no.headers.get("Access-Control-Allow-Origin"))
+
+    # A policy on a group: only its routes allow the origin, preflights included.
+    scoped = http.Server()
+    api = scoped.group("/api")
+    api.use(http.cors(origins=["https://app.example.com"]))
+    api.post("/items", remember)
+    api.get("/items", items)
+    scoped.post("/form", remember)
+    p = get(scoped, "OPTIONS", "/api/items", preflight_headers("https://app.example.com"))
+    q = get(scoped, "OPTIONS", "/form", preflight_headers("https://app.example.com"))
+    print("group preflight:", p.status, p.headers.get("Access-Control-Allow-Origin").unwrap(), "| outside group:", q.status, q.headers.get("Access-Control-Allow-Origin"))
+    a = get(scoped, "GET", "/api/items", {"Origin": "https://app.example.com"})
+    b = get(scoped, "POST", "/form", {"Origin": "https://app.example.com"})
+    print("group actual:", a.status, a.headers.get("Access-Control-Allow-Origin").unwrap(), "| outside group:", b.status, b.headers.get("Access-Control-Allow-Origin"))
+
+    # A group whose middleware is not CORS: the preflight still gets a 405, through it.
+    other = http.Server()
+    logged = other.group("/v1")
+    logged.use(http.request_log())
+    logged.post("/items", remember)
+    r = get(other, "OPTIONS", "/v1/items", preflight_headers("https://app.example.com"))
+    print("group without cors:", r.status, r.headers.get("Access-Control-Allow-Origin"))

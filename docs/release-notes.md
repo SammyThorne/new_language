@@ -33,6 +33,8 @@ Not yet in a numbered release; `weby --version` still says 1.1.0.
 - While a server runs, log lines to a pipe or file are written in blocks rather than one system call each.
 - `req.client_ip()` with `server.trusted_proxies`, for servers behind a proxy; `req.body()` as `bytes`; `http.binary(...)` for responses of any bytes; `os.setenv`.
 
+**CORS** (milestone 2, D106): `http.cors(origins=[...])` lets pages on other origins call the server from a browser. It answers preflights, adds the headers to responses (error responses too), supports credentials, exposed headers and a function that decides origins, and works on a group of routes. A lambda can now be passed where an optional function is expected.
+
 **Signing in with Google** ([plan](13-google-oauth-plan.md), D100 to D104). The new `auth` module signs users in with their Google accounts from the credentials file the Google Cloud console makes, as Passport, Authlib or NextAuth do in other languages:
 
 - `provider.install(server)` adds the login, callback and logout routes and a signed session cookie. It uses the authorization code flow with PKCE, `state` and `nonce`, and checks the ID token's RS256 signature against Google's keys, which are cached.

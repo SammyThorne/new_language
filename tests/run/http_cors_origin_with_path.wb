@@ -1,0 +1,9 @@
+# An origin is a scheme and a host: `http.cors` refuses one with a path at setup.
+# expect-exit: 101
+# expect-stderr: panic: `http.cors` origin 'https://app.example.com/' is not an origin such as "https://app.example.com" (a scheme and a host, with no path)
+
+import http
+
+def main():
+    server = http.Server()
+    server.use(http.cors(origins=["https://app.example.com/"]))
