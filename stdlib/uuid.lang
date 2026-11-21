@@ -1,0 +1,124 @@
+"""
+UUIDs: random ones, time-ordered ones for database keys, and parsing.
+
+    import uuid
+
+    id = uuid.v7()                          # time-ordered: sorts by when it was made
+    print(id)                               # 019a9f1c-8d40-7a3e-9c1b-5f0e2d7a4b61
+    token = uuid.v4()                       # 122 random bits
+    same = uuid.parse(str(id))?             # either case; a UuidError otherwise
+    print(same == id, id.version())         # True 7
+
+`Uuid` is immutable and can be shared between tasks. Two are equal when their 16 bytes are, and
+they sort as their bytes do, so version 7 UUIDs sort by time. `str(u)` is the lowercase
+hyphenated form, which is also how it is written to JSON. A handler parameter of type
+`uuid.Uuid` is read from the path (or the query) and a malformed one is a 400.
+
+Use `v7` for database keys and anything listed in order: rows made together stay together in
+an index. Use `v4` where the ID must not reveal when it was made.
+"""
+
+import datetime
+
+@extern("lrt_io_error")
+def last_error() -> str
+
+@extern("lrt_uuid_v4")
+def v4_raw() -> str
+
+@extern("lrt_uuid_v7")
+def v7_raw() -> str
+
+@extern("lrt_uuid_parse")
+def parse_raw(text: str) -> str?
+
+@extern("lrt_uuid_from_bytes")
+def from_bytes_raw(data: str) -> str?
+
+@extern("lrt_uuid_bytes")
+def bytes_raw(text: str) -> str
+
+pub struct UuidError:
+    """Text that is not a UUID, or a byte string that is not 16 bytes long."""
+    reason: str
+
+impl Error for UuidError:
+    def message(self) -> str:
+        return self.reason
+
+    def status(self) -> int:
+        """Returned from a handler, it is a 400 Bad Request: the text usually came from the
+        request."""
+        return 400
+
+@frozen
+@derive(Eq, Hash, Ord)
+pub struct Uuid:
+    """A 128-bit universally unique identifier (RFC 9562)."""
+    priv text: str
+
+impl Uuid:
+    def version(self) -> int:
+        """The version: 4 for `v4`, 7 for `v7`, 0 for `nil()`, or whatever a parsed one says."""
+        return self.bytes()[6] // 16
+
+    def bytes(self) -> bytes:
+        """The 16 bytes, most significant first."""
+        return __bytes(bytes_raw(self.text))
+
+    def time(self) -> datetime.DateTime?:
+        """When a version 7 UUID was made, to the millisecond; `None` for other versions."""
+        if self.version() != 7:
+            return None
+        data = self.bytes()
+        ms = 0
+        for i in range(6):
+            ms = ms * 256 + data[i]
+        return datetime.from_unix_millis(ms)
+
+impl Display for Uuid:
+    def to_str(self) -> str:
+        return self.text
+
+impl JsonString for Uuid:
+    def to_json_string(self) -> str:
+        return self.text
+
+    def from_json_string(text: str) -> Result[Uuid, str]:
+        match parse(text):
+            case Ok(u):
+                return u
+            case Err(e):
+                return Err(e.reason)
+
+pub def v4() -> Uuid:
+    """A random UUID: 122 bits from the operating system's secure random source."""
+    return Uuid(v4_raw())
+
+pub def v7() -> Uuid:
+    """A time-ordered UUID: the Unix time in milliseconds, then a counter and random bits (RFC
+    9562, section 6.2, method 1). Each one is greater than every one made before it in this
+    process, even within one millisecond or when the clock is set back. It reads the clock that
+    `datetime.set_clock_for_tests` fixes."""
+    return Uuid(v7_raw())
+
+pub def nil() -> Uuid:
+    """The UUID whose bits are all zero."""
+    return Uuid("00000000-0000-0000-0000-000000000000")
+
+pub def parse(text: str) -> Result[Uuid, UuidError]:
+    """A UUID written as 8-4-4-4-12 hex digits with hyphens, in either case. The error says which
+    character was wrong."""
+    match parse_raw(text):
+        case Some(canonical):
+            return Uuid(canonical)
+        case None:
+            return Err(UuidError(last_error()))
+
+pub def from_bytes(data: bytes) -> Result[Uuid, UuidError]:
+    """The UUID made of 16 bytes, most significant first."""
+    match from_bytes_raw(__bytes_data(data)):
+        case Some(canonical):
+            return Uuid(canonical)
+        case None:
+            return Err(UuidError(last_error()))

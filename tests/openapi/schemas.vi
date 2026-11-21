@@ -5,6 +5,7 @@
 import datetime
 import http
 import json
+import uuid
 
 @derive(Json)
 enum Color:
@@ -56,6 +57,7 @@ struct Event:
     at: datetime.DateTime
     day: datetime.Date
     length: datetime.Duration
+    owner: uuid.Uuid
     ends: datetime.DateTime? = None
 
 @frozen
@@ -93,6 +95,10 @@ impl Orders:
     def events(self) -> list[Event]:
         return []
 
+    @http.get("/events/{id}", errors=[404])
+    def event(self, id: uuid.Uuid, since: datetime.Date? = None) -> Event:
+        return Event(datetime.now(), datetime.today(), datetime.hours(1), id)
+
     @http.post("/raw")
     def raw(self, req: http.Request) -> http.Response:
         return http.text("x")
@@ -127,7 +133,8 @@ def main():
     )
     print(f"Everything {json.encode(everything)}")
     start = datetime.at(2026, 11, 20, 9, 30, nanosecond=250_000_000)
-    print(f"Event {json.encode(Event(start, start.date(), datetime.minutes(90), start.add(datetime.hours(1))))}")
+    owner = uuid.parse("0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b").unwrap()
+    print(f"Event {json.encode(Event(start, start.date(), datetime.minutes(90), owner, start.add(datetime.hours(1))))}")
     everything.shape = None
     everything.color = Color.Green
     print(f"Everything {json.encode(everything)}")

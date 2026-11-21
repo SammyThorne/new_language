@@ -7,12 +7,13 @@
 # expect: proxied: 200 203.0.113.9 | remote 127.0.0.1
 # expect: test request: '' ''
 # expect: setenv: 'a=b c' | replaced: '2'
-# expect: request id kept: 200 abc.DEF_1-2 | made: 16
+# expect: request id kept: 200 abc.DEF_1-2 | made: 7
 
 import crypto
 import http
 import log
 import os
+import uuid
 
 def binary(req: http.Request) -> Result[http.Response]:
     return http.binary(crypto.base64_decode("AP+AAQ==").unwrap())
@@ -71,7 +72,7 @@ def main():
 
     kept = http.fetch("GET", f"{direct}/who", headers={"X-Request-Id": "abc.DEF_1-2"}).unwrap()
     made_id = http.fetch("GET", f"{direct}/who", headers={"X-Request-Id": "x" * 129}).unwrap()
-    print("request id kept:", kept.status, kept.header("X-Request-Id").unwrap(), "| made:", len(made_id.header("X-Request-Id").unwrap()))
+    print("request id kept:", kept.status, kept.header("X-Request-Id").unwrap(), "| made:", uuid.parse(made_id.header("X-Request-Id").unwrap()).unwrap().version())
 
     http.Server().stop()
     direct_task.join()

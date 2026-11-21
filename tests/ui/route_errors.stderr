@@ -10,7 +10,7 @@ error[E0340]: path parameter `id` cannot be a `list[int]`
 20 |     def wrong_type(self, id: list[int]) -> str:
    |                              ^^^^^^^^^ not parsed from a path
    |
-   = help: path parameters are `int`, `float`, `bool` or `str`
+   = help: path parameters are `int`, `float`, `bool`, `str`, or a type with a string form (`JsonString`) such as `uuid.Uuid` or `datetime.Date`
 
 error[E0340]: a GET route has no request body
   --> tests/ui/route_errors.vi:24:33

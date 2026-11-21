@@ -1,0 +1,24 @@
+# Mistakes with uuid: making one from its text without parsing, comparing with a string, and
+# handler parameters a UUID or another type with a string form cannot be.
+import datetime
+import http
+import uuid
+
+@frozen
+struct Items:
+    pass
+
+impl Items:
+    @http.get("/items/{id}")
+    def get(self, id: uuid.Uuid?) -> str:
+        return "x"
+
+    @http.get("/items")
+    def list(self, since: datetime.Date = "2026-01-01") -> str:
+        return "x"
+
+def main():
+    made = uuid.Uuid("0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b")
+    parsed = uuid.parse("0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b")
+    same = uuid.v7() == "0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b"
+    print(made, parsed.version(), same)

@@ -21,6 +21,7 @@ logged, with a generic message for the client. `server.on_error(...)` replaces t
 import datetime
 import json as jsonlib
 import log
+import uuid
 
 @extern("lrt_http_listen")
 def listen_raw(address: str) -> int
@@ -81,9 +82,6 @@ def set_trusted_proxies_raw(networks: str) -> str
 
 @extern("lrt_log_set_request_id")
 def set_request_id_raw(id: str)
-
-@extern("lrt_log_new_request_id")
-def new_request_id_raw() -> str
 
 @extern("lrt_time_monotonic")
 def monotonic_raw() -> float
@@ -506,6 +504,30 @@ pub def query_bool_opt(req: Request, name: str) -> Result[bool?, HttpError]:
         case None:
             return Ok(None)
 
+def from_text[T: FromJson](text: str, what: str) -> Result[T, HttpError]:
+    # A `JsonString` type's `from_json_string`, reached through the JSON decoder because a type
+    # parameter's static methods cannot be called directly.
+    match jsonlib.decode[T](jsonlib.encode(text)):
+        case Ok(value):
+            return value
+        case Err(error):
+            return Err(HttpError(400, f"{what}: {error.message()}"))
+
+pub def path_text[T: FromJson](req: Request, name: str) -> Result[T, HttpError]:
+    return from_text[T](req.param(name), f"path parameter `{name}`")
+
+pub def query_text[T: FromJson](req: Request, name: str) -> Result[T, HttpError]:
+    text = query_str(req, name)?
+    return from_text[T](text, f"query parameter `{name}`")
+
+pub def query_text_opt[T: FromJson](req: Request, name: str) -> Result[T?, HttpError]:
+    match req.query(name):
+        case Some(text):
+            value = from_text[T](text, f"query parameter `{name}`")?
+            return Ok(Some(value))
+        case None:
+            return Ok(None)
+
 # ---- responses ----------------------------------------------------------------------------
 
 pub struct Response:
@@ -752,12 +774,12 @@ pub def request_log(skip: list[str] = []) -> Middleware:
     """
     Middleware that gives each request an ID and logs one line for it when it is answered:
 
-        2026-11-20T09:30:00.123Z INFO  GET /photos/7 200 request_id=6f1c0e2a9b3d4c58 method=GET path=/photos/7 status=200 ms=1.84 client=203.0.113.9
+        2026-11-20T09:30:00.123Z INFO  GET /photos/7 200 request_id=019aa3f2-5c41-7d0e-9b2a-4e8f1c6d3a70 method=GET path=/photos/7 status=200 ms=1.84 client=203.0.113.9
 
     The ID is the client's `X-Request-Id` if it sent a usable one (up to 128 letters, digits,
-    `.`, `_` and `-`), otherwise a new one. It is sent back in `X-Request-Id`, kept as the
-    request local `"request_id"`, and added to every log line written while the request is
-    handled, including by tasks the handler spawns. The path is logged without its query
+    `.`, `_` and `-`), otherwise a new `uuid.v7()`, so IDs sort by when requests arrived. It is
+    sent back in `X-Request-Id`, kept as the request local `"request_id"`, and added to every
+    log line written while the request is handled, including by tasks the handler spawns. The path is logged without its query
     string, which often holds tokens. Requests for the paths in `skip` (exactly) are passed
     on without an ID or a line. Add it first, so that it times the other middleware too.
     """
@@ -799,7 +821,7 @@ def request_id_from(sent: str?) -> str:
                 return id
         case None:
             pass
-    return new_request_id_raw()
+    return str(uuid.v7())
 
 def usable_request_id(id: str) -> bool:
     if id == "" or len(id) > 128:

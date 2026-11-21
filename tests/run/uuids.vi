@@ -1,0 +1,158 @@
+# UUIDs (docs/14, milestone 6): versions and variant bits, v7 order within one millisecond,
+# parsing, bytes, JSON, and UUIDs (and other types with a string form) as handler parameters.
+# expect: v4: 1000 version 4, variant 10
+# expect: v7: 1000 version 7, variant 10
+# expect: v7 in one millisecond: 100000 in order, all at 2099-01-02T03:04:05.678Z
+# expect: v7 after the clock went back: 2099-01-02T03:04:05.678Z True
+# expect: v4 time: None
+# expect: parsed: 0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b 7 2024-12-07T15:17:47.604Z
+# expect: equal across case: True True
+# expect: error: a UUID is 36 characters (8-4-4-4-12 hex digits with hyphens), not 32 (400)
+# expect: error: expected `-` at position 24, found `_` (400)
+# expect: error: expected a hex digit at position 1, found `{` (400)
+# expect: error: expected a hex digit at position 35, found `é` (400)
+# expect: error: a UUID is 36 characters (8-4-4-4-12 hex digits with hyphens), not 0 (400)
+# expect: nil: 00000000-0000-0000-0000-000000000000 0
+# expect: bytes: 16 0193a1b2c3d47e5f8a6b7c8d9e0f1a2b True
+# expect: from 3 bytes: a UUID is 16 bytes, not 3
+# expect: sorted: True
+# expect: set: 2
+# expect: json: {"id":"0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b","parent":null}
+# expect: json back: True None
+# expect: json error: id: expected a hex digit at position 1, found `x`
+# expect: GET /orders/0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b: 200 order 0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b
+# expect: GET /orders/0193A1B2-C3D4-7E5F-8A6B-7C8D9E0F1A2B: 200 order 0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b
+# expect: GET /orders/42: 400 {"error":"path parameter `id`: a UUID is 36 characters (8-4-4-4-12 hex digits with hyphens), not 2"}
+# expect: GET /orders/0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2z: 400 {"error":"path parameter `id`: expected a hex digit at position 36, found `z`"}
+# expect: GET /days/2026-11-20: 200 Friday
+# expect: GET /days/2026-02-30: 400 {"error":"path parameter `day`: day 30 is out of range for 2026-02 (1 to 28)"}
+# expect: GET /search: 200 owner None since None
+# expect: GET /search?owner=0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b&since=2026-11-20: 200 owner 0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b since 2026-11-20
+# expect: GET /search?owner=nope: 400 {"error":"query parameter `owner`: a UUID is 36 characters (8-4-4-4-12 hex digits with hyphens), not 4"}
+# expect: GET /audit: 400 {"error":"missing query parameter `actor`"}
+# expect: GET /audit?actor=0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b: 200 actor 0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b
+
+import datetime
+import http
+import json
+import uuid
+
+@derive(Json)
+struct Row:
+    id: uuid.Uuid
+    parent: uuid.Uuid? = None
+
+@frozen
+struct Orders:
+    pass
+
+impl Orders:
+    @http.get("/orders/{id}")
+    def get(self, id: uuid.Uuid) -> str:
+        return f"order {id}"
+
+    @http.get("/days/{day}")
+    def day(self, day: datetime.Date) -> str:
+        return ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][day.weekday()]
+
+    @http.get("/search")
+    def search(self, owner: uuid.Uuid? = None, since: datetime.Date? = None) -> str:
+        return f"owner {owner} since {since}"
+
+    @http.get("/audit")
+    def audit(self, actor: uuid.Uuid) -> str:
+        return f"actor {actor}"
+
+def bits(u: uuid.Uuid) -> str:
+    data = u.bytes()
+    variant = data[8] // 64
+    return f"version {u.version()}, variant {variant // 2}{variant % 2}"
+
+def show_error(text: str):
+    match uuid.parse(text):
+        case Ok(u):
+            print("unexpected:", u)
+        case Err(e):
+            print(f"error: {e.message()} ({e.status()})")
+
+def main():
+    seen: set[str] = set()
+    for _ in range(1000):
+        seen.add(bits(uuid.v4()))
+    print("v4:", 1000, ", ".join(list(seen)))
+    seen = set()
+    for _ in range(1000):
+        seen.add(bits(uuid.v7()))
+    print("v7:", 1000, ", ".join(list(seen)))
+
+    # A clock fixed after the real one, so that every UUID below is in the same millisecond.
+    fixed = datetime.at(2099, 1, 2, 3, 4, 5, nanosecond=678_000_000)
+    datetime.set_clock_for_tests(fixed)
+    previous = uuid.v7()
+    in_order = 1
+    same_time = True
+    for _ in range(99_999):
+        next = uuid.v7()
+        if next > previous and str(next) > str(previous):
+            in_order += 1
+        if next.time() != fixed:
+            same_time = False
+        previous = next
+    print(f"v7 in one millisecond: {in_order} in order, all at {str(fixed) if same_time else 'other times'}")
+    datetime.set_clock_for_tests(datetime.at(2098, 1, 1))
+    earlier = uuid.v7()
+    print("v7 after the clock went back:", earlier.time(), earlier > previous)
+    datetime.set_clock_for_tests(None)
+    print("v4 time:", uuid.v4().time())
+
+    p = uuid.parse("0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b").unwrap()
+    print("parsed:", p, p.version(), p.time())
+    upper = uuid.parse("0193A1B2-C3D4-7E5F-8A6B-7C8D9E0F1A2B").unwrap()
+    print("equal across case:", upper == p, str(upper) == str(p))
+    show_error("0193a1b2c3d47e5f8a6b7c8d9e0f1a2b")
+    show_error("0193a1b2-c3d4-7e5f-8a6b_7c8d9e0f1a2b")
+    show_error("{0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a}")
+    show_error("0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1aé")
+    show_error("")
+
+    print("nil:", uuid.nil(), uuid.nil().version())
+    print("bytes:", len(p.bytes()), p.bytes().hex(), uuid.from_bytes(p.bytes()).unwrap() == p)
+    match uuid.from_bytes("abc".encode()):
+        case Ok(u):
+            print("unexpected:", u)
+        case Err(e):
+            print("from 3 bytes:", e.message())
+
+    ids = [uuid.v7() for _ in range(50)]
+    shuffled = [ids[(i * 17) % 50] for i in range(50)]
+    print("sorted:", sorted(shuffled) == ids)
+    both: set[uuid.Uuid] = {p, upper, uuid.nil()}
+    print("set:", len(both))
+
+    text = json.encode(Row(p))
+    print("json:", text)
+    back = json.decode[Row](text).unwrap()
+    print("json back:", back.id == p, back.parent)
+    match json.decode[Row]("{\"id\": \"x0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2\"}"):
+        case Ok(_):
+            print("unexpected")
+        case Err(error):
+            print("json error:", error.message())
+
+    server = http.Server()
+    server.mount(Orders())
+    for path in [
+        "/orders/0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b",
+        "/orders/0193A1B2-C3D4-7E5F-8A6B-7C8D9E0F1A2B",
+        "/orders/42",
+        "/orders/0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2z",
+        "/days/2026-11-20",
+        "/days/2026-02-30",
+        "/search",
+        "/search?owner=0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b&since=2026-11-20",
+        "/search?owner=nope",
+        "/audit",
+        "/audit?actor=0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b",
+    ]:
+        response = server.handle(http.test_request("GET", path))
+        print(f"GET {path}: {response.status} {response.body}")

@@ -37,6 +37,7 @@ pub mod strings;
 pub mod sys;
 pub mod tasks;
 pub mod tls;
+pub mod uuid;
 pub mod ws;
 
 /// Program entry. The C runtime calls this; it runs the compiled program's `main`.

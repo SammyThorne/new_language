@@ -2,7 +2,7 @@
 Levelled logging to standard error, one line per message with a UTC timestamp:
 
     2026-11-18T12:00:00.123Z INFO  listening on port 8080
-    2026-11-18T12:00:01.456Z INFO  saved order request_id=6f1c0e2a9b3d4c58 order=42 customer="Ann Lee"
+    2026-11-18T12:00:01.456Z INFO  saved order request_id=019a9b6e-3f2c-7a14-8d5e-2c9f0b7a1e63 order=42 customer="Ann Lee"
 
 Each function takes optional `fields`, written after the message as `name=value` (quoted when
 the value has a space, `=`, `"` or a control character). A line written while a request is
@@ -12,7 +12,7 @@ spawns.
 `set_format("json")`, or the `LOG_FORMAT` environment variable (with the language's prefix) set to
 `json`, writes one JSON object per line instead, for log collectors:
 
-    {"time":"2026-11-18T12:00:01.456Z","level":"info","msg":"saved order","request_id":"6f1c0e2a9b3d4c58","order":"42"}
+    {"time":"2026-11-18T12:00:01.456Z","level":"info","msg":"saved order","request_id":"019a9b6e-3f2c-7a14-8d5e-2c9f0b7a1e63","order":"42"}
 
 The level is `info` unless the `LOG` environment variable (with the language's prefix) or
 `log.set_level` says `debug`, `warn`, `error` or `off`. While a server runs and standard error is

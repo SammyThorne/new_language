@@ -276,13 +276,13 @@ impl Checker<'_, '_> {
                         ("name", J::s(name)),
                         ("in", J::s("path")),
                         ("required", J::Bool(true)),
-                        ("schema", scalar_schema(*kind)),
+                        ("schema", self.scalar_schema(*kind, pending)),
                     ]));
                 }
                 Binding::Query { name, kind, optional, default } => {
                     let required = !*optional && default.is_none();
                     can_fail |= required || *kind != Scalar::Str;
-                    let mut schema = scalar_schema(*kind);
+                    let mut schema = self.scalar_schema(*kind, pending);
                     if let (J::Obj(pairs), Some(value)) = (&mut schema, default.as_deref().and_then(default_json))
                         && value != J::Null
                     {
@@ -420,6 +420,7 @@ impl Checker<'_, '_> {
                 match (module.as_str(), self.structs[id.0].name.as_str()) {
                     ("datetime", "DateTime") => J::obj(vec![("type", J::s("string")), ("format", J::s("date-time"))]),
                     ("datetime", "Date") => J::obj(vec![("type", J::s("string")), ("format", J::s("date"))]),
+                    ("uuid", "Uuid") => J::obj(vec![("type", J::s("string")), ("format", J::s("uuid"))]),
                     ("datetime", "Duration") => {
                         J::obj(vec![("type", J::s("string")), ("examples", J::Arr(vec![J::s("1h30m0s")]))])
                     }
@@ -433,6 +434,17 @@ impl Checker<'_, '_> {
             }
             // The route checker accepts only JSON-capable types.
             _ => J::Obj(Vec::new()),
+        }
+    }
+
+    /// The schema of a path or query parameter.
+    fn scalar_schema(&mut self, kind: Scalar, pending: &mut Vec<Ty>) -> J {
+        match kind {
+            Scalar::Int => J::obj(vec![("type", J::s("integer")), ("format", J::s("int64"))]),
+            Scalar::Float => J::obj(vec![("type", J::s("number")), ("format", J::s("double"))]),
+            Scalar::Bool => J::obj(vec![("type", J::s("boolean"))]),
+            Scalar::Str => J::obj(vec![("type", J::s("string"))]),
+            Scalar::Text(ty) => self.schema(ty, pending),
         }
     }
 
@@ -580,15 +592,6 @@ fn error_response(status: i64) -> J {
             )]),
         ),
     ])
-}
-
-fn scalar_schema(kind: Scalar) -> J {
-    match kind {
-        Scalar::Int => J::obj(vec![("type", J::s("integer")), ("format", J::s("int64"))]),
-        Scalar::Float => J::obj(vec![("type", J::s("number")), ("format", J::s("double"))]),
-        Scalar::Bool => J::obj(vec![("type", J::s("boolean"))]),
-        Scalar::Str => J::obj(vec![("type", J::s("string"))]),
-    }
 }
 
 fn sized_schema(kind: SizedKind) -> J {

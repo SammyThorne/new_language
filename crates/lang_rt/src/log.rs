@@ -9,8 +9,8 @@
 use crate::{Str, fiber};
 use std::cell::Cell;
 use std::io::{IsTerminal, Write};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 
 static LOG_LEVEL: AtomicI64 = AtomicI64::new(-1);
 /// 0 for text, 1 for JSON; -1 until read from the environment.
@@ -112,30 +112,6 @@ pub unsafe extern "C-unwind" fn lrt_log_set_request_id(ptr: *const u8, len: i64)
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_log_request_id() -> Str {
     Str::from_bytes(with_current(Context::request_id).as_deref().unwrap_or("").as_bytes())
-}
-
-/// A new request ID: 16 hexadecimal digits, different for every call in this process and
-/// unpredictable across processes. A counter scrambled by a bijection, so making one takes no
-/// system call; `uuid.v7()` replaces it in docs/14's milestone 6.
-#[unsafe(no_mangle)]
-pub extern "C-unwind" fn lrt_log_new_request_id() -> Str {
-    Str::from_bytes(new_request_id().as_bytes())
-}
-
-fn new_request_id() -> String {
-    static SEED: OnceLock<u64> = OnceLock::new();
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seed = *SEED.get_or_init(|| {
-        let mut bytes = [0u8; 8];
-        let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes);
-        u64::from_le_bytes(bytes)
-    });
-    // The finaliser of SplitMix64: each step is invertible, so distinct inputs stay distinct.
-    let mut z = seed ^ COUNTER.fetch_add(1, Ordering::Relaxed);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^= z >> 31;
-    format!("{z:016x}")
 }
 
 // ---- writing ----------------------------------------------------------------------------
@@ -383,12 +359,5 @@ mod tests {
             line(true, "ab12", "user\x0042\0msg\0line\nbreak\0"),
             "{\"time\":\"2026-11-18T11:06:40.123Z\",\"level\":\"info\",\"msg\":\"saved \\\"a\\\"\",\"request_id\":\"ab12\",\"user\":\"42\",\"_msg\":\"line\\nbreak\"}\n"
         );
-    }
-
-    #[test]
-    fn request_ids_differ() {
-        let ids: std::collections::HashSet<String> = (0..1000).map(|_| new_request_id()).collect();
-        assert_eq!(ids.len(), 1000);
-        assert!(ids.iter().all(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit())));
     }
 }

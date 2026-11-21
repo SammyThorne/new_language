@@ -10,6 +10,7 @@ The standard library is what makes Viper a backend language and not a general-pu
 | `io`, `os` | Files, standard streams, environment variables, arguments | M5 | Viper wrappers over runtime |
 | `time` | Clocks, durations, `sleep` | M6 | Viper wrappers over runtime |
 | `datetime` | Instants, dates, durations, time zones, RFC 3339 | docs/14, milestone 5 | Viper, over runtime parsing, formatting and TZif reading |
+| `uuid` | Random and time-ordered UUIDs, parsing | docs/14, milestone 6 | Viper, over runtime generation and parsing |
 | `sync` | `Channel`, `Mutex`, `Atomic`, `spawn` support | M6 | Runtime |
 | `json` | Dynamic values, typed encode and decode | M7 | Runtime scanner and writer; compiler-derived per-type code |
 | `net` | TCP listener and stream | M8 | Runtime |
@@ -62,7 +63,7 @@ jobs.error("charge failed", {"customer": customer_id})
 
 ```
 2026-11-20T09:30:00.123Z INFO  listening port=8080
-2026-11-20T09:30:01.456Z WARN  slow query request_id=6f1c0e2a9b3d4c58 ms=812.4 table=orders
+2026-11-20T09:30:01.456Z WARN  slow query request_id=019aa3f2-5c41-7d0e-9b2a-4e8f1c6d3a70 ms=812.4 table=orders
 ```
 
 | Item | Shape |
@@ -193,9 +194,9 @@ Each parameter is matched against these rules in order, at compile time. A param
 | 1 | `self` | The mounted value | |
 | 2 | Type `http.Request` | The raw request | |
 | 3 | Type `http.WebSocket` (only under `@http.ws`) | The connection | |
-| 4 | Name equals a `{name}` in the path | That path segment, parsed as the parameter's type: `int`, `float`, `bool` or `str` | 400 |
+| 4 | Name equals a `{name}` in the path | That path segment, parsed as the parameter's type: `int`, `float`, `bool`, `str`, or a type with a string form (`JsonString`, such as `uuid.Uuid` and `datetime.Date`), read by its `from_json_string` | 400, with the type's own message |
 | 5 | Type derives `Json`, or is a `list` or `dict` of such | The JSON request body. At most one per handler | 400, with the JSON path of the problem |
-| 6 | `int`, `float`, `bool` or `str` whose name is not in the path | The query parameter of that name. Required unless the type is `T?` or the parameter has a default | 400 |
+| 6 | `int`, `float`, `bool`, `str` or a type with a string form, whose name is not in the path | The query parameter of that name. Required unless the type is `T?` or the parameter has a default (only `None` for a type with a string form) | 400 |
 | 7 | Type `http.Header` or `http.Header?` (M12) | The request header named after the parameter: `user_agent` is `User-Agent` | 400 if missing, unless `T?` |
 | 8 | Type `http.Cookie` or `http.Cookie?` (M12) | The cookie with the parameter's name | 400 if missing, unless `T?` |
 | 9 | Type `auth.User` or `auth.User?` (D104), matched before rule 5 although `auth.User` derives `Json` | The signed-in user. At most one per handler, and not under `@http.ws` | `auth.User` protects the route: signed out is a 401, or a redirect to sign in for a browser. `auth.User?` is `None` |
@@ -685,7 +686,37 @@ datetime.parse_duration("1h30m")?.seconds()             # 5400.0
 - **Wall-clock times in a zone.** `at(..., zone=z)` and `Date.at` turn a local time into an instant. A time that happens twice, as clocks go back, is the earlier of the two; a time that never happens, as clocks go forward, moves forward by the size of the gap (02:30 on the morning New York springs forward is 03:30 EDT). Python and Go do the same.
 - **Arithmetic is on instants.** `t.add(datetime.days(1))` is 24 hours later, which is not the same time of day across a daylight saving change; for calendar days use `t.date().add_days(1).at(...)`. The operators `+` and `-` are not defined between a `DateTime` and a `Duration` (D110); the compiler's error says to use `add` and `sub`.
 - **Time zones** come from the TZif files (RFC 8536, versions 1 to 3) in `TZDIR`, or `/usr/share/zoneinfo` when it is not set, read once per name and cached. Past the end of a file's table (2037 in the standard build), the POSIX TZ rule in its footer gives the transitions. Windows has no zone database: set `TZDIR` to a copy of one, or use only UTC and fixed offsets.
-- **JSON and OpenAPI.** All three types implement `JsonString`: a `DateTime` is an RFC 3339 string, a `Date` is `YYYY-MM-DD`, and a `Duration` is Go's syntax. OpenAPI documents them as `{"type": "string", "format": "date-time"}`, `"format": "date"`, and a string.
+- **JSON and OpenAPI.** All three types implement `JsonString`: a `DateTime` is an RFC 3339 string, a `Date` is `YYYY-MM-DD`, and a `Duration` is Go's syntax. OpenAPI documents them as `{"type": "string", "format": "date-time"}`, `"format": "date"`, and a string. A handler parameter of one of them is read from the path or the query: `@http.get("/days/{day}")` with `day: datetime.Date` answers `/days/2026-02-30` with a 400 saying the day is out of range.
+
+## UUIDs (docs/14, milestone 6)
+
+```python
+import uuid
+
+id = uuid.v7()                              # time-ordered: 019aa3f2-5c41-7d0e-9b2a-4e8f1c6d3a70
+token = uuid.v4()                           # 122 random bits
+same = uuid.parse(str(id))?                 # either case
+same == id, id.version(), id.time()         # True, 7, the DateTime it was made, to the millisecond
+
+@http.get("/orders/{id}")
+def get(self, id: uuid.Uuid) -> Order:      # a malformed ID is a 400
+    ...
+```
+
+| Item | Shape |
+|---|---|
+| `uuid.Uuid` | 16 bytes. `version()`, `bytes()`, `time() -> DateTime?` (for version 7). `==`, `<`, `hash` and `sorted` compare the bytes, so version 7 UUIDs sort by time. It prints, and is written to JSON, as the lowercase hyphenated form |
+| `uuid.v4()` | A random UUID, from the operating system's secure random source |
+| `uuid.v7()` | A time-ordered UUID: the Unix time in milliseconds, a counter, and random bits. Each is greater than every one made before it in the process |
+| `uuid.parse(text) -> Result` | 8-4-4-4-12 hex digits with hyphens, in either case |
+| `uuid.from_bytes(data) -> Result`, `uuid.nil()` | From 16 bytes; the all-zero UUID |
+| `uuid.UuidError` | Text that is not a UUID, or bytes that are not 16. `reason`; returned from a handler, a 400 |
+
+- **Which version.** Use `v7` for database keys and anything listed in order: UUIDs made together are near each other in an index, which random ones are not. Use `v4` where an ID must not reveal when it was made.
+- **Order within a millisecond.** `v7` follows RFC 9562, section 6.2, method 1: within one millisecond a 42-bit counter, started at a random value below 2^41, counts up, so at least two trillion UUIDs fit before the timestamp is moved on by a millisecond. When the clock goes back, the timestamp stays at the last one used. Every UUID also has 32 fresh random bits.
+- **Errors** say which character was wrong: ``expected a hex digit at position 36, found `z` ``. Braces, `urn:uuid:` and the 32-digit form without hyphens are not accepted.
+- **Where they appear.** `http.request_log()` makes its request IDs with `v7`, so they sort by when requests arrived. OpenAPI documents a `Uuid` as `{"type": "string", "format": "uuid"}`. `datetime.set_clock_for_tests` fixes the time `v7` uses.
+- **Random bytes** are read from the operating system 4 KiB at a time per thread, so a UUID costs a system call only once in about 400.
 
 ## Tasks and synchronisation
 

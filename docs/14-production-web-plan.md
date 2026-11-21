@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 5 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 6 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -976,6 +976,14 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - The version and variant bits; v7 ordering across 100,000 calls in one millisecond; parse errors.
   - A path parameter returning a 400.
 - **Docs:** docs/05.
+
+**Done** (D111). Everything listed, with these differences:
+- Path parameters are not special to `uuid`: any type implementing `JsonString` can be a path or query parameter, so `datetime.Date` and users' own types work too. Its parse error is the 400's message, and OpenAPI shows its string schema (`format: uuid`, `date`, `date-time`).
+- A `Uuid` stores its lowercase text, so the derived order is the bytes' order. `version()`, `bytes()`, `time()` (for v7), `from_bytes` and `nil()` are added.
+- `v7` uses a 42-bit counter and reads `datetime`'s clock, so `set_clock_for_tests` fixes it. Random bytes come from a per-thread 4 KiB pool.
+- Request IDs from `request_log` are v7 UUIDs; the SplitMix64 generator of D105 is removed.
+- Tests: `tests/run/uuids.vi` (version and variant bits; 100,000 v7 UUIDs in one fixed millisecond, in order; the clock going back; parse errors; bytes, sorting, sets and JSON; `uuid.Uuid` and `datetime.Date` path and query parameters with their 400s), runtime unit tests (bits, order across 100,000 calls, counter overflow, parsing), an OpenAPI route with a `Uuid` path parameter and a `Date` query parameter, the `ui` golden `uuid_misuse`, and the request ID checks in `tests/run/http_binary_and_client.vi` and the logging test.
+- Gates: all pass, with the counts unchanged (the benchmark server does not use `request_log`).
 
 ### Track C: configuration and observability
 

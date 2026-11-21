@@ -94,7 +94,11 @@ fn exercise(run: &mut Run, id_marker: &str) -> (Vec<String>, String) {
     // An ID a client may not choose is replaced.
     let replaced = get(run, "/work", "X-Request-Id: no spaces!\r\n");
     let new_id = replaced.header("x-request-id").unwrap().to_string();
-    assert!(new_id.len() == 16 && new_id.bytes().all(|b| b.is_ascii_hexdigit()), "{new_id}");
+    // A version 7 UUID: 8-4-4-4-12 lowercase hex digits, with the version digit 7.
+    let groups: Vec<&str> = new_id.split('-').collect();
+    assert_eq!(groups.iter().map(|g| g.len()).collect::<Vec<_>>(), [8, 4, 4, 4, 12], "{new_id}");
+    assert!(new_id.bytes().all(|b| b == b'-' || matches!(b, b'0'..=b'9' | b'a'..=b'f')), "{new_id}");
+    assert!(groups[2].starts_with('7'), "{new_id}");
 
     // A handler's error still carries the ID; a panic ends only its request.
     let failed = get(run, "/fail", "");

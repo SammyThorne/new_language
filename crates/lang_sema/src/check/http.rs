@@ -60,25 +60,19 @@ pub(super) enum Scalar {
     Float,
     Bool,
     Str,
+    /// A type with a string form (`JsonString`), such as `uuid.Uuid` or `datetime.Date`, read
+    /// from the text through `from_json_string`.
+    Text(Ty),
 }
 
 impl Scalar {
-    fn of(ty: Ty) -> Option<Scalar> {
-        match ty {
-            Ty::INT => Some(Scalar::Int),
-            Ty::FLOAT => Some(Scalar::Float),
-            Ty::BOOL => Some(Scalar::Bool),
-            Ty::STR => Some(Scalar::Str),
-            _ => None,
-        }
-    }
-
     fn suffix(self) -> &'static str {
         match self {
             Scalar::Int => "int",
             Scalar::Float => "float",
             Scalar::Bool => "bool",
             Scalar::Str => "str",
+            Scalar::Text(_) => "text",
         }
     }
 }
@@ -261,6 +255,22 @@ impl<'m> Checker<'_, 'm> {
                 )
                 .with_help("`@auth.required` protects a route; for a call-style handler use `auth.protect(handler)`"),
             );
+        }
+    }
+
+    /// How a path or query parameter of type `ty` is read from its text, if it can be.
+    fn scalar_of(&self, ty: Ty) -> Option<Scalar> {
+        match ty {
+            Ty::INT => Some(Scalar::Int),
+            Ty::FLOAT => Some(Scalar::Float),
+            Ty::BOOL => Some(Scalar::Bool),
+            Ty::STR => Some(Scalar::Str),
+            _ if matches!(self.types.kind(ty), TyKind::Struct(_) | TyKind::Enum(_))
+                && self.implements(ty, self.builtin().json_string) =>
+            {
+                Some(Scalar::Text(ty))
+            }
+            _ => None,
         }
     }
 
@@ -597,7 +607,7 @@ impl<'m> Checker<'_, 'm> {
                 }
             } else if names.contains(&param.name) {
                 used_names.push(param.name.clone());
-                match Scalar::of(param.ty) {
+                match self.scalar_of(param.ty) {
                     Some(kind) => Binding::Path { name: param.name.clone(), kind },
                     None => {
                         let shown = self.display(param.ty);
@@ -605,18 +615,34 @@ impl<'m> Checker<'_, 'm> {
                             format!("path parameter `{}` cannot be a `{shown}`", param.name),
                             param.hint_span,
                             "not parsed from a path",
-                            Some("path parameters are `int`, `float`, `bool` or `str`"),
+                            Some(
+                                "path parameters are `int`, `float`, `bool`, `str`, or a type with a string form (`JsonString`) such as `uuid.Uuid` or `datetime.Date`",
+                            ),
                         );
                         return None;
                     }
                 }
-            } else if let Some((kind, optional)) = Scalar::of(param.ty)
+            } else if let Some((kind, optional)) = self
+                .scalar_of(param.ty)
                 .map(|k| (k, false))
-                .or_else(|| self.types.option_inner(param.ty).and_then(Scalar::of).map(|k| (k, true)))
+                .or_else(|| self.types.option_inner(param.ty).and_then(|t| self.scalar_of(t)).map(|k| (k, true)))
             {
                 let default = match &ast_param.default {
                     None => None,
                     Some(expr) => match self.literal_text(expr) {
+                        Some(text) if matches!(kind, Scalar::Text(_)) && text != "None" => {
+                            let shown = self.display(param.ty);
+                            self.route_error(
+                                format!(
+                                    "query parameter `{}` is a `{shown}`, so its default can only be `None`",
+                                    param.name
+                                ),
+                                expr.span,
+                                "not a default for this type",
+                                Some("make it optional with `= None`, and supply the default in the handler"),
+                            );
+                            return None;
+                        }
                         Some(text) => Some(text),
                         None => {
                             self.route_error(
@@ -656,7 +682,7 @@ impl<'m> Checker<'_, 'm> {
                 let help = if matches!(self.types.kind(param.ty), TyKind::Struct(_) | TyKind::Enum(_)) {
                     format!("to read it from the JSON body, add `@derive(Json)` to `{shown}`")
                 } else {
-                    "a parameter is the request (`http.Request`), a `{name}` in the path, a JSON body, a header (`http.Header`), a cookie (`http.Cookie`), or a query parameter of type `int`, `float`, `bool` or `str`".to_string()
+                    "a parameter is the request (`http.Request`), a `{name}` in the path, a JSON body, a header (`http.Header`), a cookie (`http.Cookie`), or a query parameter of type `int`, `float`, `bool`, `str` or a type with a string form such as `uuid.Uuid`".to_string()
                 };
                 self.route_error(
                     format!("cannot tell where parameter `{}` comes from", param.name),
@@ -941,6 +967,10 @@ impl<'m> Checker<'_, 'm> {
                         format!("__http.cookie_param{}(__req, {name:?})?", if *optional { "_opt" } else { "" })
                     }
                     Binding::Path { name, kind: Scalar::Str } => format!("__req.param({name:?})"),
+                    Binding::Path { name, kind: Scalar::Text(ty) } => {
+                        let ty_name = self.alias_type(*ty, &mut aliases);
+                        format!("__http.path_text[{ty_name}](__req, {name:?})?")
+                    }
                     Binding::Path { name, kind } => format!("__req.param_{}({name:?})?", kind.suffix()),
                     Binding::Body(ty) => {
                         let body_name = self.alias_type(*ty, &mut aliases);
@@ -948,6 +978,11 @@ impl<'m> Checker<'_, 'm> {
                     }
                     Binding::User { optional: false } => "__auth.user_param(__req)?".to_string(),
                     Binding::User { optional: true } => "__auth.user(__req)".to_string(),
+                    Binding::Query { name, kind: Scalar::Text(ty), optional, .. } => {
+                        let ty_name = self.alias_type(*ty, &mut aliases);
+                        let suffix = if *optional { "_opt" } else { "" };
+                        format!("__http.query_text{suffix}[{ty_name}](__req, {name:?})?")
+                    }
                     Binding::Query { name, kind, optional: false, default: None } => {
                         format!("__http.query_{}(__req, {name:?})?", kind.suffix())
                     }
