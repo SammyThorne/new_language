@@ -171,7 +171,7 @@ pub unsafe extern "C-unwind" fn lrt_log_write_fields(
     write_line(level, message, unsafe { Str::from_raw(fields, fields_len) });
 }
 
-fn write_line(level: &str, message: &str, fields: &str) {
+pub(crate) fn write_line(level: &str, message: &str, fields: &str) {
     let number = level_number(level);
     if number < log_level() {
         return;

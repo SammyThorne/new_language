@@ -324,7 +324,7 @@ def remove(self, id: int): ...
 | `server.route(method, path, handler)` | General form |
 | `server.group(prefix)` | Returns a sub-router sharing a prefix and its own middleware |
 | `server.use(middleware)` | Middleware has the type `def(http.Request, http.Handler) -> Result[http.Response]` |
-| `http.request_log(skip=[])` | Middleware that gives each request an ID and logs one line when it is answered: `GET /photos/7 200` with the fields `method`, `path` (without the query string), `status`, `ms` and, for a request from a connection, `client` (`req.client_ip()`); `error` for a 5xx, otherwise `info`. The ID is the client's `X-Request-Id` when it is 1 to 128 ASCII letters, digits, `.`, `_` and `-`, otherwise a new one; it is sent back in `X-Request-Id` (error responses included), kept as the request local `"request_id"`, and carried by log lines (see "Logging"). Paths in `skip` get neither. Add it first, so it times the other middleware too. A handler that panics gets no line: the panic is reported instead |
+| `http.request_log(skip=[])` | Middleware that gives each request an ID and logs one line when it is answered: `GET /photos/7 200` with the fields `method`, `path` (without the query string), `status`, `ms`, `route` (the pattern of the route that took it, when one did) and, for a request from a connection, `client` (`req.client_ip()`); `error` for a 5xx, otherwise `info`. The ID is the client's `X-Request-Id` when it is 1 to 128 ASCII letters, digits, `.`, `_` and `-`, otherwise a new one; it is sent back in `X-Request-Id` (error responses included), kept as the request local `"request_id"`, and carried by log lines (see "Logging"). Paths in `skip` get neither, and nor do `server.health`'s routes. Add it first, so it times the other middleware too. A handler that panics gets no line: the panic is reported instead |
 | `http.cors(origins=[], allow=None, methods=[GET, HEAD, POST, PUT, PATCH, DELETE], headers=["Content-Type", "Authorization"], expose=[], credentials=False, max_age=600)` | Middleware for cross-origin requests from browsers. `origins` lists allowed origins exactly as browsers send them (`"https://app.example.com"`, no path) or is `["*"]`; `allow`, a `def(str) -> bool`, decides for the others. A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) gets a 204 here, allowing `methods`, the requested headers in `headers` (`["*"]` for any) and caching for `max_age` seconds; a refused origin's preflight gets a 204 without them. Other requests from an allowed origin get `Access-Control-Allow-Origin` (the origin with `Vary: Origin`, or `*` for `["*"]` without credentials), `Access-Control-Expose-Headers` for `expose` and, with `credentials=True`, `Access-Control-Allow-Credentials`, on error responses too. Panics at setup for no origins, an origin with a path, or credentials with `*`. On a group (`api.use(http.cors(...))`) it covers that group's routes and their preflights |
 | `http.compress(min_size=1024, level=6, types=["text/*", "application/json", "application/javascript", "image/svg+xml"])` | Middleware that gzips response bodies for clients whose `Accept-Encoding` allows `gzip` (q-values read): bodies of at least `min_size` bytes whose content type matches `types` (`"text/*"` for every `text/` type) and that have no `Content-Encoding`. A client that refuses uncompressed bodies (`identity;q=0` or `*;q=0`) gets gzip for any non-empty body. Leaves alone 1xx, 204, 206 and 304 responses, `Cache-Control: no-transform`, errors returned as `Err`, and `server.static` files (which use `.gz` files instead). Compressed responses get `Content-Encoding: gzip` and a weak `ETag`; every response that could be compressed gets `Vary: Accept-Encoding`. `level` is 0 (stored) to 9 (smallest); panics at setup outside that or for a negative `min_size` |
 | `server.trusted_proxies` | `list[str]` of addresses and networks (`"10.0.0.0/8"`, `"::1"`) whose `X-Forwarded-For` header is believed, for `req.client_ip()`; empty by default. Set it before `bind`. It applies to every server in the process |
@@ -336,8 +336,11 @@ def remove(self, id: int): ...
 | `http.bearer(...)`, `http.basic_auth(...)`, `http.api_key(name, cookie=False, ...)` | `http.SecurityScheme` values, for `docs(security=...)` |
 | `server.security_scheme(name, scheme)` | A scheme documented on every page of the server, for libraries |
 | `server.listen(addr)` | Blocks, serving until shutdown. Options: read and write timeouts, maximum header and body sizes, graceful shutdown on SIGTERM |
+| `server.metrics(path="/metrics", user=None, password=None, public=False)` | Serves the metrics in the Prometheus text format, behind HTTP Basic authentication; see "Metrics and health" |
+| `server.health(live="/healthz", ready="/readyz", checks={})` | Liveness and readiness routes for a load balancer; see "Metrics and health" |
+| `server.drain_delay` | Seconds to go on serving after SIGTERM, with readiness failing, before closing; 0 by default |
 | `http.Handler` | `def(http.Request) -> Result[http.Response]` |
-| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `query_string() -> str` (as sent, without `?`), `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes` (any bytes, for binary uploads), `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr() -> str` (the connection's other end, `host:port`), `client_ip() -> str` (the client's address without a port: through `server.trusted_proxies`, the rightmost address in `X-Forwarded-For` that is not one of them, so a client cannot choose it; otherwise the connection's; `""` for a test request); `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13) |
+| `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `query_string() -> str` (as sent, without `?`), `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes` (any bytes, for binary uploads), `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr() -> str` (the connection's other end, `host:port`), `client_ip() -> str` (the client's address without a port: through `server.trusted_proxies`, the rightmost address in `X-Forwarded-For` that is not one of them, so a client cannot choose it; otherwise the connection's; `""` for a test request); `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13); `route() -> str` is the pattern of the route that took the request (`/todos/{id}`), `""` before routing or when none did |
 | `http.Response` | `status`, `headers`, `body`; built with `http.text`, `http.json`, `http.binary(data, content_type="application/octet-stream", status=200)` (a body of any bytes), `http.error`, `http.redirect`, `http.no_content`; `body_bytes()` is the body as sent, for tests. `with_header(name, value)` sets a header; `add_header(name, value)` adds another value, sent as its own line (in `headers`, the values are joined by newlines) |
 | `response.set_cookie(name, value, max_age=-1, path="/", http_only=True, secure=False, same_site="Lax")` | Adds a `Set-Cookie` header; any number per response. Characters a cookie cannot hold, and `%`, are sent as `%XX`, which `req.cookie` decodes. `__Host-` and `__Secure-` cookies, and `same_site="None"`, are always `Secure`. An invalid name, path or `same_site` is a bug and panics (a 500). `delete_cookie(name, path="/")` expires one; `response.cookie(name) -> str?` reads one back, for tests |
 | `http.url_encode(text)`, `http.url_decode(text, plus_is_space=True) -> str?`, `http.form_encode([(name, value), ...])` | Percent-encoding: everything but ASCII letters, digits and `-._~` as `%XX` of its UTF-8 bytes. `form_encode` makes a query string or an `application/x-www-form-urlencoded` body |
@@ -778,6 +781,79 @@ Inside JSON written in a variable, numbers and booleans may also be strings, as 
 - **Precedence.** The real environment wins over the file, so a deployment overrides what is checked in; `load_env(override=True)` reverses that for `load_env`.
 - **Keep `.env` out of version control.** Commit a `.env.example` with every variable and no real secrets, as the examples in `examples/` do.
 - **How it works.** `load` builds a JSON object of the variables (lower-cased, prefix removed) and decodes it with the derived `FromJson` code in a lenient mode (D112). The mode turns a string into the number, boolean, list or object expected, and, at the top level only, records a field that fails or is missing and goes on with the next, so one decode finds every problem.
+
+## Metrics and health (docs/14, milestone 8)
+
+```python
+import http
+import metrics
+
+@frozen
+struct Stats:
+    jobs_done: metrics.Counter
+    db_time: metrics.Histogram
+
+def main():
+    stats = Stats(
+        metrics.counter("jobs_done_total", "Jobs finished", labels=["queue"]),
+        metrics.histogram("db_query_seconds", "Query time"),
+    )
+    server = http.Server()
+    server.drain_delay = 5                                  # seconds of failing /readyz after SIGTERM
+    server.metrics()                                        # GET /metrics, METRICS_USER and METRICS_PASSWORD
+    server.health(checks={"database": lambda: ping(db)})    # GET /healthz and /readyz
+    ...
+
+def send(stats: Stats, job: Job) -> Result[None]:
+    with stats.db_time.time():
+        save(job)?
+    stats.jobs_done.inc({"queue": job.queue})
+```
+
+**`server.metrics(path="/metrics", user=None, password=None, public=False)`** serves every metric in the Prometheus text format, version 0.0.4, with `Content-Type: text/plain; version=0.0.4; charset=utf-8` and `Cache-Control: no-store`. Recording requests starts when it is called; a server that never calls it reads no clock and touches no counter for its requests.
+
+- **Credentials.** HTTP Basic authentication, with the user name and password from the arguments, else from the environment variables `METRICS_USER` and `METRICS_PASSWORD` (`config.load_env()` puts a `.env` file's there). A request without them gets a 401 with `WWW-Authenticate: Basic realm="metrics", charset="UTF-8"`. Without credentials, and without `public=True`, the call panics: ``server.metrics needs a username and password: set METRICS_USER and METRICS_PASSWORD in the environment or in .env (read by config.load or config.load_env), or pass public=True to serve the metrics without them.`` The runtime keeps only HMAC-SHA256 digests of the two, under a key made for the process, and compares digests in constant time.
+- The route is left out of the metrics and of the API documentation. Middleware applies to it, and `request_log` logs it.
+
+What is recorded:
+
+| Metric | Type | Labels | Notes |
+|---|---|---|---|
+| `http_requests_total` | counter | `method`, `route`, `status` | `route` is the route's pattern (`/todos/{id}`), never the path; `unmatched` for requests no route took (404s, 405s). `method` is one of the seven standard ones or `_OTHER`; `status` the exact code |
+| `http_request_duration_seconds` | histogram | `method`, `route` | From the request being read to its response being ready. Buckets 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500 ms, 1, 2.5, 5, 10 s. `method` is the route's own (a `HEAD` served by a `GET` route counts under `GET`); `unmatched` has only `route` |
+| `http_response_size_bytes` | summary | `method`, `route` | `_sum` and `_count` of body bytes sent (none for `HEAD` and 304) |
+| `http_requests_in_flight`, `http_connections_open` | gauge | | |
+| `http_connections_total` | counter | | Accepted since recording began |
+| `http_request_errors_total` | counter | `kind` | `panic` (a handler panicked: a 500), `timeout` (a client too slow to send its request: 408), `parse` (400, 505), `too_large` (413, 431) |
+| `process_start_time_seconds`, `process_resident_memory_bytes`, `process_cpu_seconds_total` | gauge, gauge, counter | | From `/proc` |
+| `runtime_heap_bytes`, `runtime_gc_collections_total` | gauge, counter | | From the collector |
+| `runtime_tasks`, `runtime_worker_threads` | gauge | | |
+| `build_info` | gauge | `version` | Always 1 |
+
+- **A WebSocket** counts as a 101 in `http_requests_total` and is not timed.
+- **More than 1024 routes:** the rest share `route="other"`, with a warning when the 1025th is added.
+
+**Application metrics**, the `metrics` module:
+
+| Item | Shape |
+|---|---|
+| `metrics.counter(name, help, labels=[]) -> Counter` | `inc(labels={}, by=1.0)`; `by` may not be negative. Name it ending in `_total` |
+| `metrics.gauge(name, help, labels=[]) -> Gauge` | `set(value, labels={})`, `inc(labels={}, by=1.0)`, `dec(labels={}, by=1.0)` |
+| `metrics.histogram(name, help, labels=[], buckets=[]) -> Histogram` | `observe(value, labels={})`; `time(labels={})` for a `with` block, observing its seconds however it is left. Without `buckets`, the request histogram's, in seconds |
+| `metrics.text() -> str` | What `/metrics` serves |
+| `metrics.snapshot_for_tests() -> dict[str, float]` | Every series by its name and labels as the text writes them: `jobs_done_total{queue="email"}`, `db_query_seconds_count` |
+
+- A metric is a `@frozen` handle into the runtime's registry: make it once, in `main`, and pass it to handlers and tasks, in a `@frozen` struct of the program's metrics or in the server's state. Calling `metrics.counter` again with the same arguments also gives the same metric. An update takes a read lock and changes atomics; only a new set of label values takes a write lock and allocates.
+- Registering the same name again with the same kind, labels and buckets gives the same metric. Another kind or other labels, a name that is not `[a-zA-Z_:][a-zA-Z0-9_:]*`, a label `le` on a histogram, and the runtime's own names panic, as does calling with the wrong set of labels: `the metric jobs_done_total takes the labels queue, but was given queue, x`.
+- **Label values come from a small set** (a queue's name, not a user's ID). After 1000 sets of values in one metric, new ones are counted under `"other"` for every label, with one warning logged.
+- Label values are escaped as the format requires (a backslash, a double quote and a newline as `\\`, `\"` and `\n`), and help text likewise apart from the quote.
+
+**`server.health(live="/healthz", ready="/readyz", checks={})`:**
+
+- `live` answers `200 ok` while the process serves.
+- `ready` runs the checks, `dict[str, def() -> Result[None]]`, at once, each in a task of its own, and waits up to two seconds in all. It answers 200 with `{"cache":"ok","database":"ok"}` when every check passes, otherwise 503 with each failure's message in place of `"ok"` (`"did not answer within 2 s"` for one too slow). The checks are run in other tasks, so the compiler checks that they are shareable; write the dict in the call.
+- **On SIGTERM** (or `server.stop()`), `ready` answers 503 `{"server":"draining"}` at once, and the server goes on serving everything for `server.drain_delay` seconds before it stops accepting, so that a load balancer has stopped sending requests before connections close. SIGINT stops at once.
+- Neither route is in the access log, the metrics or the API documentation. Both send `Cache-Control: no-store`.
 
 ## Tasks and synchronisation
 

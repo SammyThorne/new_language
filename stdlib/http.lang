@@ -21,6 +21,7 @@ logged, with a generic message for the client. `server.on_error(...)` replaces t
 import datetime
 import json as jsonlib
 import log
+import os
 import uuid
 
 @extern("lrt_http_listen")
@@ -149,6 +150,36 @@ def ws_remote(id: int) -> str
 @extern("lrt_ws_set_limits")
 def ws_set_limits(max_message: int, ping_seconds: int)
 
+@extern("lrt_http_route_slot")
+def route_slot_raw(method: str, pattern: str) -> int
+
+@extern("lrt_http_set_route")
+def set_route_raw(handle: int, route: int)
+
+@extern("lrt_http_req_route")
+def req_route_raw(handle: int) -> int
+
+@extern("lrt_http_route_pattern")
+def route_pattern_raw(route: int) -> str
+
+@extern("lrt_http_set_drain")
+def set_drain_raw(seconds: int)
+
+@extern("lrt_http_draining")
+def draining_raw() -> int
+
+@extern("lrt_metrics_enable")
+def metrics_enable_raw()
+
+@extern("lrt_metrics_text")
+def metrics_text_raw() -> str
+
+@extern("lrt_metrics_credentials")
+def metrics_credentials_raw(user: str, password: str) -> int
+
+@extern("lrt_metrics_authorized")
+def metrics_authorized_raw(id: int, header: str) -> int
+
 # ---- errors -------------------------------------------------------------------------------
 
 pub struct HttpError:
@@ -193,6 +224,9 @@ struct RequestExtra:
     # Headers middleware asked for on the response `Server.handle` makes from an error, which
     # did not exist when the middleware saw the request.
     error_headers: dict[str, str]? = None
+    # A test request's route, as `Route.label`; a request from a connection keeps it in the
+    # runtime.
+    route: int = UNMATCHED
 
 struct TestParts:
     body: str
@@ -285,6 +319,32 @@ impl Request:
                         return None
             case None:
                 return None
+
+    def route(self) -> str:
+        """The pattern of the route that took the request, such as `/todos/{id}`: `""` before
+        routing and when no route took it. For logs and metrics, whose labels must not be raw
+        paths."""
+        return route_pattern_raw(self.route_label())
+
+    priv def route_label(self) -> int:
+        if self.handle >= 0:
+            return req_route_raw(self.handle)
+        match self.extra:
+            case Some(extra):
+                return extra.route
+            case None:
+                return UNMATCHED
+
+    priv def routed(self, route: Route):
+        # Tells the runtime which route took the request: one store.
+        if self.handle >= 0:
+            set_route_raw(self.handle, route.label)
+            return
+        match self.extra:
+            case Some(extra):
+                extra.route = route.label
+            case None:
+                self.extra = RequestExtra(None, None, None, route.label)
 
     priv def add_error_header(self, name: str, value: str):
         match self.extra:
@@ -699,6 +759,14 @@ struct Route:
     # CORS preflight for this route (an `OPTIONS` request no route accepts), so that the group's
     # `http.cors` can. `Server.unrouted` calls it.
     preflight: Handler? = None
+    # The route's slot in the runtime's metrics, plus UNMETERED or QUIET times 65536.
+    label: int = UNMATCHED
+
+# Requests no route took, in the metrics (the runtime's `metrics::UNMATCHED`).
+const UNMATCHED = 1025
+# Route flags, times 65536 in `Route.label`: left out of the metrics, or of the access log.
+const UNMETERED = 65536
+const QUIET = 131072
 
 def new_route(method: str, pattern: str, handler: Handler) -> Route:
     kinds: list[int] = []
@@ -714,7 +782,7 @@ def new_route(method: str, pattern: str, handler: Handler) -> Route:
             kinds.append(LITERAL)
             names.append(part)
     has_params = PARAM in kinds or REST in kinds
-    return Route(method, pattern, handler, kinds, names, has_params)
+    return Route(method, pattern, handler, kinds, names, has_params, None, route_slot_raw(method, pattern))
 
 def split_path(path: str) -> list[str]:
     return [part for part in path.split("/") if part != ""]
@@ -762,6 +830,52 @@ def not_routed(req: Request, fitting: list[Route]) -> Result[Response]:
         return error(405, "method not allowed").with_header("Allow", ", ".join(allowed))
     return error(404, "not found")
 
+def metrics_reply(req: Request, credentials: int) -> Response:
+    if credentials >= 0:
+        allowed = False
+        match req.header("Authorization"):
+            case Some(header):
+                allowed = metrics_authorized_raw(credentials, header) == 1
+            case None:
+                pass
+        if not allowed:
+            return error(401, "unauthorized").with_header("WWW-Authenticate", "Basic realm=\"metrics\", charset=\"UTF-8\"")
+    response = Response(200, metrics_text_raw(), "text/plain; version=0.0.4; charset=utf-8")
+    return response.with_header("Cache-Control", "no-store")
+
+# How long each readiness check has, in seconds.
+const CHECK_SECONDS = 2.0
+
+def run_check(check: def() -> Result[None]) -> str:
+    match check():
+        case Ok(_):
+            return "ok"
+        case Err(problem):
+            return problem.message()
+
+def readiness(names: tuple[str, ...], checks: tuple[def() -> Result[None], ...]) -> Response:
+    if draining_raw() == 1:
+        return Response(503, "{\"server\":\"draining\"}", "application/json").with_header("Cache-Control", "no-store")
+    tasks: list[Task[str]] = []
+    for check in checks:
+        tasks.append(spawn run_check(check))
+    start = monotonic_raw()
+    parts: list[str] = []
+    healthy = True
+    for i in range(len(names)):
+        left = CHECK_SECONDS - (monotonic_raw() - start)
+        result = f"did not answer within {CHECK_SECONDS:.0f} s"
+        match tasks[i].join_timeout(left if left > 0.0 else 0.0):
+            case Some(answer):
+                result = answer
+            case None:
+                pass
+        if result != "ok":
+            healthy = False
+        parts.append(jsonlib.encode(names[i]) + ":" + jsonlib.encode(result))
+    body = "{" + ",".join(parts) + "}"
+    return Response(200 if healthy else 503, body, "application/json").with_header("Cache-Control", "no-store")
+
 def wrap(middleware: Middleware, next: Handler) -> Handler:
     return lambda req: middleware(req, next)
 
@@ -795,6 +909,11 @@ def log_request(req: Request, next: Handler, skipped: tuple[str, ...]) -> Result
     start = monotonic_raw()
     result = next(req)
     ms = (monotonic_raw() - start) * 1000.0
+    label = req.route_label()
+    if label // QUIET % 2 == 1:
+        # The health checks, which a load balancer asks for every few seconds.
+        set_request_id_raw("")
+        return result
     status = 200
     match result:
         case Ok(response):
@@ -804,6 +923,9 @@ def log_request(req: Request, next: Handler, skipped: tuple[str, ...]) -> Result
             status = problem.status()
             req.add_error_header("X-Request-Id", id)
     fields = {"method": req.method, "path": req.path, "status": str(status), "ms": f"{ms:.2f}"}
+    route = route_pattern_raw(label)
+    if route != "":
+        fields["route"] = route
     client = req.client_ip()
     if client != "":
         fields["client"] = client
@@ -1202,6 +1324,9 @@ pub struct Server:
     max_message: int = 16777216
     ping_interval: int = 30
     trusted_proxies: list[str] = []
+    # Seconds to go on serving after SIGTERM, with `/readyz` failing, before closing: time for a
+    # load balancer to stop sending requests. 5 is typical on Kubernetes.
+    drain_delay: int = 0
     priv routes: list[Route] = []
     priv middleware: list[Middleware] = []
     priv error_handler: (def(Request, HttpError) -> Response)? = None
@@ -1315,6 +1440,7 @@ impl Server:
                 for candidate in candidates:
                     if accepts(candidate.route, req.method):
                         req.params = candidate.params
+                        req.routed(candidate.route)
                         return candidate.route.handler(req)
                 return self.unrouted(req, [candidate.route for candidate in candidates])
             case None:
@@ -1323,6 +1449,7 @@ impl Server:
         for route in self.routes:
             if fits(route, segments) and accepts(route, req.method):
                 req.params = params_of(route, segments) if route.has_params else self.no_params
+                req.routed(route)
                 return route.handler(req)
         return self.unrouted(req, [route for route in self.routes if fits(route, segments)])
 
@@ -1419,12 +1546,14 @@ impl Server:
         if problem != "":
             panic(f"`trusted_proxies` holds {problem!r}, which is not an IP address or a network such as \"10.0.0.0/8\"")
         set_max_body_raw(self.max_body)
+        set_drain_raw(self.drain_delay)
         ws_set_limits(self.max_message, self.ping_interval)
         return port_raw(listener)
 
     def serve(self):
         """Serve requests until the program is interrupted (SIGINT or SIGTERM) or `stop` is
-        called; requests in progress finish first."""
+        called; requests in progress finish first. After SIGTERM or `stop`, the server goes on
+        serving for `drain_delay` seconds first, with `/readyz` (`health`) failing."""
         self.compose()
         server = self
         def serve_one(handle: int):
@@ -1466,6 +1595,55 @@ impl Server:
     def stop(self):
         """Ask `serve` to finish, as SIGTERM does."""
         shutdown_raw()
+
+    def metrics(self, path: str = "/metrics", user: str? = None, password: str? = None, public: bool = False):
+        """
+        Serve the metrics at `path` in the Prometheus text format: requests by method, route
+        pattern and status, their durations and response sizes, connections, errors, memory and
+        tasks, and the program's own (the `metrics` module). Recording requests starts here;
+        before, it costs nothing.
+
+        The metrics need a user name and password (HTTP Basic authentication), from the
+        arguments or else from the environment variables `METRICS_USER` and `METRICS_PASSWORD`.
+        Without them this panics, unless `public=True` says the metrics are meant to be open,
+        behind a private network. The route is left out of the metrics and of the API
+        documentation.
+        """
+        name = user if user is not None else os.getenv("METRICS_USER")
+        secret = password if password is not None else os.getenv("METRICS_PASSWORD")
+        credentials = -1
+        if name is not None and secret is not None:
+            credentials = metrics_credentials_raw(name.unwrap(), secret.unwrap())
+        elif not public:
+            panic("server.metrics needs a username and password: set METRICS_USER and METRICS_PASSWORD in the environment or in .env (read by config.load or config.load_env), or pass public=True to serve the metrics without them.")
+        metrics_enable_raw()
+        self.special_route(path, lambda req: Ok(metrics_reply(req, credentials)), UNMETERED)
+
+    def health(self, live: str = "/healthz", ready: str = "/readyz", checks: dict[str, def() -> Result[None]] = {}):
+        """
+        Health checks for a load balancer or orchestrator. `live` always answers `200 ok`
+        while the process serves. `ready` runs the `checks` at once, each in its own task with
+        two seconds to pass, and answers 200 with `{"database": "ok"}`, or 503 with each
+        failure's message in place of `"ok"`. After SIGTERM it answers 503
+        `{"server": "draining"}` for the server's `drain_delay`. Neither route is in the access
+        log, the metrics or the API documentation.
+
+            server.health(checks={"database": lambda: ping(db)})
+        """
+        self.special_route(live, lambda req: Ok(Response(200, "ok\n").with_header("Cache-Control", "no-store")), UNMETERED + QUIET)
+        named: tuple[str, ...] = tuple(sorted(checks.keys()))
+        run: tuple[def() -> Result[None], ...] = tuple([checks[name] for name in named])
+        self.special_route(ready, lambda req: Ok(readiness(named, run)), UNMETERED + QUIET)
+
+    def special_route(self, pattern: str, handler: Handler, flags: int):
+        # A GET route of the server's own, left out of the API documentation and, as `flags`
+        # says, of the metrics or the access log.
+        route = new_route("GET", pattern, handler)
+        route.label = route.label + flags
+        self.routes.append(route)
+        self.docs_routes.append(pattern)
+        self.chain = None
+        self.docs_json = ""
 
     def docs(
         self,

@@ -4,7 +4,7 @@ error[E0334]: cannot find module `lib.nowhere`
 2 | import lib.nowhere
   |        ^^^^^^^^^^^ no such module
   |
-  = help: looked for `tests/ui/lib/nowhere.vi` and for a standard library module; the standard library has `io`, `os`, `time`, `datetime`, `uuid`, `config`, `json`, `log`, `http`, `re`, `crypto`, `auth`, `postgres`
+  = help: looked for `tests/ui/lib/nowhere.vi` and for a standard library module; the standard library has `io`, `os`, `time`, `datetime`, `uuid`, `config`, `json`, `log`, `metrics`, `http`, `re`, `crypto`, `auth`, `postgres`
 
 error[E0336]: modules import each other: lib.cycle_a -> lib.cycle_b -> lib.cycle_a
  --> tests/ui/lib/cycle_b.vi:1:8

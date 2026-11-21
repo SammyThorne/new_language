@@ -61,7 +61,7 @@ pub unsafe extern "C-unwind" fn lrt_crypto_equal(a_ptr: *const u8, a_len: i64, b
     i64::from(equal(unsafe { data(a_ptr, a_len) }, unsafe { data(b_ptr, b_len) }))
 }
 
-fn equal(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn equal(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -92,6 +92,11 @@ fn encode(input: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
 
 /// Decode either alphabet's text; `=` padding is optional, but must be right if present.
 /// `None` for any other character, or a length no encoding produces.
+/// Standard base64, padded or not.
+pub(crate) fn base64_decode(text: &[u8]) -> Option<Vec<u8>> {
+    decode(text, STANDARD)
+}
+
 fn decode(text: &[u8], alphabet: &[u8; 64]) -> Option<Vec<u8>> {
     let unpadded = match text.iter().position(|&b| b == b'=') {
         Some(at) => {

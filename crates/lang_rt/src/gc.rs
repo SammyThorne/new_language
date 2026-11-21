@@ -57,6 +57,12 @@ extern "C" fn print_alloc_stats() {
     eprintln!("alloc stats: bytes={bytes} collections={collections} heap={heap}");
 }
 
+/// The collector's heap size in bytes, and how many collections it has run.
+pub(crate) fn heap_stats() -> (usize, usize) {
+    // SAFETY: plain queries.
+    unsafe { (GC_get_heap_size(), GC_get_gc_no()) }
+}
+
 static STRESS: AtomicBool = AtomicBool::new(false);
 static CACHE_STRESS: AtomicBool = AtomicBool::new(false);
 

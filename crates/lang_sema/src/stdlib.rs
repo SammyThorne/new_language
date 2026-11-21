@@ -15,6 +15,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("config", include_str!("../../../stdlib/config.lang")),
     ("json", include_str!("../../../stdlib/json.lang")),
     ("log", include_str!("../../../stdlib/log.lang")),
+    ("metrics", include_str!("../../../stdlib/metrics.lang")),
     ("http", include_str!("../../../stdlib/http.lang")),
     ("re", include_str!("../../../stdlib/re.lang")),
     ("crypto", include_str!("../../../stdlib/crypto.lang")),

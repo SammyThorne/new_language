@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 7 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 8 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1022,6 +1022,27 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - `/readyz` failing a check, and going to 503 during drain.
 - **Gate:** the plain counts unchanged; the observed counts within the budget of 4.20; the throughput figure recorded.
 - **Docs:** docs/05, a site section "Metrics and health", and docs/web-performance.md (the observed-mode numbers).
+
+**Done** (D113). Everything listed except the dashboard's parts, with these differences:
+- Route slots are given when a route is added (`new_route`, through `lrt_http_route_slot`), interned by method and pattern, rather than when `compose` runs. `dispatch` stores the slot with `lrt_http_set_route`, with the route's flags (left out of the metrics; left out of the access log) in the high bits.
+- The counters are 16 shards that threads take in turn when they first record, rather than one array per worker thread. Each route's cells are padded to 64 bytes; the counts by route, method and status are a 4096-entry table per shard whose keys are claimed with a compare-and-swap.
+- The duration histogram is labelled by method and route. `http_response_size_bytes` is a summary (`_sum` and `_count`); `HEAD` and 304 responses count 0 bytes. `process_cpu_seconds_total` is added, and `runtime_unrecorded_requests_total` appears only if a series found no room.
+- `METRICS_PASSWORD_HASH` and the `dashboard=` argument are left to Milestone 9, which settles the hash's format with `viper hash-password`.
+- **The drain.** SIGTERM (or `server.stop()`) asks the server to stop; with `drain_delay` above 0 it goes on serving for that many seconds, logging `draining for N s before stopping`, while `/readyz` answers 503 `{"server":"draining"}`. SIGINT still stops at once.
+- **The checks** run each in its own task with one shared 2 s deadline; one that has not answered is reported as `did not answer within 2 s`. `checks` must be a dict literal of functions (`check/http.rs`), because the standard library spawns them: the sharing check now trusts a standard-library module to spawn the function values it was given, while a program doing the same still gets E0338.
+- The metrics route is left out of the metrics and the documentation but is in the access log; `/healthz` and `/readyz` are left out of all three. Access log lines gain a `route` field, and `req.route()` gives the pattern.
+- **The cost, measured.** The plain counts are unchanged. Metrics alone add exactly the budget: +2 `clock_gettime`, no allocation and no system call per request, and the rate at 256 connections stays within 1.3% of plain (3 alternating runs of 5 s, `bench/http/server.vi ... metrics`):
+
+  | Endpoint | plain req/s | metrics on | change |
+  |---|---|---|---|
+  | `/plaintext` | 1,087,529 | 1,100,665 | +1.2% |
+  | `/json` | 1,090,881 | 1,089,442 | -0.1% |
+  | `/items` | 598,631 | 590,693 | -1.3% |
+  | `/users/42` | 1,008,261 | 998,460 | -1.0% |
+  | `POST /orders` | 966,384 | 965,032 | -0.1% |
+
+  The observed mode, which adds the access log of Milestone 1, is **over** 4.20's budget: +6 clock reads, about 13.6 Rust heap and 17 collected allocations (2.8 KB) per request, still no system calls, and a rate 31% to 42% below plain (`/plaintext` 1,025,701 against 599,063). All of the excess is the access log (the request ID, the line's fields and its formatting), not the metrics; `counts_observed.json` records it so that it cannot grow unnoticed. Making the access log cheaper is a follow-up of its own.
+- Tests: `crates/lang_cli/tests/metrics.rs` parses the text with a checker of the format's rules (names, label escaping, `# HELP` and `# TYPE`, histogram `_bucket`, `_sum` and `_count` with `le="+Inf"`), and checks exact totals after 100,000 requests pipelined over 64 connections, errors by kind, the `unmatched` label, labels of the program's metrics, 401s and Basic authentication, the access log's `route`, the startup panic's text, and `/readyz` failing a check and answering 503 through a drain on SIGTERM (`tests/http/metrics_server.vi`). `tests/run/metrics_module.vi` covers the module, the cap of 1000 sets and the label panic; runtime unit tests cover the HMAC comparison, names, registering again, the text format and series keys.
 
 #### Milestone 9: the metrics dashboard (about 3 days; after 8)
 

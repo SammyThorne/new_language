@@ -132,6 +132,7 @@ fn text_lines_carry_fields_and_the_request_id() {
     assert!(line_with(&lines, "in task").ends_with("in task request_id=abc-123 note=\"from the handler\""));
     let access = line_with(&lines, "GET /work 200 request_id=abc-123");
     assert!(access.contains(" method=GET path=/work status=200 ms="), "{access}");
+    assert!(access.contains(" route=/work client="), "{access}");
     assert!(access.ends_with(" client=203.0.113.9"), "{access}");
     assert!(line_with(&lines, &format!("GET /work 200 request_id={new_id}")).ends_with("client=127.0.0.1"));
     assert!(line_with(&lines, "GET /fail 503").contains("ERROR GET /fail 503 request_id="));

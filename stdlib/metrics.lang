@@ -1,0 +1,172 @@
+"""
+Counters, gauges and histograms of the program's own, served with the HTTP server's metrics by
+`server.metrics()` in the Prometheus text format:
+
+    import metrics
+
+    def main():
+        jobs_done = metrics.counter("jobs_done_total", "Jobs finished", labels=["queue"])
+        queue_depth = metrics.gauge("queue_depth", "Jobs waiting")
+        db_time = metrics.histogram("db_query_seconds", "Query time")
+
+        jobs_done.inc({"queue": "email"})
+        queue_depth.set(12.0)
+        with db_time.time():
+            rows = db.query("select ...")?
+
+A metric is a handle into the runtime's registry, immutable, so it can be made once in `main` and
+shared by every handler and task; calling `metrics.counter` again with the same arguments also
+gives the same metric. Recording takes no lock and allocates nothing
+once a set of label values has been seen. Registering the same name again with the same kind and
+labels gives the same metric; anything else panics, as does a name the runtime uses itself
+(`http_requests_total` and the others `server.metrics` serves) or a wrong set of labels.
+
+Label values should come from a small set (a queue's name, not a user's ID): each set of values
+is a series that Prometheus stores. A metric keeps at most 1000 sets; values after that are
+counted under `"other"`, with a warning logged once.
+
+Histograms count observations in buckets; the default buckets suit durations in seconds, from
+0.1 ms to 10 s. `time()` measures the block of a `with` statement.
+"""
+
+@extern("lrt_metrics_register")
+def register_raw(kind: int, name: str, help: str, labels: str, buckets: str) -> int
+
+@extern("lrt_metrics_update")
+def update_raw(id: int, op: int, values: str, amount: float) -> str
+
+@extern("lrt_metrics_text")
+def text_raw() -> str
+
+@extern("lrt_metrics_snapshot")
+def snapshot_raw() -> str
+
+@extern("lrt_io_error")
+def last_error() -> str
+
+@extern("lrt_time_monotonic")
+def monotonic_raw() -> float
+
+const ADD = 0
+const SET = 1
+const OBSERVE = 2
+
+def register(kind: int, name: str, help: str, labels: list[str], buckets: list[float]) -> int:
+    names = "".join([label.replace("\0", "") + "\0" for label in labels])
+    bounds = "".join([str(bound) + "\0" for bound in buckets])
+    id = register_raw(kind, name, help, names, bounds)
+    if id < 0:
+        panic(last_error())
+    return id
+
+def values_of(name: str, names: tuple[str, ...], labels: dict[str, str]) -> str:
+    # The values in the order the metric names its labels, each followed by a NUL.
+    if len(labels) != len(names):
+        wrong_labels(name, names, labels)
+    parts: list[str] = []
+    for label in names:
+        match labels.get(label):
+            case Some(value):
+                parts.append(value.replace("\0", "") + "\0")
+            case None:
+                wrong_labels(name, names, labels)
+    return "".join(parts)
+
+def wrong_labels(name: str, names: tuple[str, ...], labels: dict[str, str]):
+    wanted = ", ".join(list(names)) if len(names) > 0 else "none"
+    given = ", ".join(sorted(labels.keys())) if len(labels) > 0 else "none"
+    panic(f"the metric {name} takes the labels {wanted}, but was given {given}")
+
+def apply(id: int, name: str, names: tuple[str, ...], labels: dict[str, str], op: int, amount: float):
+    values = "" if len(names) == 0 and len(labels) == 0 else values_of(name, names, labels)
+    problem = update_raw(id, op, values, amount)
+    if problem != "":
+        panic(problem)
+
+@frozen
+pub struct Counter:
+    """A count that only goes up, such as jobs done or errors seen. Name it ending in `_total`."""
+    priv id: int
+    priv name: str
+    priv labels: tuple[str, ...]
+
+impl Counter:
+    def inc(self, labels: dict[str, str] = {}, by: float = 1.0):
+        """Add `by` (1 unless given; never negative) to the series with these label values."""
+        apply(self.id, self.name, self.labels, labels, ADD, by)
+
+@frozen
+pub struct Gauge:
+    """A value that goes up and down, such as a queue's length or connections open."""
+    priv id: int
+    priv name: str
+    priv labels: tuple[str, ...]
+
+impl Gauge:
+    def set(self, value: float, labels: dict[str, str] = {}):
+        apply(self.id, self.name, self.labels, labels, SET, value)
+
+    def inc(self, labels: dict[str, str] = {}, by: float = 1.0):
+        apply(self.id, self.name, self.labels, labels, ADD, by)
+
+    def dec(self, labels: dict[str, str] = {}, by: float = 1.0):
+        apply(self.id, self.name, self.labels, labels, ADD, 0.0 - by)
+
+@frozen
+pub struct Histogram:
+    """Observations counted in buckets, such as how long queries take, in seconds."""
+    priv id: int
+    priv name: str
+    priv labels: tuple[str, ...]
+
+impl Histogram:
+    def observe(self, value: float, labels: dict[str, str] = {}):
+        apply(self.id, self.name, self.labels, labels, OBSERVE, value)
+
+    def time(self, labels: dict[str, str] = {}) -> Timer:
+        """Measure the block of a `with` statement, in seconds:
+        `with db_time.time(): rows = db.query(...)?`. The time is observed when the block is
+        left, however it is left."""
+        return Timer(self, labels, monotonic_raw())
+
+pub struct Timer:
+    """What `Histogram.time` returns, for a `with` statement."""
+    priv histogram: Histogram
+    priv labels: dict[str, str]
+    priv start: float
+
+impl Timer:
+    def exit(self):
+        self.histogram.observe(monotonic_raw() - self.start, self.labels)
+
+pub def counter(name: str, help: str, labels: list[str] = []) -> Counter:
+    """A counter called `name`, described by `help`, with these label names."""
+    return Counter(register(0, name, help, labels, []), name, tuple(labels))
+
+pub def gauge(name: str, help: str, labels: list[str] = []) -> Gauge:
+    return Gauge(register(1, name, help, labels, []), name, tuple(labels))
+
+pub def histogram(name: str, help: str, labels: list[str] = [], buckets: list[float] = []) -> Histogram:
+    """A histogram with these bucket bounds, in increasing order (a last bucket for anything
+    larger is added); without them, 0.0001, 0.00025, 0.0005, 0.001 ... 2.5, 5 and 10, for
+    durations in seconds."""
+    return Histogram(register(2, name, help, labels, buckets), name, tuple(labels))
+
+pub def text() -> str:
+    """Every metric in the Prometheus text format, as `server.metrics()` serves it."""
+    return text_raw()
+
+pub def snapshot_for_tests() -> dict[str, float]:
+    """Every series and its value, keyed as the text format writes it:
+    `jobs_done_total{queue="email"}`, `db_query_seconds_count`. For tests."""
+    out: dict[str, float] = {}
+    parts = snapshot_raw().split("\0")
+    i = 0
+    while i + 1 < len(parts):
+        match float.parse(parts[i + 1]):
+            case Ok(value):
+                out[parts[i]] = value
+            case Err(_):
+                pass
+        i = i + 2
+    return out

@@ -1,0 +1,55 @@
+# Application metrics (docs/14, milestone 8): counters, gauges and histograms with labels, the
+# histogram's timer, the text format, registering again, the cap on label values, and misuse,
+# which panics with a message naming the metric.
+# expect: jobs email 3.0
+# expect: jobs sms 1.0
+# expect: depth 5.0
+# expect: query count 3.0, under 0.5: 2.0, sum 2.1
+# expect: timed 1.0
+# expect: same metric True
+# expect: users 1001 series, other 5.0
+# expect: # TYPE jobs_done_total counter
+# expect: jobs_done_total{queue="email"} 3
+# expect: no request metrics before server.metrics: True
+# expect-stderr: the metric users_total has more than 1000 sets of label values
+# expect-stderr: the metric jobs_done_total takes the labels queue, but was given queue, x
+# expect-exit: 101
+
+import metrics
+
+def main():
+    jobs = metrics.counter("jobs_done_total", "Jobs finished", labels=["queue"])
+    jobs.inc({"queue": "email"})
+    jobs.inc({"queue": "email"}, by=2.0)
+    jobs.inc({"queue": "sms"})
+    depth = metrics.gauge("queue_depth", "Jobs waiting")
+    depth.set(7.0)
+    depth.dec()
+    depth.dec(by=1.0)
+    queries = metrics.histogram("query_seconds", "Query time", buckets=[0.5, 1.0])
+    queries.observe(0.1)
+    queries.observe(0.5)
+    queries.observe(1.5)
+    timed = metrics.histogram("timed_seconds", "A timed block")
+    with timed.time():
+        pass
+    snapshot = metrics.snapshot_for_tests()
+    print("jobs email", snapshot["jobs_done_total{queue=\"email\"}"])
+    print("jobs sms", snapshot["jobs_done_total{queue=\"sms\"}"])
+    print("depth", snapshot["queue_depth"])
+    print(f"query count {snapshot['query_seconds_count']}, under 0.5: {snapshot['query_seconds_bucket{le=\"0.5\"}']}, sum {snapshot['query_seconds_sum']:.1f}")
+    print("timed", snapshot["timed_seconds_count"])
+    again = metrics.counter("jobs_done_total", "Jobs finished", labels=["queue"])
+    again.inc({"queue": "email"}, by=0.0)
+    print("same metric", metrics.snapshot_for_tests()["jobs_done_total{queue=\"email\"}"] == 3.0)
+    users = metrics.counter("users_total", "Requests per user, which is too many series", labels=["user"])
+    for i in range(1005):
+        users.inc({"user": f"u{i}"})
+    counted = [key for key in metrics.snapshot_for_tests().keys() if key.starts_with("users_total{")]
+    print(f"users {len(counted)} series, other {metrics.snapshot_for_tests()['users_total{user=\"other\"}']}")
+    text = metrics.text()
+    for line in text.split("\n"):
+        if line.starts_with("# TYPE jobs") or line.starts_with("jobs_done_total{queue=\"email\"}"):
+            print(line)
+    print("no request metrics before server.metrics:", "http_requests_total" not in text)
+    jobs.inc({"queue": "email", "x": "y"})

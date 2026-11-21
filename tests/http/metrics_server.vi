@@ -1,0 +1,58 @@
+# Metrics, health and readiness (docs/14, milestone 8). Run by crates/lang_cli/tests/metrics.rs,
+# which sets METRICS_USER and METRICS_PASSWORD (or leaves them out, to see the startup panic),
+# sends requests, and reads `/metrics`, `/healthz` and `/readyz`.
+
+import http
+import io
+import metrics
+import time
+
+@frozen
+struct State:
+    # What the database check does: 0 passes, 1 fails, 2 takes too long.
+    database: Atomic
+
+def check_database(state: State) -> Result[None]:
+    mode = state.database.get()
+    if mode == 1:
+        return Err(http.Error(500, "connection refused"))
+    if mode == 2:
+        time.sleep(3.0)
+    return Ok(None)
+
+def check_cache() -> Result[None]:
+    return Ok(None)
+
+def item(req: http.Request) -> Result[http.Response]:
+    return http.text(f"item {req.param('id')}")
+
+def create(req: http.Request) -> Result[http.Response]:
+    return Ok(http.Response(201, "created"))
+
+def boom(req: http.Request) -> Result[http.Response]:
+    panic("boom")
+
+def main():
+    state = State(Atomic(0))
+    tags = metrics.counter("tags_total", "Tags seen", labels=["tag"])
+    server = http.Server()
+    server.drain_delay = 1
+    server.use(http.request_log())
+    server.get("/items/{id}", item)
+    server.post("/items", create)
+    server.get("/boom", boom)
+    server.get("/tag", lambda req: tag(req, tags))
+    server.post("/database/{mode}", lambda req: set_database(req, state))
+    server.metrics()
+    server.health(checks={"database": lambda: check_database(state), "cache": check_cache})
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()
+
+def tag(req: http.Request, tags: metrics.Counter) -> Result[http.Response]:
+    tags.inc({"tag": req.query("value").unwrap_or("")})
+    return http.text("ok")
+
+def set_database(req: http.Request, state: State) -> Result[http.Response]:
+    state.database.set(req.param_int("mode")?)
+    return http.text("ok")

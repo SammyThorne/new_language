@@ -197,6 +197,18 @@ impl StackTable {
     }
 }
 
+/// How many tasks are running or waiting: the stacks a fiber is using.
+pub(crate) fn live_tasks() -> usize {
+    (0..STACKS.count.load(Ordering::SeqCst))
+        .filter(|&index| STACKS.get(index).is_some_and(|slot| !slot.load(Ordering::Acquire).is_null()))
+        .count()
+}
+
+/// How many worker threads run tasks: none until the first `spawn` or `serve`.
+pub(crate) fn worker_threads() -> usize {
+    SCHEDULER.get().map_or(0, |scheduler| scheduler.workers.len())
+}
+
 static PREVIOUS_PUSH: OnceLock<usize> = OnceLock::new();
 static PREVIOUS_CORRECTOR: OnceLock<usize> = OnceLock::new();
 

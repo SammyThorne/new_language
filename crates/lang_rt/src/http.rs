@@ -20,6 +20,7 @@
 //! the connection is about to wait for more input (docs/10, milestone 2).
 
 use crate::fiber;
+use crate::metrics;
 use crate::poll::{self, IoSource, Wait};
 use crate::tls::{self, Session};
 use crate::{Str, tasks};
@@ -34,6 +35,13 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+/// SIGTERM or `lrt_http_shutdown` asked the server to stop: it stops after the drain delay.
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Seconds to keep serving after a stop is asked for, with readiness failing, so that a load
+/// balancer takes the instance out before it closes (`server.drain_delay`).
+static DRAIN_SECONDS: AtomicI64 = AtomicI64::new(0);
+/// A stop has been asked for and the drain delay is running.
+static DRAINING: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicI64 = AtomicI64::new(0);
 static MAX_BODY: AtomicI64 = AtomicI64::new(8 * 1024 * 1024);
 static LISTENERS: Mutex<Vec<Option<Listener>>> = Mutex::new(Vec::new());
@@ -48,8 +56,30 @@ unsafe extern "C" {
     fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
 }
 
-extern "C" fn on_signal(_: i32) {
-    SHUTDOWN.store(true, Ordering::SeqCst);
+extern "C" fn on_signal(signum: i32) {
+    // SIGINT (someone at a terminal) stops at once; SIGTERM (a supervisor) drains first.
+    if signum == 15 {
+        STOP_REQUESTED.store(true, Ordering::SeqCst);
+    } else {
+        SHUTDOWN.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Open connections, WebSockets included.
+pub(crate) fn open_connections() -> i64 {
+    ACTIVE.load(Ordering::Relaxed).max(0)
+}
+
+/// How long to go on serving after SIGTERM, with readiness failing.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_http_set_drain(seconds: i64) {
+    DRAIN_SECONDS.store(seconds.max(0), Ordering::Relaxed);
+}
+
+/// Whether the server is draining before it stops: 1 or 0.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_http_draining() -> i64 {
+    i64::from(DRAINING.load(Ordering::Relaxed))
 }
 
 fn set_error(message: impl std::fmt::Display) {
@@ -125,7 +155,7 @@ pub extern "C-unwind" fn lrt_http_set_max_body(bytes: i64) {
 /// Ask a running `lrt_http_serve` to stop, as SIGTERM does.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_http_shutdown() {
-    SHUTDOWN.store(true, Ordering::SeqCst);
+    STOP_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 type Entry = extern "C-unwind" fn(*mut u8, *mut u8, i64);
@@ -147,8 +177,9 @@ unsafe extern "C" {
 }
 
 /// Serve connections on `listener` until SIGINT, SIGTERM or `lrt_http_shutdown`, calling
-/// `entry(code, env, request)` for each request. Then wait (up to ten seconds) for requests in
-/// progress to finish, and return.
+/// `entry(code, env, request)` for each request. After SIGTERM or `lrt_http_shutdown`, go on
+/// serving for the drain delay first. Then wait (up to ten seconds) for requests in progress to
+/// finish, and return.
 ///
 /// # Safety
 /// `entry` must be the C-ABI function generated for this purpose, and `code` and `env` the
@@ -159,6 +190,9 @@ pub unsafe extern "C-unwind" fn lrt_http_serve(listener: i64, entry: Entry, code
     fiber::start_workers();
     raise_file_limit();
     SHUTDOWN.store(false, Ordering::SeqCst);
+    STOP_REQUESTED.store(false, Ordering::SeqCst);
+    DRAINING.store(false, Ordering::SeqCst);
+    let mut drain_until: Option<Instant> = None;
     // SAFETY: installing a handler that only stores to an atomic.
     unsafe {
         signal(2, on_signal);
@@ -179,6 +213,20 @@ pub unsafe extern "C-unwind" fn lrt_http_serve(listener: i64, entry: Entry, code
     while !SHUTDOWN.load(Ordering::SeqCst) {
         // Log lines wait here at most until the loop next wakes.
         crate::log::flush();
+        if STOP_REQUESTED.load(Ordering::SeqCst) {
+            let until = *drain_until.get_or_insert_with(|| {
+                let seconds = DRAIN_SECONDS.load(Ordering::Relaxed);
+                if seconds > 0 {
+                    DRAINING.store(true, Ordering::SeqCst);
+                    crate::log::write_line("info", &format!("draining for {seconds} s before stopping"), "");
+                }
+                Instant::now() + Duration::from_secs(seconds as u64)
+            });
+            if Instant::now() >= until {
+                SHUTDOWN.store(true, Ordering::SeqCst);
+                break;
+            }
+        }
         let mut pfd = Pollfd { fd, events: 1, revents: 0 };
         // SAFETY: one valid pollfd; wake every 200 ms to notice a shutdown.
         let ready = unsafe { poll(&mut pfd, 1, 200) };
@@ -188,6 +236,9 @@ pub unsafe extern "C-unwind" fn lrt_http_serve(listener: i64, entry: Entry, code
         // Take every connection that is waiting, each served by its own fiber.
         while let Ok((stream, peer)) = listener.accept() {
             ACTIVE.fetch_add(1, Ordering::SeqCst);
+            if metrics::on() {
+                metrics::connection_opened();
+            }
             let (entry, roots) = (callback.entry, callback.roots);
             let tls = tls.clone();
             fiber::spawn(
@@ -614,6 +665,13 @@ pub struct Request {
     file: Option<(i64, crate::static_files::Part)>,
     /// A file too large for the output buffer, sent by `serve_connection` after the handler.
     stream: Option<crate::static_files::Part>,
+    /// The metrics slot of the route that took the request (`metrics::UNMATCHED` until one
+    /// does), and the route's flags ([`ROUTE_UNMETERED`]; 2 for the access log).
+    route: u16,
+    route_flags: u8,
+    /// The status and body size of the response, for the metrics.
+    status: i64,
+    bytes: u64,
 }
 
 impl Request {
@@ -973,6 +1031,10 @@ impl Connection {
             upgraded: None,
             file: None,
             stream: None,
+            route: metrics::UNMATCHED,
+            route_flags: 0,
+            status: 0,
+            bytes: 0,
         })
     }
 
@@ -1253,6 +1315,13 @@ fn serve_connection(
             Ok(request) => request,
             Err(ReadError::Closed) => break,
             Err(ReadError::Status(status, text)) => {
+                if metrics::on() {
+                    metrics::request_failed(match status {
+                        408 => metrics::ErrorKind::Timeout,
+                        413 | 431 => metrics::ErrorKind::TooLarge,
+                        _ => metrics::ErrorKind::Parse,
+                    });
+                }
                 if connection.flush() {
                     write_simple(&connection.socket, status, text);
                 }
@@ -1263,9 +1332,17 @@ fn serve_connection(
         let (code, env) = unsafe { (roots.read(), roots.add(1).read()) };
         request.keep_alive = request.keep_alive && !SHUTDOWN.load(Ordering::SeqCst);
         let handle = &mut request as *mut Request as i64;
+        // The clock is read only when metrics are on.
+        let started = metrics::on().then(|| {
+            metrics::request_started();
+            Instant::now()
+        });
         // A panicking handler ends only this request, with a 500; the panic was reported
         // where it happened. Mutexes it held are released.
         let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(code, env, handle)));
+        if let Some(started) = started {
+            record(&request, started, handled.is_err());
+        }
         if handled.is_err() {
             if let Some(me) = fiber::current() {
                 fiber::release_held(me);
@@ -1302,6 +1379,73 @@ fn serve_connection(
         }
     }
     connection.socket.shutdown();
+}
+
+/// Record a request in the metrics: its route, method, status, time and response size.
+#[inline(never)]
+fn record(request: &Request, started: Instant, panicked: bool) {
+    let elapsed = started.elapsed();
+    if panicked {
+        metrics::request_failed(metrics::ErrorKind::Panic);
+    }
+    let (status, bytes) = if panicked || !request.responded && request.upgraded.is_none() {
+        (500, 22)
+    } else if request.upgraded.is_some() {
+        (101, 0)
+    } else {
+        (request.status, request.bytes)
+    };
+    if request.route_flags & ROUTE_UNMETERED != 0 {
+        // A route left out of the metrics, such as the metrics' own.
+        metrics::request_done_unmetered();
+        return;
+    }
+    let method = match request.method {
+        Method::Known(name) => metrics::method_index(name),
+        Method::Other(_) => 7,
+    };
+    let elapsed = if request.upgraded.is_some() { None } else { Some(elapsed) };
+    metrics::request_finished(request.route, method, status, elapsed, bytes);
+}
+
+/// A route left out of the metrics, such as the metrics' own.
+const ROUTE_UNMETERED: u8 = 1;
+// Flag 2 marks a route left out of the access log, such as the health checks; only the http
+// module reads it.
+
+/// Which route took the request: its metrics slot plus its flags times 65536
+/// ([`ROUTE_UNMETERED`], and 2 for a route left out of the access log). One store; test requests (a negative handle) keep it
+/// themselves.
+///
+/// # Safety
+/// `handle` is a live request, or negative.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_set_route(handle: i64, route: i64) {
+    if handle < 0 {
+        return;
+    }
+    let request = unsafe { request(handle) };
+    request.route = (route & 0xffff).min(i64::from(metrics::UNMATCHED)) as u16;
+    request.route_flags = ((route >> 16) & 0xff) as u8;
+}
+
+/// What `lrt_http_set_route` was given, or the unmatched slot.
+///
+/// # Safety
+/// `handle` is a live request.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_req_route(handle: i64) -> i64 {
+    let request = unsafe { request(handle) };
+    i64::from(request.route) | (i64::from(request.route_flags) << 16)
+}
+
+/// The pattern of a route's slot (flags ignored), or `""` for the unmatched slot.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_http_route_pattern(route: i64) -> Str {
+    match u16::try_from(route & 0xffff).ok().and_then(metrics::route_pattern) {
+        Some(pattern) => Str { ptr: pattern.as_ptr(), len: pattern.len() as i64 },
+        None => Str::empty(),
+    }
 }
 
 // ---- the request, as seen from compiled code --------------------------------------------
@@ -1670,8 +1814,13 @@ pub unsafe extern "C-unwind" fn lrt_http_respond(
     out.truncate(request.out_start);
     request.stream = None;
     request.responded = true;
+    request.status = status;
+    // Body bytes sent: none for HEAD and 304.
+    let sent = |len: u64| if request.head || status == 304 { 0 } else { len };
+    request.bytes = sent(body.len() as u64);
     // A file from `lrt_http_static`, unless middleware put another response in its place.
     if let Some((_, part)) = request.file.take().filter(|(file_status, _)| *file_status == status && body.is_empty()) {
+        request.bytes = sent(part.len);
         write_head(out, status, content_type, headers, part.len, request.keep_alive);
         if request.head || status == 304 {
             return;

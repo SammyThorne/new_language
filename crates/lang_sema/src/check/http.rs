@@ -156,7 +156,7 @@ pub(super) struct RouteDoc {
 const ROUTE_METHODS: &[&str] = &["get", "post", "put", "patch", "delete"];
 /// The `Server` and `Group` methods that register handlers, which must be shareable.
 const REGISTRATION: &[&str] =
-    &["route", "get", "post", "put", "patch", "delete", "head", "options", "use", "on_error", "ws"];
+    &["route", "get", "post", "put", "patch", "delete", "head", "options", "use", "on_error", "ws", "health"];
 
 impl<'m> Checker<'_, 'm> {
     /// Find the `http` module's types if the program imports it.
@@ -843,8 +843,29 @@ impl<'m> Checker<'_, 'm> {
         }
         let K::Call { args, .. } = &call.kind else { return };
         for arg in args.iter().skip(1) {
-            if matches!(self.types.kind(arg.ty), TyKind::Func(..)) {
-                self.require_shareable(cx, arg, "used to serve requests from several tasks");
+            match (&arg.kind, self.types.kind(arg.ty)) {
+                (_, TyKind::Func(..)) => {
+                    self.require_shareable(cx, arg, "used to serve requests from several tasks");
+                }
+                // `server.health(checks={...})`: each check runs in a task of its own.
+                (K::Dict(entries), TyKind::Dict(_, value)) if matches!(self.types.kind(*value), TyKind::Func(..)) => {
+                    for (_, check) in entries {
+                        self.require_shareable(cx, check, "run in another task");
+                    }
+                }
+                (_, TyKind::Dict(_, value)) if matches!(self.types.kind(*value), TyKind::Func(..)) => {
+                    let shown = self.display(arg.ty);
+                    self.error(
+                        Diagnostic::error(
+                            codes::NOT_SHAREABLE,
+                            format!("a value of type `{shown}` cannot be run in other tasks"),
+                            arg.span,
+                            "the functions in it might capture variables that can be changed".to_string(),
+                        )
+                        .with_help("write the dict out here, `checks={\"database\": ping}`, so that each function can be checked"),
+                    );
+                }
+                _ => {}
             }
         }
     }

@@ -92,10 +92,10 @@ The results are summarised in [docs/web-performance.md](../docs/web-performance.
 
 Small effects (a few percent) are hidden by the machine's drift of up to 10% between runs a few minutes apart. Three tools make them visible (docs/10, milestone 1):
 
-- **`counts.py`** runs the server under `profile/count.c`, an `LD_PRELOAD` shim, and prints exact counts per request for each endpoint: `recv` calls (and how many found nothing to read), `send`, `epoll_wait`, clock reads, Rust heap allocations, collector calls and bytes allocated. Counts do not drift, so they show whether a change did what it was meant to.
+- **`counts.py`** runs the server under `profile/count.c`, an `LD_PRELOAD` shim, and prints exact counts per request for each endpoint: `recv` calls (and how many found nothing to read), `send`, `epoll_wait`, clock reads, Rust heap allocations, collector calls and bytes allocated. Counts do not drift, so they show whether a change did what it was meant to. With `--observed` the server runs as production would, with `http.request_log()` and `server.metrics()` on, and the table of what they add per request follows; its record is `http/counts_observed.json`.
 
 ```bash
-python3 bench/http/counts.py [--browser] [--server EXECUTABLE]
+python3 bench/http/counts.py [--browser] [--observed] [--server EXECUTABLE]
 ```
 
 - **`ab.py`** runs two builds of the same program interleaved, in alternating order, and prints each side's median and range. Build the "before" side against a saved runtime with `VIPER_RUNTIME=saved/liblang_rt.a`.
@@ -128,8 +128,12 @@ python3 bench/http/counts.py --check
 python3 bench/http/counts.py --browser --check
 ```
 
+```bash
+python3 bench/http/counts.py --observed --check
+```
+
 - **`run.py --check`** runs each program's Viper and Go versions (not CPython) and compares Viper's time *relative to Go's* with `baseline.json`, which cancels most of the machine's drift. It fails on a program more than 15% slower (and at least 5 ms) or using more than 10% more memory.
-- **`counts.py --check`** compares the calls and allocations per request with `http/counts.json` (and `counts_browser.json`): `recv`, `send`, clock reads, Rust heap allocations, collector calls and bytes allocated. These do not drift, so the tolerance is small: 0.1 per request or 5%. `epoll_wait` and free-list refills depend on timing and are left out.
+- **`counts.py --check`** compares the calls and allocations per request with `http/counts.json` (and `counts_browser.json`, `counts_observed.json`): `recv`, `send`, clock reads, Rust heap allocations, collector calls and bytes allocated. These do not drift, so the tolerance is small: 0.1 per request or 5%. `epoll_wait` and free-list refills depend on timing and are left out.
 - After an intended change, record new baselines with `--record` in place of `--check`, and commit them.
 
 ## Idle WebSockets and task creation

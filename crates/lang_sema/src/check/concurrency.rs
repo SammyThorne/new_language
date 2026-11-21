@@ -306,10 +306,20 @@ impl Checker<'_, '_> {
                 return error_expr(span);
             }
         };
+        // The standard library runs callbacks it was given in tasks of their own (the checks of
+        // `server.health`); it checks them where they are given to it.
+        let trusted = |this: &Self, value: &hir::Expr| {
+            this.is_stdlib_module(this.current_module) && matches!(this.types.kind(value.ty), TyKind::Func(..))
+        };
         if let Some(callee) = &callee {
-            self.require_shareable(cx, callee, "called in another task");
+            if !trusted(self, callee) {
+                self.require_shareable(cx, callee, "called in another task");
+            }
         }
         for arg in &args {
+            if trusted(self, arg) {
+                continue;
+            }
             if self.require_shareable(cx, arg, "passed to another task") {
                 self.check_escape(cx, arg, "passed to another task");
             }

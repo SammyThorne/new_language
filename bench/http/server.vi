@@ -2,6 +2,10 @@
 # "plaintext" and "JSON" tests, a JSON list of records, and two endpoints shaped like a REST API:
 # a typed route with a path parameter behind ten other routes, and a POST whose JSON body is
 # decoded into a struct and answered with a computed JSON receipt.
+#
+# With `observed` after the port, it runs as a production server would: with the access log
+# (`request_log`) and request metrics (`metrics`), for bench/http/counts.py --observed. With
+# `metrics`, only the metrics are on.
 
 import http
 import io
@@ -71,6 +75,12 @@ def order(body: Order) -> Receipt:
 
 def main():
     server = http.Server()
+    args = os.args()
+    mode = args[2] if len(args) > 2 else ""
+    if mode == "observed":
+        server.use(http.request_log())
+    if mode == "observed" or mode == "metrics":
+        server.metrics(public=True)
     server.get("/plaintext", plaintext)
     server.get("/json", message)
     server.get("/items", items)
@@ -78,6 +88,6 @@ def main():
         server.get(f"/api/v1/resource{i}/{{id}}", other)
     server.mount(user)
     server.mount(order)
-    port = server.bind(f"127.0.0.1:{os.args()[1]}").unwrap()
+    port = server.bind(f"127.0.0.1:{args[1]}").unwrap()
     io.eprint(f"listening on {port}")
     server.serve()

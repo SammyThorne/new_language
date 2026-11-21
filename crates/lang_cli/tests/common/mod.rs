@@ -100,7 +100,10 @@ pub fn start(program: &str) -> Server {
 /// [`start`], with environment variables for the program.
 pub fn start_with_env(program: &str, env: &[(&str, &str)]) -> Server {
     let root = repo_root();
-    let executable = std::env::temp_dir().join(format!("{CLI_NAME}-http-test-{program}-{}", std::process::id()));
+    // Tests of one file run at once, several of them perhaps with the same program.
+    static STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let executable = std::env::temp_dir().join(format!("{CLI_NAME}-http-test-{program}-{}-{n}", std::process::id()));
     let output = Command::new(compiler())
         .args(["build", &format!("tests/http/{program}.{SOURCE_EXTENSION}"), "-o"])
         .arg(&executable)

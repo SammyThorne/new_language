@@ -136,6 +136,22 @@ These rates include the kernel's share of loopback networking, which a real netw
 
 Six logical CPUs gave about three times the one-CPU rate, not six. Those six are three physical cores with two threads each, and the load generator was busy on the other six. Expect closer to linear scaling across physical cores.
 
+## With metrics and the access log
+
+The tables above are servers with nothing switched on. A production server usually has metrics and an access log. Measured at 256 connections, 3 alternating runs of 5 s each (`bench/http/server.vi PORT metrics` or `observed`):
+
+| Endpoint | Plain | Metrics on | Metrics and access log |
+|---|---|---|---|
+| `/plaintext` | 1,087,529 | 1,100,665 (+1.2%) | 599,063 (-42%) |
+| `/json` | 1,090,881 | 1,089,442 (-0.1%) | 745,783 (-31%) |
+| `/items` | 598,631 | 590,693 (-1.3%) | 396,413 (-35%) |
+| `/users/42` | 1,008,261 | 998,460 (-1.0%) | 635,582 (-33%) |
+| `POST /orders` | 966,384 | 965,032 (-0.1%) | 569,138 (-40%) |
+
+- **Metrics cost two clock reads per request** and no allocation or system call (`bench/http/counts.py`). Counters are per-thread shards of atomics, so threads never wait on each other.
+- **The access log costs most of the difference**: a request ID, a line with seven fields and its formatting, about 30 allocations and four clock reads per request, though no extra system calls since lines are buffered. At these rates that is a third or more of the server's work; for a handler that does real work (a database query) it is a few microseconds. Making it cheaper is planned.
+- The two columns' plain rates come from separate runs, so the plain figures differ slightly.
+
 ## Memory
 
 | | Viper | Go | Python |
