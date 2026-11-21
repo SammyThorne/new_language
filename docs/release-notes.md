@@ -23,6 +23,25 @@ Weby is a compiled, Python-shaped language for web backends. `weby --version` re
 
 **Performance.** On this repository's benchmarks every program runs faster than Go's version (between 1.1 and 3.0 times), and the HTTP endpoints serve 1.8 to 3.1 times Go's request rate at 256 connections with about 40% of its CPU per request. Idle WebSocket connections cost about 19 KiB each. A small program's executable is 0.5 MB and the benchmark web server's 1.3 MB. The numbers, how they were measured and what limits them are in [web-performance.md](web-performance.md) and [bench/README.md](../bench/README.md). `bench/run.py --check` and `bench/http/counts.py --check` fail on a regression.
 
+## Since 1.1.0: signing in with Google
+
+Not yet in a numbered release; `weby --version` still says 1.1.0.
+
+**Signing in with Google** ([plan](13-google-oauth-plan.md), D100 to D104). The new `auth` module signs users in with their Google accounts from the credentials file the Google Cloud console makes, as Passport, Authlib or NextAuth do in other languages:
+
+- `provider.install(server)` adds the login, callback and logout routes and a signed session cookie. It uses the authorization code flow with PKCE, `state` and `nonce`, and checks the ID token's RS256 signature against Google's keys, which are cached.
+- `@auth.required` on a route, or a handler parameter of type `auth.User`, protects the route; `auth.User?` is the user when there is one. Signed-out browsers are sent to sign in and brought back, and API clients get a 401. The compiler checks the uses (error E0342), and the API documentation lists the session cookie and the 401 for protected routes.
+- `auth.protect(handler)` and `auth.required` as middleware protect call-style handlers and groups.
+- Policies: `allowed_domains` (Google Workspace), `allowed_emails`, verified email by default, and `on_login` to record, change or refuse users.
+- Tests sign requests in with `auth.google_for_tests()` and `test_cookie`, without contacting Google. `examples/google_login` is a small app with its tests.
+
+Also new on the way:
+- The `crypto` module: secure random bytes and tokens, SHA-256, HMAC-SHA256, constant-time comparison, base64 and base64url, and RS256 signature checks.
+- In `http`: any number of cookies on a response (`set_cookie`, `delete_cookie`), `url_encode`, `url_decode`, `form_encode`, `post_form`, test requests with headers and a query string, `req.query_string()`, values middleware keeps with a request (`set_local`, `local`), and `server.security_scheme` for libraries that document their own security.
+- The language server shows the docstring of `@auth.required` on hover.
+
+Limits: only Google, and only sign-in: Google's access tokens are not kept for calling its APIs, and there are no other OpenID Connect providers, GitHub sign-in, server-side sessions, roles, or `auth.User` parameters in WebSocket handlers yet. The flow has been tested against fake Google servers; signing in with a real Google client is checked by hand (see the plan's milestone 6).
+
 ## New in 1.1.0
 
 **API documentation** ([plan](12-openapi-docs-plan.md), D96 to D99). `server.docs("/docs")` serves an OpenAPI 3.1 document of the server's routes at `/docs/openapi.json` and `/docs/openapi.yaml`, and a documentation page at `/docs`, like FastAPI's `/docs` and Fastify's swagger plugins:

@@ -1,6 +1,6 @@
 # Sign in with Google: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 5 are built; the decisions (section 5) are confirmed.** Each milestone in section 6 ends with a "Done" note once built. It adds a standard library module, `auth`, that lets a program sign its users in with their Google accounts. The program points it at the credentials file it downloaded from the Google Cloud console. It marks the routes that need a signed-in user with `@auth.required`, or by giving the handler a parameter of type `auth.User`. The module provides the login, callback and logout routes, the session cookie, and the checks of Google's tokens. The program writes none of the OAuth flow itself.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 6 are built, except milestone 6's check with a real Google client, which needs the owner's credentials; the decisions (section 5) are confirmed.** Each milestone in section 6 ends with a "Done" note once built. It adds a standard library module, `auth`, that lets a program sign its users in with their Google accounts. The program points it at the credentials file it downloaded from the Google Cloud console. It marks the routes that need a signed-in user with `@auth.required`, or by giving the handler a parameter of type `auth.User`. The module provides the login, callback and logout routes, the session cookie, and the checks of Google's tokens. The program writes none of the OAuth flow itself.
 
 It mirrors what web developers get elsewhere:
 - Flask: Flask-Login's `@login_required` on top of Authlib or Flask-Dance.
@@ -570,6 +570,12 @@ Each milestone follows docs/11's rules: the gates (`make lint`, `make test`, `ma
 - `examples/google_login/` (or the repository's examples location): a small app with a home page, a protected notes page and `/me`.
 - **A manual check with a real Google client.** It needs the owner's Cloud project, and cannot run in CI. The owner, or the agent with the owner's file, runs the example on `http://localhost:8080`, signs in, and records the result in the Done note. An agent never puts the owner's `client_secret.json` in the repository or in a commit; it is ignored by a `.gitignore` entry for `client_secret*.json` added in this milestone.
 - Release notes.
+
+**Done** (no new decision), except the check with a real Google client:
+- docs/05 has a "Setting it up" part in "Signing in with Google": the console, the redirect URI, `SESSION_SECRET`, proxies and Workspace domains. The site has a "Signing in with Google" section with a protected app (compiled only, since it needs a Google client), a test program that runs, and the proxy notes.
+- The example is `examples/google_login/`, a new top-level folder, since the repository had no examples folder: `app.wb` (a home page, a protected notes page, a protected JSON API under `/api/notes`, `/me` and `/docs`), `main.wb`, which serves it with a real client, `app_test.wb` and a README with the console steps. `crates/lang_cli/tests/oidc.rs` checks that it compiles and that its five tests pass.
+- `.gitignore` ignores `client_secret*.json`. The release notes have a section for what came after 1.1.0; the version was not changed.
+- **The manual check with a real Google client was not run.** It needs the owner's Cloud project and credentials file, which were not available to the agent. Still open: whether Google accepts the PKCE verifier from a confidential client (D102), and the `Cache-Control` its key set sends (D103). To run it: follow `examples/google_login/README.md`, sign in at `http://localhost:8080`, open `/notes`, `/me` and `/docs`, sign out, and record the result here.
 
 ### What will be built, in total
 

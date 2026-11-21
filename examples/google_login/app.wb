@@ -1,0 +1,95 @@
+# The notes app: a home page, a protected notes page and API, and `/me`. `main.wb` serves it
+# with a real Google client; `app_test.wb` tests it without one.
+
+import http
+import auth
+
+@derive(Json)
+@frozen
+pub struct Note:
+    text: str
+
+@derive(Json)
+@frozen
+pub struct Me:
+    id: str
+    email: str
+    name: str
+
+@frozen
+pub struct Notes:
+    """Each user's notes, by their Google account ID, in memory."""
+    by_user: Mutex[dict[str, tuple[str, ...]]]
+
+pub def notes() -> Notes:
+    return Notes(Mutex({}))
+
+impl Notes:
+    @http.get("/")
+    def home(self, user: auth.User?) -> http.Response:
+        match user:
+            case Some(someone):
+                body = (
+                    f"<p>Signed in as {escape(someone.name)} ({escape(someone.email)}).</p>"
+                    + "<p><a href=\"/notes\">Your notes</a> · <a href=\"/docs\">The API</a></p>"
+                    + "<form method=\"post\" action=\"/auth/logout\"><button>Sign out</button></form>"
+                )
+                return page("Notes", body)
+            case None:
+                return page("Notes", "<p><a href=\"/auth/google/login?next=/notes\">Sign in with Google</a></p>")
+
+    @http.get("/notes")
+    def notes_page(self, user: auth.User) -> http.Response:
+        """Your notes, as a page. Signed out, a browser is sent to sign in first."""
+        items = "".join([f"<li>{escape(text)}</li>" for text in self.of(user)])
+        if items == "":
+            items = "<li>No notes yet: add one with <code>POST /api/notes</code>.</li>"
+        name = user.given_name if user.given_name != "" else user.name
+        return page(f"{escape(name)}'s notes", f"<ul>{items}</ul><p><a href=\"/\">Home</a></p>")
+
+    @http.get("/api/notes", tags=["notes"])
+    def list(self, user: auth.User) -> list[Note]:
+        """Your notes."""
+        return [Note(text) for text in self.of(user)]
+
+    @http.post("/api/notes", status=201, tags=["notes"])
+    def add(self, note: Note, user: auth.User) -> Note:
+        """Add a note."""
+        with self.by_user.lock() as by_user:
+            texts: list[str] = []
+            match by_user.get(user.id):
+                case Some(kept):
+                    texts = list(kept)
+                case None:
+                    pass
+            texts.append(note.text)
+            by_user[user.id] = tuple(texts)
+        return note
+
+    @http.get("/me", tags=["account"])
+    def me(self, user: auth.User) -> Me:
+        """Who is signed in."""
+        return Me(user.id, user.email, user.name)
+
+    def of(self, user: auth.User) -> list[str]:
+        texts: list[str] = []
+        with self.by_user.lock() as by_user:
+            match by_user.get(user.id):
+                case Some(kept):
+                    texts = list(kept)
+                case None:
+                    pass
+        return texts
+
+pub def make_server(google: auth.Provider) -> http.Server:
+    server = http.Server()
+    google.install(server)
+    server.mount(notes())
+    server.docs("/docs", title="Notes", version="1.0.0")
+    return server
+
+def page(title: str, body: str) -> http.Response:
+    return http.html(f"<!doctype html><meta charset=\"utf-8\"><title>{title}</title><h1>{title}</h1>{body}")
+
+def escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")

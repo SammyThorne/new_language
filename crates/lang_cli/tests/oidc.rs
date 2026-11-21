@@ -11,6 +11,8 @@
 //! - `GET /keys`: the JSON Web Key Set, after a pause, so that sign-ins arriving together would
 //!   fetch it more than once if the provider did not hold them back. `GET /fetches` counts them.
 //! - `GET /rotate`: starts signing with the second key, and publishes it next to the first.
+//!
+//! The example in `examples/google_login` is checked here too.
 
 mod common;
 
@@ -79,6 +81,29 @@ fn sign_in_with_signed_tokens() {
     {
         assert!(stderr.contains(reason), "the log does not give the reason {reason:?}:\n{stderr}");
     }
+}
+
+/// The example app in `examples/google_login` builds, and its tests pass. Running it needs a
+/// real Google client, so that is checked by hand (docs/13, milestone 6).
+#[test]
+fn the_google_login_example_passes_its_tests() {
+    build_runtime();
+    let root = repo_root();
+    let example = root.join("examples/google_login");
+    let check = Command::new(compiler())
+        .arg("check")
+        .arg(format!("main.{SOURCE_EXTENSION}"))
+        .current_dir(&example)
+        .output()
+        .unwrap();
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
+    let test = Command::new(compiler()).arg("test").current_dir(&example).output().unwrap();
+    let stdout = String::from_utf8_lossy(&test.stdout);
+    assert!(
+        test.status.success() && stdout.contains("5 passed; 0 failed"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&test.stderr)
+    );
 }
 
 /// One request, answered, and the connection closed.

@@ -1,0 +1,18 @@
+# Sign in with Google: see README.md for the Google Cloud console steps. Put the client's file
+# here as `client_secret.json` (never commit it), or set `GOOGLE_CLIENT_SECRETS` to its path.
+
+import auth
+import io
+import os
+import app
+
+def main():
+    credentials = "client_secret.json" if io.exists("client_secret.json") else ""
+    match auth.google(credentials):
+        case Ok(google):
+            server = app.make_server(google)
+            print("open http://localhost:8080")
+            server.listen(":8080").unwrap()
+        case Err(problem):
+            io.eprint(f"cannot sign in with Google: {problem}")
+            os.exit(1)

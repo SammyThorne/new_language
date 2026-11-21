@@ -1,1 +1,4 @@
 /target
+
+# OAuth client files from the Google Cloud console hold a secret: never commit them.
+client_secret*.json

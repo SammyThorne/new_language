@@ -517,6 +517,16 @@ response = server.handle(http.test_request("GET", "/notes", headers={"Cookie": c
 
 What `on_login` and `auth.protect` are given is called by the tasks serving requests, so it must be shareable, as route handlers must.
 
+### Setting it up
+
+[`examples/google_login`](../examples/google_login/README.md) is a small app to start from, with its tests.
+
+- **The client.** In the Google Cloud console's Credentials page, create an OAuth client ID of type "Web application" (set up the consent screen first if asked; an app in testing, with test users, needs no review). Download its JSON file. It holds the client secret: keep it out of version control (this repository ignores `client_secret*.json`), and in production prefer `GOOGLE_CLIENT_SECRETS`, or `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, from the deployment's secrets.
+- **The redirect URI.** Add `http://localhost:8080/auth/google/callback` to the client's authorized redirect URIs for development, and the public one, `https://example.com/auth/google/callback`, for production. Google compares them exactly. A file with one URI needs no `redirect_uri=`; with several, pass the one this server answers on. The callback route is served at that URI's path.
+- **`SESSION_SECRET`.** At least 32 random bytes, such as `head -c 32 /dev/urandom | base64`, the same on every instance of the app. Changing it signs everyone out.
+- **Behind a proxy.** The redirect URI is the address the browser sees, not the one the app listens on: a proxy that ends TLS in front of an app on `:8080` still needs `redirect_uri="https://example.com/auth/google/callback"`. The `https` URI makes the cookies `Secure` with the `__Host-` prefix, which browsers accept because they reach the site over `https`. The proxy must pass the `Host` header through, which `POST /auth/logout` compares with `Origin`.
+- **Workspace accounts.** `allowed_domains=["example.com"]` admits only accounts of that Google Workspace domain, and sends Google a hint to show only those accounts when there is one domain.
+
 ## PostgreSQL (M12)
 
 ```python

@@ -1,0 +1,46 @@
+# The app's tests: `weby test`. They sign requests in with `test_cookie`; nothing contacts Google.
+
+import http
+import auth
+import app
+
+def signed_in() -> tuple[http.Server, str]:
+    google = auth.google_for_tests()
+    ann = auth.User(id="1001", email="ann@example.com", email_verified=True, name="Ann Lee", given_name="Ann")
+    return (app.make_server(google), google.test_cookie(ann))
+
+@test
+def home_offers_to_sign_in():
+    server, _cookie = signed_in()
+    r = server.handle(http.test_request("GET", "/"))
+    assert r.status == 200 and "Sign in with Google" in r.body
+
+@test
+def notes_need_sign_in():
+    server, _cookie = signed_in()
+    assert server.handle(http.test_request("GET", "/api/notes")).status == 401
+    browser = server.handle(http.test_request("GET", "/notes", headers={"Accept": "text/html"}))
+    assert browser.status == 302
+    assert browser.headers["Location"] == "/auth/google/login?next=%2Fnotes"
+
+@test
+def notes_are_kept_per_user():
+    server, cookie = signed_in()
+    added = server.handle(http.test_request("POST", "/api/notes", body="{\"text\": \"milk\"}", headers={"Cookie": cookie}))
+    assert added.status == 201, added.body
+    listed = server.handle(http.test_request("GET", "/api/notes", headers={"Cookie": cookie}))
+    assert listed.body == "[{\"text\":\"milk\"}]", listed.body
+    page = server.handle(http.test_request("GET", "/notes", headers={"Cookie": cookie}))
+    assert "Ann's notes" in page.body and "<li>milk</li>" in page.body
+
+@test
+def me_is_the_signed_in_user():
+    server, cookie = signed_in()
+    r = server.handle(http.test_request("GET", "/me", headers={"Cookie": cookie}))
+    assert r.body == "{\"id\":\"1001\",\"email\":\"ann@example.com\",\"name\":\"Ann Lee\"}", r.body
+
+@test
+def the_api_documents_the_sign_in():
+    server, _cookie = signed_in()
+    doc = server.handle(http.test_request("GET", "/docs/openapi.json")).body
+    assert "\"googleSession\"" in doc
