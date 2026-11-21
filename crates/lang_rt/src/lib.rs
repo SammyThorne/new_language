@@ -30,6 +30,7 @@ pub mod panic;
 pub mod pg;
 pub mod poll;
 pub mod re;
+pub mod static_files;
 pub mod strings;
 pub mod sys;
 pub mod tasks;

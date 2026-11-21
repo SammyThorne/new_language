@@ -35,6 +35,8 @@ Not yet in a numbered release; `weby --version` still says 1.1.0.
 
 **CORS** (milestone 2, D106): `http.cors(origins=[...])` lets pages on other origins call the server from a browser. It answers preflights, adds the headers to responses (error responses too), supports credentials, exposed headers and a function that decides origins, and works on a group of routes. A lambda can now be passed where an optional function is expected.
 
+**Static files** (milestone 3, D107): `server.static("/assets", "public")` serves a directory from the runtime, binary-safe, with content types, `ETag` and `Last-Modified` (304s and 412s), `Cache-Control` (`max_age`, `immutable`), single ranges (206, 416, `If-Range`), pre-compressed `.br` and `.gz` files, directory indexes, and large files sent in pieces so memory stays flat. `fallback="index.html"` serves a single-page app. Paths that try to leave the directory (`..` in any spelling, encoded separators, symbolic links) and dotfiles are 404s.
+
 **Signing in with Google** ([plan](13-google-oauth-plan.md), D100 to D104). The new `auth` module signs users in with their Google accounts from the credentials file the Google Cloud console makes, as Passport, Authlib or NextAuth do in other languages:
 
 - `provider.install(server)` adds the login, callback and logout routes and a signed session cookie. It uses the authorization code flow with PKCE, `state` and `nonce`, and checks the ID token's RS256 signature against Google's keys, which are cached.

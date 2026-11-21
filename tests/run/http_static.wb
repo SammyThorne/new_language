@@ -1,0 +1,89 @@
+# Static files (docs/14, milestone 3), through test requests: content types, indexes,
+# redirects, refusals, validators and 304s, ranges, pre-compressed files and a fallback.
+# expect: file: 200 text/css; charset=utf-8 | body { color: #333; } | nosniff | max-age=0 | ranges bytes
+# expect: index: 200 <h1>home</h1> | docs/: 200 <h1>docs</h1> | docs: 301 /files/docs/
+# expect: unicode name: 200 café
+# expect: refused: 404 404 404 404 404 404 404 404
+# expect: dotfiles allowed: 200 SECRET=1
+# expect: if-none-match: 304 '' etag kept True | weak form 304 | other 200 | star 304
+# expect: if-modified-since: 304 | older 200 | not a date 200 | none-match wins 200
+# expect: if-match: 200 | wrong 412 | if-unmodified-since: 200 | older 412
+# expect: range: 206 bytes 2-5/10 2345 | suffix 789 | open 89 | several 200 | 416 bytes */10
+# expect: if-range: etag 206 | stale etag 200 | date 206 | other date 200
+# expect: br: br stands for site.css | gzip: gzip 42 | none: None | vary Accept-Encoding | range plain 206 None
+# expect: cache: public, max-age=31536000, immutable
+# expect: fallback: 200 <div id=app></div> no-cache | real file 200 | head 200 19
+# expect: documented: /api/ping True | files False
+
+import http
+
+const ROOT = "tests/fixtures/static"
+
+def get(server: http.Server, path: str, headers: dict[str, str] = {}, method: str = "GET") -> http.Response:
+    return server.handle(http.test_request(method, path, headers=headers))
+
+def text(r: http.Response) -> str:
+    return r.body_bytes().decode().unwrap().strip()
+
+def header(r: http.Response, name: str) -> str?:
+    return r.headers.get(name)
+
+def main():
+    server = http.Server()
+    server.static("/files", ROOT)
+
+    r = get(server, "/files/css/site.css")
+    print("file:", r.status, r.content_type, "|", text(r), "|", header(r, "X-Content-Type-Options").unwrap(), "|", header(r, "Cache-Control").unwrap().partition(", ")[2], "| ranges", header(r, "Accept-Ranges").unwrap())
+    etag = header(r, "ETag").unwrap()
+    modified = header(r, "Last-Modified").unwrap()
+
+    index = get(server, "/files/")
+    docs = get(server, "/files/docs/")
+    moved = get(server, "/files/docs")
+    print("index:", index.status, text(index), "| docs/:", docs.status, text(docs), "| docs:", moved.status, header(moved, "Location").unwrap())
+    r = get(server, "/files/caf%C3%A9.txt")
+    print("unicode name:", r.status, text(r))
+
+    refused: list[int] = []
+    for path in ["/files/../Cargo.toml", "/files/%2e%2e/Cargo.toml", "/files/css%2Fsite.css", "/files/..%5CCargo.toml", "/files/a%00b", "/files/.env", "/files/.hidden/file.txt", "/files/missing.txt"]:
+        refused.append(get(server, path).status)
+    print("refused:", " ".join([str(s) for s in refused]))
+
+    open_server = http.Server()
+    open_server.static("/", ROOT, dotfiles=True)
+    print("dotfiles allowed:", get(open_server, "/.env").status, text(get(open_server, "/.env")))
+
+    css = "/files/css/site.css"
+    r = get(server, css, {"If-None-Match": etag})
+    weak = get(server, css, {"If-None-Match": f"\"nope\", W/{etag}"})
+    print("if-none-match:", r.status, f"{r.body!r}", "etag kept", header(r, "ETag").unwrap() == etag, "| weak form", weak.status, "| other", get(server, css, {"If-None-Match": "\"nope\""}).status, "| star", get(server, css, {"If-None-Match": "*"}).status)
+    old = "Mon, 01 Jan 2001 00:00:00 GMT"
+    print("if-modified-since:", get(server, css, {"If-Modified-Since": modified}).status, "| older", get(server, css, {"If-Modified-Since": old}).status, "| not a date", get(server, css, {"If-Modified-Since": "soon"}).status, "| none-match wins", get(server, css, {"If-None-Match": "\"nope\"", "If-Modified-Since": modified}).status)
+    print("if-match:", get(server, css, {"If-Match": etag}).status, "| wrong", get(server, css, {"If-Match": "\"nope\""}).status, "| if-unmodified-since:", get(server, css, {"If-Unmodified-Since": modified}).status, "| older", get(server, css, {"If-Unmodified-Since": old}).status)
+
+    digits = "/files/digits.txt"
+    r = get(server, digits, {"Range": "bytes=2-5"})
+    digits_etag = header(r, "ETag").unwrap()
+    digits_modified = header(r, "Last-Modified").unwrap()
+    bad = get(server, digits, {"Range": "bytes=10-"})
+    print("range:", r.status, header(r, "Content-Range").unwrap(), text(r), "| suffix", text(get(server, digits, {"Range": "bytes=-3"})), "| open", text(get(server, digits, {"Range": "bytes=8-"})), "| several", get(server, digits, {"Range": "bytes=0-1,4-5"}).status, "|", bad.status, header(bad, "Content-Range").unwrap())
+    print("if-range: etag", get(server, digits, {"Range": "bytes=0-0", "If-Range": digits_etag}).status, "| stale etag", get(server, digits, {"Range": "bytes=0-0", "If-Range": "\"old\""}).status, "| date", get(server, digits, {"Range": "bytes=0-0", "If-Range": digits_modified}).status, "| other date", get(server, digits, {"Range": "bytes=0-0", "If-Range": old}).status)
+
+    br = get(server, css, {"Accept-Encoding": "gzip, br"})
+    gz = get(server, css, {"Accept-Encoding": "gzip;q=0.8, br;q=0"})
+    plain = get(server, css, {})
+    ranged = get(server, css, {"Accept-Encoding": "br", "Range": "bytes=0-3"})
+    print("br:", header(br, "Content-Encoding").unwrap(), text(br).partition(" compressed")[0], "| gzip:", header(gz, "Content-Encoding").unwrap(), len(gz.body_bytes()), "| none:", header(plain, "Content-Encoding"), "| vary", header(plain, "Vary").unwrap(), "| range plain", ranged.status, header(ranged, "Content-Encoding"))
+
+    hashed = http.Server()
+    hashed.static("/assets", ROOT, max_age=31536000, immutable=True)
+    print("cache:", header(get(hashed, "/assets/index.html"), "Cache-Control").unwrap())
+
+    spa = http.Server()
+    spa.get("/api/ping", lambda req: Ok(http.text("pong")))
+    spa.static("/", f"{ROOT}/app", fallback="index.html")
+    r = get(spa, "/orders/7")
+    head = get(spa, "/index.html", method="HEAD")
+    print("fallback:", r.status, text(r), header(r, "Cache-Control").unwrap(), "| real file", get(spa, "/index.html").status, "| head", head.status, len(head.body_bytes()))
+    document = spa.openapi_json()
+    print("documented: /api/ping", document.contains("/api/ping"), "| files", document.contains("{path"))

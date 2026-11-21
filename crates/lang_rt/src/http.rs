@@ -575,7 +575,8 @@ enum Method {
 enum Path {
     /// No `%` escapes: the bytes in the buffer.
     Raw(Span),
-    Decoded(String),
+    /// Decoded, with the path as sent.
+    Decoded(String, Span),
 }
 
 enum Body {
@@ -609,6 +610,10 @@ pub struct Request {
     connection: *mut Connection,
     /// The WebSocket id, once the handler has upgraded the connection.
     upgraded: Option<i64>,
+    /// A file `lrt_http_static` chose, with its status, for `lrt_http_respond` to send.
+    file: Option<(i64, crate::static_files::Part)>,
+    /// A file too large for the output buffer, sent by `serve_connection` after the handler.
+    stream: Option<crate::static_files::Part>,
 }
 
 impl Request {
@@ -638,7 +643,14 @@ impl Request {
     fn path(&self) -> &str {
         match &self.path {
             Path::Raw(span) => self.text(*span),
-            Path::Decoded(text) => text,
+            Path::Decoded(text, _) => text,
+        }
+    }
+
+    /// The path as sent, still percent-encoded.
+    fn raw_path(&self) -> &str {
+        match &self.path {
+            Path::Raw(span) | Path::Decoded(_, span) => self.text(*span),
         }
     }
 
@@ -921,7 +933,7 @@ impl Connection {
         };
         let (raw_path, query) = target.split_once('?').unwrap_or((target, ""));
         let path = if raw_path.contains('%') {
-            Path::Decoded(percent_decode(raw_path, false).unwrap_or_else(|| raw_path.to_string()))
+            Path::Decoded(percent_decode(raw_path, false).unwrap_or_else(|| raw_path.to_string()), span_of(raw_path))
         } else {
             Path::Raw(span_of(raw_path))
         };
@@ -959,6 +971,8 @@ impl Connection {
             keep_alive,
             connection: self,
             upgraded: None,
+            file: None,
+            stream: None,
         })
     }
 
@@ -1039,6 +1053,11 @@ fn percent_decode(text: &str, plus_is_space: bool) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+/// A path segment, percent-decoded; `None` for a bad escape or bytes that are not UTF-8.
+pub(crate) fn percent_decode_path(text: &str) -> Option<String> {
+    percent_decode(text, false)
 }
 
 /// `%XX` for every byte `keep` refuses, upper-case hex.
@@ -1178,7 +1197,7 @@ pub(crate) fn civil(days: i64) -> (i64, u32, u32) {
     (year, month, day)
 }
 
-fn format_http_date(seconds: u64) -> String {
+pub(crate) fn format_http_date(seconds: u64) -> String {
     const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let days = (seconds / 86_400) as i64;
@@ -1260,10 +1279,16 @@ fn serve_connection(
             break;
         }
         if !request.responded {
+            request.stream = None;
             connection.out.truncate(request.out_start);
             let body = b"internal server error\n";
             write_response(&mut connection.out, 500, "text/plain; charset=utf-8", "", body, false, request.head);
             request.keep_alive = false;
+        }
+        if let Some(part) = request.stream.take() {
+            if !connection.flush() || !send_part(&connection.socket, &part) {
+                break;
+            }
         }
         connection.start = request.end;
         let keep_alive = request.keep_alive;
@@ -1487,6 +1512,136 @@ pub unsafe extern "C-unwind" fn lrt_http_set_trusted_proxies(ptr: *const u8, len
     Str::empty()
 }
 
+// ---- static files ------------------------------------------------------------------------
+
+/// Files up to this size are read straight into the connection's output; larger ones are sent
+/// in [`STREAM_CHUNK`]s after the handler returns, so a large download never holds the file.
+const SMALL_FILE: u64 = 1024 * 1024;
+const STREAM_CHUNK: usize = 256 * 1024;
+
+/// Check `server.static`'s root: `""` if it is a directory, otherwise what is wrong.
+///
+/// # Safety
+/// `ptr` and `len` describe a UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_http_static_root(ptr: *const u8, len: i64) -> Str {
+    let root = unsafe { Str::from_raw(ptr, len) };
+    let message = match std::fs::metadata(root) {
+        Ok(meta) if meta.is_dir() => String::new(),
+        Ok(_) => "is not a directory".to_string(),
+        Err(error) => format!("cannot be read: {error}"),
+    };
+    Str::from_bytes(message.as_bytes())
+}
+
+/// The path below a prefix of `depth` segments, without its leading `/`.
+fn below(raw: &str, depth: i64) -> &str {
+    let mut rest = raw.strip_prefix('/').unwrap_or(raw);
+    for _ in 0..depth {
+        rest = rest.split_once('/').map_or("", |(_, after)| after);
+    }
+    rest
+}
+
+/// Answer a request for `server.static`. `settings` is the root, the index file and the
+/// fallback file, `conditions` the values of `If-Match`, `If-None-Match`, `If-Modified-Since`,
+/// `If-Unmodified-Since`, `Range`, `If-Range` and `Accept-Encoding` (`""` when absent), each
+/// followed by a NUL. `flags`: 1 for dotfiles, 2 for immutable.
+///
+/// Returns `status\ncontent type\nheader lines` and a NUL. For a request from a connection the
+/// file is kept with the request for `lrt_http_respond`; for a test request (`handle` < 0,
+/// with `path` its path) the bytes to send follow the NUL.
+///
+/// # Safety
+/// `handle` is a live request or negative; the strings are UTF-8.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C-unwind" fn lrt_http_static(
+    handle: i64,
+    path: *const u8,
+    path_len: i64,
+    depth: i64,
+    settings: *const u8,
+    settings_len: i64,
+    flags: i64,
+    max_age: i64,
+    conditions: *const u8,
+    conditions_len: i64,
+) -> Str {
+    let (path, settings, conditions) = unsafe {
+        (
+            Str::from_raw(path, path_len),
+            Str::from_raw(settings, settings_len),
+            Str::from_raw(conditions, conditions_len),
+        )
+    };
+    let mut settings = settings.split('\0');
+    let mut setting = || settings.next().unwrap_or("");
+    let options = crate::static_files::Options {
+        root: setting(),
+        index: setting(),
+        fallback: setting(),
+        dotfiles: flags & 1 != 0,
+        max_age,
+        immutable: flags & 2 != 0,
+    };
+    let mut values = conditions.split('\0');
+    let mut value = || values.next().filter(|v| !v.is_empty());
+    let conditions = crate::static_files::Conditions {
+        if_match: value(),
+        if_none_match: value(),
+        if_modified_since: value(),
+        if_unmodified_since: value(),
+        range: value(),
+        if_range: value(),
+        accept_encoding: value(),
+    };
+    let mut request = (handle >= 0).then(|| unsafe { request(handle) });
+    let raw = request.as_ref().map_or(path, |r| r.raw_path());
+    let outcome = crate::static_files::resolve(below(raw, depth), raw, &options, &conditions);
+    let mut out = Vec::new();
+    match outcome {
+        crate::static_files::Outcome::NotFound => out.extend_from_slice(b"404\n\n\0"),
+        crate::static_files::Outcome::Respond { status, content_type, headers, body } => {
+            out.extend_from_slice(format!("{status}\n{content_type}\n{headers}\0").as_bytes());
+            if let Some(part) = body {
+                match request.as_mut() {
+                    Some(request) => request.file = Some((i64::from(status), part)),
+                    None => {
+                        let start = out.len();
+                        out.resize(start + part.len as usize, 0);
+                        if read_part(&part, &mut out[start..], part.start).is_err() {
+                            out.truncate(start);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Str::from_bytes(&out)
+}
+
+/// Read `buffer.len()` bytes of the file at `offset`.
+fn read_part(part: &crate::static_files::Part, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(&part.file, buffer, offset)
+}
+
+/// Send a large file's part to the socket, a chunk at a time; the task parks while the socket
+/// is full. False if the connection broke or the file shrank, which ends the connection, since
+/// the length was promised.
+fn send_part(socket: &Socket, part: &crate::static_files::Part) -> bool {
+    let mut chunk = vec![0u8; STREAM_CHUNK.min(part.len as usize)];
+    let mut sent = 0;
+    while sent < part.len {
+        let n = chunk.len().min((part.len - sent) as usize);
+        if read_part(part, &mut chunk[..n], part.start + sent).is_err() || socket.write_all(&chunk[..n]).is_err() {
+            return false;
+        }
+        sent += n as u64;
+    }
+    true
+}
+
 /// Leave the response: its status, content type (none if empty), other header lines
 /// (`Name: value\r\n` each) and body. It is written into the connection's output at once,
 /// while the body is reachable, so the body is copied once. A second call replaces the first.
@@ -1513,8 +1668,36 @@ pub unsafe extern "C-unwind" fn lrt_http_respond(
     // SAFETY: the connection outlives the handler call.
     let out = unsafe { &mut (*request.connection).out };
     out.truncate(request.out_start);
-    write_response(out, status, content_type, headers, body, request.keep_alive, request.head);
+    request.stream = None;
     request.responded = true;
+    // A file from `lrt_http_static`, unless middleware put another response in its place.
+    if let Some((_, part)) = request.file.take().filter(|(file_status, _)| *file_status == status && body.is_empty()) {
+        write_head(out, status, content_type, headers, part.len, request.keep_alive);
+        if request.head || status == 304 {
+            return;
+        }
+        if part.len > SMALL_FILE {
+            request.stream = Some(part);
+            return;
+        }
+        let start = out.len();
+        out.resize(start + part.len as usize, 0);
+        if read_part(&part, &mut out[start..], part.start).is_ok() {
+            return;
+        }
+        out.truncate(request.out_start);
+        write_response(
+            out,
+            500,
+            "text/plain; charset=utf-8",
+            "",
+            b"internal server error\n",
+            request.keep_alive,
+            request.head,
+        );
+        return;
+    }
+    write_response(out, status, content_type, headers, body, request.keep_alive, request.head);
 }
 
 /// Append a decimal number.
@@ -1543,8 +1726,16 @@ fn write_response(
     keep_alive: bool,
     head: bool,
 ) {
-    let has_body = status != 204 && status != 304;
     out.reserve(192 + content_type.len() + headers.len() + if head { 0 } else { body.len() });
+    write_head(out, status, content_type, headers, body.len() as u64, keep_alive);
+    if !head && status != 204 && status != 304 {
+        out.extend_from_slice(body);
+    }
+}
+
+/// The status line and headers of a response whose body is `body_len` bytes.
+fn write_head(out: &mut Vec<u8>, status: i64, content_type: &str, headers: &str, body_len: u64, keep_alive: bool) {
+    let has_body = status != 204 && status != 304;
     out.extend_from_slice(b"HTTP/1.1 ");
     if status < 0 {
         out.push(b'-');
@@ -1566,13 +1757,10 @@ fn write_response(
     out.extend_from_slice(b"\r\n");
     if has_body {
         out.extend_from_slice(b"Content-Length: ");
-        push_decimal(out, body.len() as u64);
+        push_decimal(out, body_len);
         out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(if keep_alive { b"Connection: keep-alive\r\n\r\n" } else { b"Connection: close\r\n\r\n" });
-    if !head && has_body {
-        out.extend_from_slice(body);
-    }
 }
 
 #[cfg(test)]

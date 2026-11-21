@@ -63,6 +63,12 @@ def req_body_bytes(handle: int) -> str
 @extern("lrt_http_req_client_ip")
 def req_client_ip(handle: int) -> str
 
+@extern("lrt_http_static_root")
+def static_root_raw(root: str) -> str
+
+@extern("lrt_http_static")
+def static_raw(handle: int, path: str, depth: int, settings: str, flags: int, max_age: int, conditions: str) -> str
+
 @extern("lrt_http_set_trusted_proxies")
 def set_trusted_proxies_raw(networks: str) -> str
 
@@ -798,6 +804,42 @@ def usable_request_id(id: str) -> bool:
             return False
     return True
 
+# ---- static files -------------------------------------------------------------------------
+
+@frozen
+struct StaticFiles:
+    # The prefix's number of segments; the root, index and fallback, NUL-separated; 1 for
+    # dotfiles and 2 for immutable.
+    depth: int
+    settings: str
+    flags: int
+    max_age: int
+
+impl StaticFiles:
+    def serve(self, req: Request) -> Result[Response]:
+        conditions: list[str] = []
+        for name in ["If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "Range", "If-Range", "Accept-Encoding"]:
+            conditions.append(req.header(name).unwrap_or("").replace("\0", ""))
+        raw = __bytes(static_raw(req.handle, req.path, self.depth, self.settings, self.flags, self.max_age, "\0".join(conditions)))
+        # `status\ncontent type\nheader lines`, a NUL, and for a test request the bytes to send.
+        end = 0
+        while raw[end] != 0:
+            end += 1
+        status_line, _, rest = raw.slice(0, end).decode().unwrap().partition("\n")
+        content_type, _, header_lines = rest.partition("\n")
+        status = int.parse(status_line).unwrap()
+        if status == 404:
+            return Err(HttpError(404, "not found"))
+        headers: dict[str, str] = {}
+        for line in header_lines.split("\r\n"):
+            if line != "":
+                name, _, value = line.partition(": ")
+                headers[name] = value
+        response = Response(status, "", content_type, headers)
+        if req.handle < 0 and len(raw) > end + 1:
+            response.data = raw.slice(end + 1, len(raw))
+        return response
+
 # ---- CORS ---------------------------------------------------------------------------------
 
 @frozen
@@ -1083,6 +1125,44 @@ impl Server:
         self.middleware.append(middleware)
         self.chain = None
 
+    def static(
+        self,
+        prefix: str,
+        root: str,
+        max_age: int = 0,
+        immutable: bool = False,
+        index: str = "index.html",
+        dotfiles: bool = False,
+        fallback: str = "",
+    ):
+        """
+        Serve the files under the directory `root` at `prefix`: `server.static("/assets",
+        "public")` answers `GET /assets/css/site.css` with `public/css/site.css`.
+
+        The runtime sends the file, with its content type from the extension, `ETag` and
+        `Last-Modified` (so browsers revalidate with a 304), `Cache-Control: public,
+        max-age=<max_age>` (`immutable` added for file names that change with their content),
+        single ranges (206, 416) for video and resumed downloads, and `file.br` or `file.gz` in
+        its place when it exists and the client accepts it. Large files are sent in pieces.
+        A directory serves its `index` file. Paths that leave `root`, through `..`, an encoded
+        `/` or a symbolic link, and dotfiles (unless `dotfiles=True`) are 404s.
+
+        `fallback` names a file sent for paths with no file, for a single-page app whose
+        router runs in the browser: `server.static("/", "dist", fallback="index.html")`.
+        Routes without parameters are always tried before it; routes with parameters are tried
+        in the order they were added, so add those first. The files are not listed in the API
+        documentation.
+        """
+        problem = static_root_raw(root)
+        if problem != "":
+            panic(f"`server.static` root {root!r} {problem}")
+        base = prefix
+        while base.ends_with("/"):
+            base = base[0:len(base) - 1]
+        flags = (1 if dotfiles else 0) + (2 if immutable else 0)
+        settings = StaticFiles(len(split_path(prefix)), f"{root}\0{index}\0{fallback}", flags, max_age)
+        self.docs_route(base + "/{path...}", lambda req: settings.serve(req))
+
     def ws(self, path: str, handler: WsHandler):
         """A WebSocket endpoint. `handler` runs in its own task for the life of each connection."""
         self.route("GET", path, lambda req: upgrade(req, handler))
@@ -1338,6 +1418,7 @@ impl Server:
         self.docs_json = ""
 
     def docs_route(self, pattern: str, handler: Handler):
+        # A GET route left out of the API documentation: the documentation's own, and files.
         self.route("GET", pattern, handler)
         self.docs_routes.append(pattern)
 

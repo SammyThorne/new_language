@@ -67,6 +67,8 @@ pub fn read_response(reader: &mut BufReader<TcpStream>, head_request: bool) -> R
 pub struct Server {
     pub child: Child,
     pub port: u16,
+    /// Standard error after the `listening on` line, as it arrives.
+    pub stderr: std::sync::Arc<std::sync::Mutex<String>>,
     executable: PathBuf,
 }
 
@@ -92,6 +94,11 @@ impl Drop for Server {
 /// Compile `tests/http/<program>` and start it. The program prints `listening on <port>` to
 /// standard error once it is ready.
 pub fn start(program: &str) -> Server {
+    start_with_env(program, &[])
+}
+
+/// [`start`], with environment variables for the program.
+pub fn start_with_env(program: &str, env: &[(&str, &str)]) -> Server {
     let root = repo_root();
     let executable = std::env::temp_dir().join(format!("{CLI_NAME}-http-test-{program}-{}", std::process::id()));
     let output = Command::new(compiler())
@@ -104,6 +111,7 @@ pub fn start(program: &str) -> Server {
     let mut child = Command::new(&executable)
         .current_dir(&root)
         .env(env_var("LOG"), "warn")
+        .envs(env.iter().copied())
         .stderr(Stdio::piped())
         .stdout(Stdio::null())
         .spawn()
@@ -118,11 +126,16 @@ pub fn start(program: &str) -> Server {
         .parse()
         .unwrap();
     // Keep reading standard error so the server never blocks on it.
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = collected.clone();
     std::thread::spawn(move || {
-        let mut rest = String::new();
-        let _ = stderr.read_to_string(&mut rest);
+        let mut line = String::new();
+        while stderr.read_line(&mut line).is_ok_and(|n| n > 0) {
+            sink.lock().unwrap().push_str(&line);
+            line.clear();
+        }
     });
-    Server { child, port, executable }
+    Server { child, port, stderr: collected, executable }
 }
 
 pub fn connect(port: u16) -> (TcpStream, BufReader<TcpStream>) {

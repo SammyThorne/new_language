@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestone 1 is built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 3 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -914,6 +914,15 @@ Estimates assume one agent, working in order. Tracks A to H can be reordered (de
   - A 20 MiB file whose server memory stays flat (the GC heap and RSS, checked).
   - `HEAD`.
 - **Docs:** docs/05, and a site section.
+
+**Done** (D107). Everything listed, with these differences:
+- One `GET` route serves both methods (the router answers `HEAD` from `GET` routes), and the runtime takes the path from the request rather than as an argument: `lrt_http_static` checks the raw, undecoded path, since the router's decoding would hide `%2F`.
+- The `ETag` is strong, not `W/`, so that `If-Range` and `If-Match` work (D107); `If-None-Match` still compares weakly.
+- Only IMF-fixdate HTTP dates are read; the obsolete forms count as no date.
+- Also built: a directory named without its trailing `/` is redirected (301); the fallback is sent with `Cache-Control: no-cache`; pre-compressed files are skipped for range requests; `If-Match` and `If-Unmodified-Since` (412); setup panics for a root that is not a readable directory; static routes are left out of the API documentation.
+- The response a handler returns stays ordinary: the runtime sends the file only if the response still has the file's status and no body, so middleware headers apply and middleware can replace it. Test requests get the bytes in the response, so a test `HEAD` returns a body that a real one does not.
+- Tests: `tests/run/http_static.wb` (content types, indexes, the redirect, the refusals, every precondition case, ranges, `If-Range`, `br` and `gzip` with q-values, `immutable`, the fallback beside an API route); `crates/lang_cli/tests/static_files.rs` with `tests/http/static_server.wb`, over raw sockets: thirteen escapes (`..`, `%2e%2e`, `%2F`, `..%5C`, NUL, `//`, two symbolic links out, dotfiles plain and encoded, a 6 KB path) that leak nothing, a symbolic link inside the root, `HEAD` then a range on the same connection, a 304, a 3 MB range of a 20 MiB file, a client that leaves mid-file, and six 20 MiB downloads with resident memory flat (8.4 MiB) and a collected heap of 0.7 MiB at exit; unit tests for path checks, ranges, validators, encodings and HTTP dates.
+- Gates: all pass, with the counts unchanged.
 
 #### Milestone 4: compression (about 1 day; needs decision 1)
 

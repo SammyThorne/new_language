@@ -1093,6 +1093,20 @@ Milestone 2 of the [production web plan](14-production-web-plan.md): `http.cors(
 
 **Smaller choices.** `*` is sent only for `origins=["*"]` without credentials, and then without `Vary: Origin`; a named origin is echoed with `Vary: Origin` (added to any `Vary` the handler set). A preflight from a refused origin gets a 204 with only `Vary`, never reaching a route. An `OPTIONS` request without `Access-Control-Request-Method` is not a preflight and is routed as before. Setup panics for no origins, for an origin with a path (a trailing `/` is the usual mistake, and browsers never send one), and for credentials with `*`.
 
+### D107. Static files (production web plan, milestone 3)
+
+Milestone 3 of the [production web plan](14-production-web-plan.md): `server.static(...)`.
+
+**The runtime sends the file; the language sees a plan.** `server.static` registers one `GET` route, `prefix/{path...}`, whose handler passes the request's headers to `lrt_http_static`. The runtime checks the path, opens and `fstat`s the file, evaluates the conditions and returns the status, content type and headers as text; the file itself (descriptor, offset, length) stays on the Rust `Request`. The handler builds an ordinary `Response` with an empty body, so middleware sees and may change it. When the response comes back to `lrt_http_respond` with the same status and still no body, the runtime writes the head with the file's length and then the file: files up to 1 MiB are read into the connection's buffer; larger ones are sent after the handler returns, in 256 KiB pieces read with `pread` into one Rust buffer, so no file passes through the collected heap and a 20 MiB download leaves resident memory where it was. A middleware that replaces the body, or the status, simply wins. Test requests (no socket) get the bytes in the response's `data` instead, which also means a test `HEAD` returns the body that a real one omits.
+
+**The path is checked raw.** The router decodes the path before matching, which would hide an encoded `/` or `\`. The runtime keeps the raw path beside the decoded one and the file server works from it, dropping the prefix's segments: it percent-decodes each segment once, refuses decoded separators, `..`, NUL, backslashes, empty middle segments, dotfiles (unless allowed), segments over 255 bytes and paths over 4096, collapses `.`, and then requires the file's canonical path to start with the root's, which catches symbolic links leading out. Every refusal is a 404, like a missing file.
+
+**A strong `ETag`.** The plan said `W/"size-mtime"`. `If-Range` and `If-Match` use strong comparison, so a weak tag would make resumed downloads restart from the beginning; and size plus modification time to the nanosecond identifies the bytes as well as any tag that is not a hash. So the tag is strong, and a pre-compressed variant's tag carries its encoding. `If-None-Match` still compares weakly, as RFC 9110 says, so `W/` forms sent back by proxies match.
+
+**Smaller choices.** Conditions are evaluated in RFC 9110 section 13.2.2's order (`If-Match`, `If-Unmodified-Since`, `If-None-Match`, `If-Modified-Since`, then `Range` with `If-Range`). Only the IMF-fixdate form of HTTP dates is read; the two obsolete forms count as no date, which makes the request unconditional rather than wrong. `max_age` defaults to 0, so browsers revalidate (a 304 costs one round trip) rather than serve stale files after a deploy; hashed names take `max_age=31536000, immutable=True`. Pre-compressed files are skipped for range requests, since a range of the compressed bytes is rarely what a player asked for. The fallback file is sent with `Cache-Control: no-cache`, because it stands for every path. Static routes are left out of the API documentation, as the documentation's own routes are. File reads block the worker thread, as `io.read_file` does; for local disks they are short.
+
+**Cost.** The Rust `Request` gained two optional fields (the file plan and a pending stream), which are not collected memory; servers without static files allocate the same as before.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |
