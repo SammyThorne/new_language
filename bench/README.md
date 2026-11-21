@@ -25,7 +25,7 @@ The Go versions are written the way a Go programmer would write them. Where that
 
 ## HTTP
 
-`bench/http/` holds the same small service three times: `server.vi`, `server.go` (`net/http`) and `server.py` (the standard library's `ThreadingHTTPServer`, since no Python web framework is installed and installing one is a download). Each answers three endpoints:
+`bench/http/` holds the same small service three times: `server.vi`, `server.go` (`net/http`) and `server.py` (the standard library's `ThreadingHTTPServer`, so that this benchmark needs nothing downloaded). The comparison with Node.js and Python web frameworks is in `bench/compare/`, below. Each answers three endpoints:
 
 | Endpoint | What it does |
 |---|---|
@@ -48,6 +48,45 @@ python3 bench/http/one_core.py
 The summary for readers deciding whether to use the language is [docs/web-performance.md](../docs/web-performance.md).
 
 `--browser` (for `run.py` and `load.go`) adds the dozen headers a browser sends, about 600 bytes, to every request. Without it, requests carry only `Host`, which understates the cost of parsing headers.
+
+## Against web frameworks
+
+`bench/compare/` runs the same REST API and WebSocket echo on six servers: Viper, Go (`net/http` with gorilla/websocket), Node.js with Fastify and with Express (both with `ws`), and Python with FastAPI on Uvicorn and Flask on Gunicorn. Every server answers `GET /json`, `GET /users/{id}`, `GET /items` and `POST /orders` with the same JSON, and all but Flask echo WebSocket messages at `/ws`. `run.py` checks that every server gives the same answers before it measures any of them.
+
+Each server is pinned to four cores with `taskset` and runs one worker per core, as it would be deployed: Go and Viper schedule across cores themselves, Node runs a `node:cluster` process per core, Uvicorn and Gunicorn run four worker processes. The load generator, `load/main.go`, runs on the remaining cores and opens all its connections before timing starts. For each server, `run.py` measures:
+
+| Phase | What it measures |
+|---|---|
+| Endpoints | Requests per second and latency on each endpoint, 256 connections, closed loop; CPU time the server used |
+| Connections | Requests per second on `/users/42` with 1, 16, 64, 256 and 1,024 connections |
+| Fixed rates | Latency at 1,000, 5,000, 20,000 and 50,000 requests per second, timed from when each request was due |
+| WebSocket echo | 256 clients sending 64-byte messages and waiting for each echo |
+| Idle WebSockets | Memory growth per connection with 10,000 idle connections, on a freshly started server |
+| Memory | Proportional set size (PSS) of the whole process tree at idle and its peak in each phase |
+
+The frameworks are downloads, so they are not in the repository. Install them once (Node.js 20 or later, Python 3.11 or later, Go):
+
+```bash
+cd bench/compare/node && npm install
+```
+
+```bash
+cd bench/compare/python && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+```
+
+Then, from the repository root, with a release build of `viper` (about 15 minutes; `--quick` takes 5, `--only NAME` runs one server):
+
+```bash
+python3 bench/compare/run.py
+```
+
+It writes `bench/compare/results.json`. `report/build.py` turns that into a page of charts at `bench/compare/report/index.html`:
+
+```bash
+python3 bench/compare/report/build.py
+```
+
+The results are summarised in [docs/web-performance.md](../docs/web-performance.md).
 
 ## Measuring a change
 

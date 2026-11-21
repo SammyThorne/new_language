@@ -1,0 +1,10 @@
+{
+  "name": "compare-node-servers",
+  "private": true,
+  "description": "Node.js servers for bench/compare: Express, Fastify and ws.",
+  "dependencies": {
+    "express": "^4.22.3",
+    "fastify": "^5.12.8",
+    "ws": "^8.23.0"
+  }
+}

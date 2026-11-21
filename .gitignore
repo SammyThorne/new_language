@@ -2,3 +2,9 @@
 
 # OAuth client files from the Google Cloud console hold a secret: never commit them.
 client_secret*.json
+
+# Framework comparison (bench/compare): downloaded frameworks, build output and quick runs.
+bench/compare/node/node_modules/
+bench/compare/python/.venv/
+bench/compare/results-quick.json
+bench/compare/report/index.html

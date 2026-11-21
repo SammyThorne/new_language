@@ -1,0 +1,639 @@
+<meta charset="utf-8">
+<title>Viper Server Benchmarks</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column; each section is a question, a chart that answers it, and a one-line reading of the result. */
+:root {
+  --page: #f4f7f7;
+  --surface: #fbfcfc;
+  --ink: #0d1416;
+  --ink-2: #485357;
+  --muted: #737e81;
+  --grid: #e1e6e7;
+  --base: #bfc7c9;
+  --ring: rgba(13, 20, 22, 0.10);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
+  --font-text: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-data: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #0e1112; --surface: #15191b; --ink: #edf1f1; --ink-2: #b6c0c2; --muted: #85908f;
+    --grid: #252d30; --base: #38423f; --ring: rgba(255, 255, 255, 0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #0ca30c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --page: #0e1112; --surface: #15191b; --ink: #edf1f1; --ink-2: #b6c0c2; --muted: #85908f;
+  --grid: #252d30; --base: #38423f; --ring: rgba(255, 255, 255, 0.10);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #0ca30c;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--page); color: var(--ink); font-family: var(--font-text); font-size: 15px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 64px;
+}
+main { max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+h1, h2, h3 { text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.08; font-weight: 700; }
+h2 { font-size: 24px; font-weight: 650; }
+h3 { font-size: 16px; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font-family: var(--font-data); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+header { display: flex; flex-direction: column; gap: 14px; }
+header .lede { font-size: 18px; color: var(--ink-2); }
+.machine { font-family: var(--font-data); font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 18px; }
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 820px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 440px) { .tiles { grid-template-columns: minmax(0, 1fr); } }
+.tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 6px; }
+.tile .label { font-size: 13px; color: var(--ink-2); }
+.tile .value { font-size: 30px; font-weight: 650; line-height: 1.1; }
+.tile .value small { font-size: 15px; font-weight: 500; color: var(--ink-2); margin-left: 3px; }
+.tile .vs { font-size: 13px; color: var(--ink-2); }
+.tile .vs b { font-weight: 600; color: var(--ink); }
+section { display: flex; flex-direction: column; gap: 18px; }
+section > .head { display: flex; flex-direction: column; gap: 8px; }
+section > .head p { color: var(--ink-2); }
+.panel { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 18px 18px 14px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.panel .sub { font-size: 13px; color: var(--ink-2); }
+.pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 760px) { .pair { grid-template-columns: minmax(0, 1fr); } }
+.reading { font-size: 14px; color: var(--ink-2); border-left: 2px solid var(--s1); padding-left: 12px; }
+.reading b { color: var(--ink); font-weight: 600; }
+.chart { width: 100%; min-width: 0; position: relative; }
+.chart svg { display: block; overflow: visible; }
+.chart text { font-family: var(--font-data); font-size: 11.5px; fill: var(--muted); }
+.chart text.name { font-family: var(--font-text); font-size: 13px; fill: var(--ink); }
+.chart text.val { fill: var(--ink-2); }
+.chart text.viper { fill: var(--ink); font-weight: 600; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.filters button {
+  font: inherit; font-size: 13px; color: var(--ink-2); background: transparent; border: 1px solid var(--ring);
+  border-radius: 999px; padding: 4px 12px; cursor: pointer;
+}
+.filters button[aria-pressed="true"] { color: var(--ink); border-color: var(--ink-2); background: var(--page); font-weight: 600; }
+.filters button:focus-visible, summary:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+.legend i.dot { width: 9px; height: 9px; border-radius: 50%; }
+.legend i.hollow { width: 9px; height: 9px; border-radius: 50%; background: transparent !important; border: 2px solid var(--muted); }
+.tip {
+  position: fixed; z-index: 20; pointer-events: none; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--ring); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.45;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14); min-width: 160px; max-width: 280px;
+}
+.tip .t { font-weight: 600; margin-bottom: 4px; }
+.tip .r { display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+.tip .r i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.tip .r span:last-child { margin-left: auto; font-family: var(--font-data); }
+details { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; }
+summary { cursor: pointer; padding: 14px 18px; font-weight: 600; }
+.table-wrap { overflow-x: auto; padding: 0 18px 18px; }
+table { border-collapse: collapse; font-size: 13px; width: 100%; min-width: 760px; }
+th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; font-variant-numeric: tabular-nums; }
+th:first-child, td:first-child { text-align: left; }
+th { font-weight: 600; color: var(--ink-2); font-size: 12px; }
+td { font-family: var(--font-data); font-size: 12.5px; }
+td:first-child { font-family: var(--font-text); font-size: 13px; }
+.method { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 32px; }
+@media (max-width: 760px) { .method { grid-template-columns: minmax(0, 1fr); } }
+.method div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.method p { font-size: 14px; color: var(--ink-2); }
+code { font-family: var(--font-data); font-size: 0.9em; }
+@media (prefers-reduced-motion: no-preference) { .chart rect.bar, .chart path.bar { transition: opacity 120ms; } }
+</style>
+
+<script id="data" type="application/json">__DATA__</script>
+<script id="versions" type="application/json">__VERSIONS__</script>
+
+<main>
+  <header>
+    <div class="eyebrow">HTTP and WebSocket server benchmark</div>
+    <h1>Viper against Go, Node.js and Python</h1>
+    <p class="lede" id="lede"></p>
+    <div class="machine" id="machine"></div>
+  </header>
+
+  <div class="tiles" id="tiles"></div>
+
+  <section id="throughput">
+    <div class="head">
+      <div class="eyebrow">Response rate</div>
+      <h2>How many requests each server answers per second</h2>
+      <p>256 connections send requests back to back for 5 seconds. Each endpoint does a different amount of work: a small JSON object, a path parameter, a list of 20 records, and a POST that parses and totals an order.</p>
+    </div>
+    <div class="panel">
+      <div class="filters" id="endpoint-filter" role="group" aria-label="Endpoint"></div>
+      <div class="chart" id="chart-endpoints"></div>
+    </div>
+    <p class="reading" id="read-endpoints"></p>
+  </section>
+
+  <section id="load">
+    <div class="head">
+      <div class="eyebrow">Load bearing</div>
+      <h2>What happens as load rises</h2>
+      <p>Left: requests per second on <code>GET /users/42</code> as the number of open connections grows. Right: latency when requests arrive at a fixed rate, from 1,000 to 400,000 a second. A request that had to wait for the server to finish the one before is timed from when it was due, so falling behind shows as latency. A server stops at the first rate it cannot hold.</p>
+    </div>
+    <div class="legend" id="legend-load"></div>
+    <div class="pair">
+      <div class="panel">
+        <h3>Requests per second by open connections</h3>
+        <div class="chart" id="chart-scaling"></div>
+      </div>
+      <div class="panel">
+        <h3>Latency at a fixed request rate</h3>
+        <div class="filters" id="pct-filter" role="group" aria-label="Percentile"></div>
+        <div class="chart" id="chart-rates"></div>
+        <div class="legend"><span><i class="hollow"></i>could not keep up with the rate</span></div>
+      </div>
+    </div>
+    <p class="reading" id="read-load"></p>
+  </section>
+
+  <section id="memory">
+    <div class="head">
+      <div class="eyebrow">Memory</div>
+      <h2>Memory at rest and under load</h2>
+      <p>Proportional set size of the whole process tree, so worker processes that share pages are not counted twice. The scale is logarithmic: each grid line is ten times the one before.</p>
+    </div>
+    <div class="panel">
+      <div class="legend"><span><i class="hollow"></i>idle, after start-up</span><span><i class="dot" style="background:var(--ink-2)"></i>peak under load (highest reading in any HTTP or WebSocket phase)</span></div>
+      <div class="chart" id="chart-memory"></div>
+    </div>
+    <p class="reading" id="read-memory"></p>
+  </section>
+
+  <section id="websocket">
+    <div class="head">
+      <div class="eyebrow">WebSocket</div>
+      <h2>Echo traffic and the cost of an open connection</h2>
+      <p>Left: 256 clients each send a 64-byte message and wait for the echo, for 5 seconds. Right: the server's total memory after 10,000 clients connect and stay silent, measured on a freshly started server. Flask has no WebSocket support, so it is left out.</p>
+    </div>
+    <div class="pair">
+      <div class="panel">
+        <h3>Messages echoed per second</h3>
+        <div class="chart" id="chart-ws-echo"></div>
+      </div>
+      <div class="panel">
+        <h3>Memory holding 10,000 idle connections</h3>
+        <div class="chart" id="chart-ws-idle"></div>
+      </div>
+    </div>
+    <p class="reading" id="read-ws"></p>
+  </section>
+
+  <section id="efficiency">
+    <div class="head">
+      <div class="eyebrow">CPU</div>
+      <h2>Requests per CPU-second</h2>
+      <p>Requests answered divided by the CPU time the server used, across all four endpoint runs. This is the figure that tells you how much hardware a given amount of traffic needs.</p>
+    </div>
+    <div class="panel">
+      <div class="chart" id="chart-cpu"></div>
+      <div class="sub" id="cores-note"></div>
+    </div>
+    <p class="reading" id="read-cpu"></p>
+  </section>
+
+  <details id="all">
+    <summary>All figures</summary>
+    <div class="table-wrap" id="table"></div>
+  </details>
+
+  <section id="method">
+    <div class="head">
+      <div class="eyebrow">Method</div>
+      <h2>How this was measured</h2>
+    </div>
+    <div class="method" id="method-body"></div>
+  </section>
+</main>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+(() => {
+const DATA = JSON.parse(document.getElementById("data").textContent);
+const VERSIONS = JSON.parse(document.getElementById("versions").textContent);
+const R = DATA.results.filter(r => !r.error);
+const SLOT = { "Viper": 1, "Go net/http": 2, "Node Fastify": 3, "Node Express": 4, "Python FastAPI": 5, "Python Flask": 6 };
+const color = name => `var(--s${SLOT[name] || 6})`;
+const by = name => R.find(r => r.name === name);
+const VIPER = by("Viper");
+const others = R.filter(r => r.name !== "Viper");
+const $ = id => document.getElementById(id);
+const NS = "http://www.w3.org/2000/svg";
+
+// ---------- formatting
+const rate = v => v >= 1e6 ? (v / 1e6).toFixed(2) + "M" : v >= 1e4 ? Math.round(v / 1e3) + "k" : v >= 1e3 ? (v / 1e3).toFixed(1) + "k" : Math.round(v).toString();
+const rateLabel = v => v >= 1000 ? v / 1000 + "k" : String(v);
+const rateFull = v => Math.round(v).toLocaleString("en-US");
+const ms = v => v == null ? "–" : v < 1 ? v.toFixed(2) + " ms" : v < 10 ? v.toFixed(1) + " ms" : Math.round(v).toLocaleString("en-US") + " ms";
+const mb = v => v < 10 ? v.toFixed(1) + " MB" : Math.round(v) + " MB";
+const kb = v => v.toFixed(1) + " KB";
+const times = v => v >= 10 ? Math.round(v) + "×" : v.toFixed(1) + "×";
+const sumEndpoints = (r, key) => Object.values(r.endpoints).reduce((a, e) => a + e[key], 0);
+const perCpu = r => sumEndpoints(r, "count") / sumEndpoints(r, "cpu_seconds");
+const cores = r => sumEndpoints(r, "cpu_seconds") / sumEndpoints(r, "seconds");
+const peak = r => Math.max(r.endpoints_peak_mb, r.scaling_peak_mb, r.ws_echo_peak_mb || 0);
+const kept = (pt) => pt.rate >= pt.wanted * 0.95 && pt.errors === 0;
+const RATE_KEYS = Object.keys(DATA.results.find(r => r.name === "Viper").rates);
+const keptAt = (r, wanted) => r.rates[wanted] && kept(r.rates[wanted]);
+const p99at = (r, wanted) => keptAt(r, wanted) ? r.rates[wanted].p99 : null;
+const highestKept = r => RATE_KEYS.filter(k => keptAt(r, k)).map(Number).pop() || 0;
+
+// ---------- tooltip
+const tip = $("tip");
+function showTip(ev, title, rows) {
+  tip.innerHTML = `<div class="t"></div>` + rows.map(() => `<div class="r"><i></i><span></span><span></span></div>`).join("");
+  tip.querySelector(".t").textContent = title;
+  tip.querySelectorAll(".r").forEach((el, i) => {
+    const [c, label, value] = rows[i];
+    el.children[0].style.background = c || "transparent";
+    el.children[1].textContent = label;
+    el.children[2].textContent = value;
+  });
+  tip.hidden = false;
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + w > innerWidth - 8) x = ev.clientX - w - 14;
+  if (y + h > innerHeight - 8) y = ev.clientY - h - 14;
+  tip.style.left = Math.max(8, x) + "px";
+  tip.style.top = Math.max(8, y) + "px";
+}
+const hideTip = () => { tip.hidden = true; };
+
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function text(parent, x, y, s, attrs = {}) {
+  const t = el("text", { x, y, ...attrs }, parent);
+  t.textContent = s;
+  return t;
+}
+// A bar from the baseline with a 4px rounded data end.
+function barPath(x0, x1, y, h) {
+  const r = Math.min(4, (x1 - x0) / 2, h / 2);
+  return `M${x0},${y}H${x1 - r}Q${x1},${y} ${x1},${y + r}V${y + h - r}Q${x1},${y + h} ${x1 - r},${y + h}H${x0}Z`;
+}
+function niceStep(max, count) {
+  const raw = max / count, p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / p;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
+}
+
+// ---------- horizontal bars, one per server, best on top
+function hbars(target, rows, { format, better = "high", tipRows }) {
+  const box = $(target);
+  box.innerHTML = "";
+  rows = rows.slice().sort((a, b) => better === "high" ? b.value - a.value : a.value - b.value);
+  const width = box.clientWidth;
+  const nameW = width < 420 ? 104 : 124, valW = 64, rowH = 34, barH = 16, top = 4;
+  const plotW = Math.max(60, width - nameW - valW);
+  const max = Math.max(...rows.map(r => r.value));
+  const step = niceStep(max, width < 420 ? 3 : 5);
+  const axisMax = Math.ceil(max / step) * step;
+  const h = top + rows.length * rowH + 22;
+  const svg = el("svg", { width, height: h, role: "img", "aria-label": box.dataset.label || "" }, box);
+  const sx = v => nameW + (v / axisMax) * plotW;
+  for (let v = 0; v <= axisMax + 1e-9; v += step) {
+    el("line", { x1: sx(v), x2: sx(v), y1: top, y2: h - 20, stroke: v === 0 ? "var(--base)" : "var(--grid)", "stroke-width": 1 }, svg);
+    text(svg, sx(v), h - 4, format.axis(v), { "text-anchor": v === 0 ? "start" : "middle" });
+  }
+  rows.forEach((r, i) => {
+    const y = top + i * rowH;
+    const g = el("g", {}, svg);
+    text(g, 0, y + rowH / 2 + 4, r.name, { class: "name" + (r.name === "Viper" ? " viper" : "") });
+    if (r.value > 0) el("path", { class: "bar", d: barPath(sx(0), Math.max(sx(0) + 2, sx(r.value)), y + (rowH - barH) / 2, barH), fill: color(r.name) }, g);
+    text(g, sx(r.value) + 6, y + rowH / 2 + 4, format.value(r.value), { class: "val" + (r.name === "Viper" ? " viper" : "") });
+    const hit = el("rect", { x: 0, y, width, height: rowH, fill: "transparent" }, g);
+    hit.addEventListener("pointermove", ev => showTip(ev, r.name, tipRows ? tipRows(r) : [[color(r.name), "", format.value(r.value)]]));
+    hit.addEventListener("pointerleave", hideTip);
+  });
+}
+
+// ---------- lines over evenly spaced categories
+function lines(target, series, { xs, xLabel, yLog = false, format, hollow, yMin }) {
+  const box = $(target);
+  box.innerHTML = "";
+  const width = box.clientWidth, height = width < 420 ? 240 : 280;
+  const left = 52, right = 58, top = 10, bottom = 40;
+  const plotW = width - left - right, plotH = height - top - bottom;
+  const all = series.flatMap(s => s.points.filter(Boolean).map(p => p.y)).filter(v => v > 0);
+  let ticks, sy;
+  if (yLog) {
+    const lo = Math.pow(10, Math.floor(Math.log10(Math.min(...all, yMin || Infinity))));
+    const hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...all))));
+    ticks = [];
+    for (let v = lo; v <= hi * 1.0001; v *= 10) ticks.push(v);
+    sy = v => top + plotH - (Math.log10(v) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)) * plotH;
+  } else {
+    const step = niceStep(Math.max(...all), 4);
+    const max = Math.ceil(Math.max(...all) / step) * step;
+    ticks = [];
+    for (let v = 0; v <= max + 1e-9; v += step) ticks.push(v);
+    sy = v => top + plotH - (v / max) * plotH;
+  }
+  const sx = i => left + (xs.length === 1 ? plotW / 2 : (i / (xs.length - 1)) * plotW);
+  const svg = el("svg", { width, height }, box);
+  ticks.forEach(v => {
+    el("line", { x1: left, x2: left + plotW, y1: sy(v), y2: sy(v), stroke: v === ticks[0] ? "var(--base)" : "var(--grid)", "stroke-width": 1 }, svg);
+    text(svg, left - 8, sy(v) + 4, format.axis(v), { "text-anchor": "end" });
+  });
+  xs.forEach((x, i) => text(svg, sx(i), top + plotH + 18, x.label, { "text-anchor": "middle" }));
+  text(svg, left + plotW / 2, height - 2, xLabel, { "text-anchor": "middle" });
+  const cross = el("line", { x1: 0, x2: 0, y1: top, y2: top + plotH, stroke: "var(--base)", "stroke-width": 1, visibility: "hidden" }, svg);
+  // Viper last, so it is drawn on top.
+  const order = series.slice().sort((a, b) => (a.name === "Viper") - (b.name === "Viper"));
+  order.forEach(s => {
+    const pts = s.points.map((p, i) => p && [sx(i), sy(Math.max(p.y, yLog ? 1e-9 : 0)), p]).filter(q => q && q[2].y > 0);
+    el("path", { d: pts.map((q, i) => (i ? "L" : "M") + q[0] + "," + q[1]).join(""), fill: "none", stroke: color(s.name),
+                 "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+    pts.forEach(q => {
+      const open = hollow && hollow(q[2]);
+      el("circle", { cx: q[0], cy: q[1], r: 4.5, fill: open ? "var(--surface)" : color(s.name), stroke: open ? color(s.name) : "var(--surface)", "stroke-width": 2 }, svg);
+    });
+    if (s.name === "Viper" && pts.length) {
+      const last = pts[pts.length - 1];
+      text(svg, last[0] + 9, last[1] + 4, "Viper", { class: "name viper" });
+    }
+  });
+  xs.forEach((x, i) => {
+    const w = plotW / Math.max(1, xs.length - 1);
+    const hit = el("rect", { x: sx(i) - w / 2, y: top, width: w, height: plotH, fill: "transparent" }, svg);
+    hit.addEventListener("pointermove", ev => {
+      cross.setAttribute("x1", sx(i)); cross.setAttribute("x2", sx(i)); cross.setAttribute("visibility", "visible");
+      const rows = series.map(s => [s, s.points[i]]).filter(([, p]) => p)
+        .sort((a, b) => format.better === "low" ? a[1].y - b[1].y : b[1].y - a[1].y)
+        .map(([s, p]) => [color(s.name), s.name, format.tip(p)]);
+      showTip(ev, x.title, rows);
+    });
+    hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
+  });
+}
+
+// ---------- dumbbell on a log scale: idle (hollow) to peak (filled)
+function dumbbell(target, rows) {
+  const box = $(target);
+  box.innerHTML = "";
+  rows = rows.slice().sort((a, b) => a.peak - b.peak);
+  const width = box.clientWidth;
+  const nameW = width < 420 ? 104 : 124, right = 70, rowH = 34, top = 4;
+  const plotW = width - nameW - right;
+  const lo = 1, hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...rows.map(r => r.peak)))));
+  const sx = v => nameW + (Math.log10(Math.max(v, lo)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)) * plotW;
+  const h = top + rows.length * rowH + 22;
+  const svg = el("svg", { width, height: h }, box);
+  for (let v = lo; v <= hi; v *= 10) {
+    el("line", { x1: sx(v), x2: sx(v), y1: top, y2: h - 20, stroke: v === lo ? "var(--base)" : "var(--grid)", "stroke-width": 1 }, svg);
+    text(svg, sx(v), h - 4, v >= 1000 ? v / 1000 + " GB" : v + " MB", { "text-anchor": v === lo ? "start" : "middle" });
+  }
+  rows.forEach((r, i) => {
+    const y = top + i * rowH + rowH / 2;
+    const g = el("g", {}, svg);
+    text(g, 0, y + 4, r.name, { class: "name" + (r.name === "Viper" ? " viper" : "") });
+    el("line", { x1: sx(r.idle), x2: sx(r.peak), y1: y, y2: y, stroke: color(r.name), "stroke-width": 2, "stroke-linecap": "round" }, g);
+    el("circle", { cx: sx(r.idle), cy: y, r: 5, fill: "var(--surface)", stroke: color(r.name), "stroke-width": 2 }, g);
+    el("circle", { cx: sx(r.peak), cy: y, r: 5.5, fill: color(r.name), stroke: "var(--surface)", "stroke-width": 2 }, g);
+    text(g, sx(r.peak) + 10, y + 4, mb(r.peak), { class: "val" + (r.name === "Viper" ? " viper" : "") });
+    const hit = el("rect", { x: 0, y: y - rowH / 2, width, height: rowH, fill: "transparent" }, g);
+    hit.addEventListener("pointermove", ev => showTip(ev, r.name, [
+      ["", "Idle", mb(r.idle)], ["", "Peak under load", mb(r.peak)], ["", "Processes", String(r.processes)]]));
+    hit.addEventListener("pointerleave", hideTip);
+  });
+}
+
+function filters(target, options, initial, onPick) {
+  const box = $(target);
+  box.innerHTML = "";
+  options.forEach(([key, label]) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.id = `${target}-${key.replace(/\W+/g, "")}`;
+    b.textContent = label;
+    b.setAttribute("aria-pressed", key === initial);
+    b.addEventListener("click", () => {
+      box.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", x === b));
+      onPick(key);
+    });
+    box.appendChild(b);
+  });
+}
+
+// ---------- copy that depends on the numbers
+const go = by("Go net/http");
+const best = (key, better = "high") => others.filter(r => key(r) != null).sort((a, b) => better === "high" ? key(b) - key(a) : key(a) - key(b))[0];
+const usersRate = r => r.endpoints["GET /users/{id}"].rate;
+const wsKb = r => r.ws_idle ? r.ws_idle.kb_per_connection : null;
+const wsTotal = r => r.ws_idle ? r.ws_idle.after_mb : null;
+
+function header() {
+  const m = DATA.machine;
+  const machine = [m.cpu, `${m.server_cpus} of ${m.cpus} cores per server`, `Linux ${m.kernel.split("-")[0]}`, m.date];
+  $("machine").innerHTML = "";
+  machine.forEach(s => { const span = document.createElement("span"); span.textContent = s; $("machine").appendChild(span); });
+  const nodeIdle = Math.min(by("Node Fastify").idle_mb, by("Node Express").idle_mb);
+  $("lede").textContent = `The same REST API and WebSocket echo, written for six servers and given the same four cores. ` +
+    `Viper answered ${times(usersRate(VIPER) / usersRate(go))} as many requests per second as Go on a typical endpoint, ` +
+    `using ${mb(VIPER.idle_mb)} of memory at rest against Go's ${mb(go.idle_mb)} and Node's ${mb(nodeIdle)}.`;
+}
+
+function tiles() {
+  const cards = [
+    { label: "Requests per second, GET /users/42", value: rate(usersRate(VIPER)), unit: "req/s", key: usersRate, fmt: v => rate(v), better: "high" },
+    { label: "Highest fixed rate held", value: rateLabel(highestKept(VIPER)), unit: "req/s", key: highestKept, fmt: v => rateLabel(v) + " req/s", better: "high" },
+    { label: "Memory at rest", value: mb(VIPER.idle_mb).replace(" MB", ""), unit: "MB", key: r => r.idle_mb, fmt: mb, better: "low" },
+    { label: "Memory holding 10,000 WebSockets", value: mb(wsTotal(VIPER)).replace(" MB", ""), unit: "MB", key: wsTotal, fmt: mb, better: "low" },
+  ];
+  $("tiles").innerHTML = "";
+  cards.forEach(c => {
+    const next = best(c.key, c.better);
+    const ratio = c.better === "high" ? c.key(VIPER) / c.key(next) : c.key(next) / c.key(VIPER);
+    const d = document.createElement("div");
+    d.className = "tile";
+    d.innerHTML = `<div class="label"></div><div class="value"><span></span><small></small></div><div class="vs">Next best: <b></b> <span></span></div>`;
+    d.querySelector(".label").textContent = "Viper · " + c.label;
+    d.querySelector(".value span").textContent = c.value;
+    d.querySelector(".value small").textContent = c.unit;
+    d.querySelector(".vs b").textContent = `${next.name} ${c.fmt(c.key(next))}`;
+    d.querySelector(".vs span").textContent = ratio >= 1.05 ? `(Viper ${times(ratio)} ${c.better === "high" ? "higher" : "less"})` : ratio > 0.95 ? "(level)" : "";
+    $("tiles").appendChild(d);
+  });
+}
+
+// ---------- sections
+let endpoint = "GET /users/{id}";
+let pct = "p99";
+const ENDPOINTS = Object.keys(VIPER.endpoints);
+
+function drawEndpoints() {
+  hbars("chart-endpoints", R.map(r => ({ name: r.name, value: r.endpoints[endpoint].rate, r })), {
+    format: { value: rate, axis: v => v === 0 ? "0" : rate(v) },
+    tipRows: ({ r }) => {
+      const e = r.endpoints[endpoint];
+      return [[color(r.name), "Requests per second", rateFull(e.rate)], ["", "p50 latency", ms(e.p50)], ["", "p99 latency", ms(e.p99)], ["", "Cores used", e.cores.toFixed(2)]];
+    },
+  });
+  const sorted = R.slice().sort((a, b) => b.endpoints[endpoint].rate - a.endpoints[endpoint].rate);
+  const v = VIPER.endpoints[endpoint].rate, second = sorted.find(r => r.name !== "Viper");
+  const slowest = sorted[sorted.length - 1];
+  $("read-endpoints").innerHTML = "";
+  $("read-endpoints").append(
+    "On ", Object.assign(document.createElement("code"), { textContent: endpoint }), ", Viper answered ",
+    Object.assign(document.createElement("b"), { textContent: rateFull(v) + " requests per second" }),
+    `: ${times(v / second.endpoints[endpoint].rate)} the rate of ${second.name}, the next fastest, and ${times(v / slowest.endpoints[endpoint].rate)} that of ${slowest.name}.`);
+}
+
+function drawLoad() {
+  const scaleXs = Object.keys(VIPER.scaling).map(k => ({ label: k, title: `${Number(k).toLocaleString("en-US")} connections` }));
+  lines("chart-scaling", R.map(r => ({ name: r.name, points: Object.values(r.scaling).map(p => ({ ...p, y: p.rate })) })), {
+    xs: scaleXs, xLabel: "open connections",
+    format: { axis: v => v === 0 ? "0" : rate(v), tip: p => rate(p.rate) + " req/s", better: "high" },
+  });
+  const rateXs = RATE_KEYS.map(k => ({ label: rateLabel(+k), title: `${Number(k).toLocaleString("en-US")} requests per second offered` }));
+  lines("chart-rates", R.map(r => ({ name: r.name, points: RATE_KEYS.map(k => r.rates[k] ? { ...r.rates[k], y: r.rates[k][pct] } : null) })), {
+    xs: rateXs, xLabel: "requests per second offered", yLog: true,
+    hollow: p => !kept(p),
+    format: {
+      axis: v => v >= 1000 ? v / 1000 + " s" : v < 1 ? v + " ms" : v + " ms", better: "low",
+      tip: p => ms(p[pct]) + (kept(p) ? "" : ` · got ${rate(p.rate)}/s`),
+    },
+  });
+}
+
+function legendLoad() {
+  $("legend-load").innerHTML = "";
+  R.forEach(r => {
+    const s = document.createElement("span");
+    s.innerHTML = `<i></i>`;
+    s.firstChild.style.background = color(r.name);
+    s.append(r.name);
+    $("legend-load").appendChild(s);
+  });
+}
+
+function readLoad() {
+  const held = R.map(r => `${r.name} ${rateLabel(highestKept(r))}`).join(", ");
+  const top = String(highestKept(VIPER));
+  const s1024 = r => r.scaling["1024"].rate;
+  const goTop = highestKept(go);
+  $("read-load").textContent = `Highest fixed rate each server held: ${held} requests per second. ` +
+    `At ${rateFull(goTop)} requests per second, Viper's p99 latency was ${ms(p99at(VIPER, String(goTop)))} against Go's ${ms(p99at(go, String(goTop)))}. ` +
+    `With 1,024 connections open, Viper answered ${rate(s1024(VIPER))} requests per second, ${times(s1024(VIPER) / s1024(go))} Go's rate.`;
+}
+
+function drawMemory() {
+  dumbbell("chart-memory", R.map(r => ({ name: r.name, idle: r.idle_mb, peak: peak(r), processes: r.processes })));
+  const heaviest = R.slice().sort((a, b) => peak(b) - peak(a))[0];
+  $("read-memory").textContent = `Viper starts at ${mb(VIPER.idle_mb)} and peaked at ${mb(peak(VIPER))} under load, its highest point while 1,024 connections were open. ` +
+    `Go peaked at ${mb(peak(go))}, and ${heaviest.name} at ${mb(peak(heaviest))}. ` +
+    `Node and Python run one process per core, so each worker carries its own runtime.`;
+}
+
+function drawWs() {
+  const ws = R.filter(r => r.ws_echo);
+  hbars("chart-ws-echo", ws.map(r => ({ name: r.name, value: r.ws_echo.rate, r })), {
+    format: { value: rate, axis: v => v === 0 ? "0" : rate(v) },
+    tipRows: ({ r }) => [[color(r.name), "Messages per second", rateFull(r.ws_echo.rate)], ["", "p50 round trip", ms(r.ws_echo.p50)], ["", "p99 round trip", ms(r.ws_echo.p99)], ["", "Peak memory", mb(r.ws_echo_peak_mb)]],
+  });
+  const idle = R.filter(r => r.ws_idle && r.ws_idle.kb_per_connection != null);
+  hbars("chart-ws-idle", idle.map(r => ({ name: r.name, value: r.ws_idle.after_mb, r })), {
+    better: "low",
+    format: { value: mb, axis: v => v === 0 ? "0" : v + " MB" },
+    tipRows: ({ r }) => [[color(r.name), "Per connection", kb(r.ws_idle.kb_per_connection)], ["", "Connections held", r.ws_idle.connections.toLocaleString("en-US")],
+                         ["", "Before", mb(r.ws_idle.before_mb)], ["", "After", mb(r.ws_idle.after_mb)]],
+  });
+  const n = VIPER.ws_idle.connections;
+  const leaner = idle.filter(r => r.name !== "Viper" && wsKb(r) < wsKb(VIPER)).sort((a, b) => wsKb(a) - wsKb(b));
+  let cross = "";
+  if (leaner.length) {
+    const o = leaner[0];
+    const at = (o.ws_idle.before_mb - VIPER.ws_idle.before_mb) * 1024 / (wsKb(VIPER) - wsKb(o));
+    cross = ` Each connection costs ${o.name} less (${kb(wsKb(o))} against Viper's ${kb(wsKb(VIPER))}), but it starts ${mb(o.ws_idle.before_mb - VIPER.ws_idle.before_mb)} higher, ` +
+      `so Viper uses less memory up to about ${(Math.round(at / 1000) * 1000).toLocaleString("en-US")} idle connections.`;
+  }
+  $("read-ws").textContent = `Viper echoed ${rate(VIPER.ws_echo.rate)} messages per second with a p99 round trip of ${ms(VIPER.ws_echo.p99)}, ${times(VIPER.ws_echo.rate / go.ws_echo.rate)} Go's rate. ` +
+    `Holding ${n.toLocaleString("en-US")} idle connections took it from ${mb(VIPER.ws_idle.before_mb)} to ${mb(VIPER.ws_idle.after_mb)}, ${kb(wsKb(VIPER))} per connection.` + cross;
+}
+
+function drawCpu() {
+  hbars("chart-cpu", R.map(r => ({ name: r.name, value: perCpu(r), r })), {
+    format: { value: rate, axis: v => v === 0 ? "0" : rate(v) },
+    tipRows: ({ r }) => [[color(r.name), "Requests per CPU-second", rateFull(perCpu(r))], ["", "Cores used under load", cores(r).toFixed(2) + " of 4"]],
+  });
+  $("cores-note").textContent = "Cores used during the endpoint runs: " + R.map(r => `${r.name} ${cores(r).toFixed(1)}`).join(" · ") + ".";
+  const second = others.slice().sort((a, b) => perCpu(b) - perCpu(a))[0];
+  $("read-cpu").textContent = `Each CPU-second of Viper's time answered ${rate(perCpu(VIPER))} requests, ${times(perCpu(VIPER) / perCpu(second))} as many as ${second.name}. ` +
+    (cores(VIPER) < 3.6 ? `Viper did not use all four of its cores, because the load generator on the remaining cores could not send requests faster; its top response rates are a floor, not a ceiling.` : "");
+}
+
+function table() {
+  const cols = [
+    ["Server", r => r.name],
+    ...ENDPOINTS.map(e => [e.replace("GET ", "").replace("POST ", "POST ") + " req/s", r => rateFull(r.endpoints[e].rate)]),
+    ["p99 at 256 conns", r => ms(r.endpoints["GET /users/{id}"].p99)],
+    ...RATE_KEYS.map(k => [`p99 at ${rateLabel(+k)}/s`, r => r.rates[k] ? ms(r.rates[k].p99) + (kept(r.rates[k]) ? "" : " *") : "–"]),
+    ["Idle MB", r => r.idle_mb.toFixed(1)],
+    ["Peak MB", r => peak(r).toFixed(1)],
+    ["WS msg/s", r => r.ws_echo ? rateFull(r.ws_echo.rate) : "–"],
+    ["WS p99", r => r.ws_echo ? ms(r.ws_echo.p99) : "–"],
+    ["MB with 10k idle WS", r => wsTotal(r) != null ? wsTotal(r).toFixed(0) : "–"],
+    ["KB per idle WS", r => wsKb(r) != null ? wsKb(r).toFixed(1) : "–"],
+    ["Req per CPU-s", r => rateFull(perCpu(r))],
+    ["Cores used", r => cores(r).toFixed(2)],
+  ];
+  const t = document.createElement("table");
+  const head = t.createTHead().insertRow();
+  cols.forEach(([h]) => { const th = document.createElement("th"); th.textContent = h; head.appendChild(th); });
+  const body = t.createTBody();
+  DATA.results.forEach(r => {
+    const row = body.insertRow();
+    if (r.error) { row.insertCell().textContent = r.name; const c = row.insertCell(); c.colSpan = cols.length - 1; c.textContent = "failed: " + r.error; return; }
+    cols.forEach(([, f]) => { row.insertCell().textContent = f(r); });
+  });
+  $("table").innerHTML = "";
+  $("table").appendChild(t);
+  const note = document.createElement("p");
+  note.style.cssText = "font-size:13px;color:var(--ink-2);margin-top:10px";
+  note.textContent = "* the server did not reach the offered rate, or returned errors; – not run, because the server had already fallen behind at a lower rate.";
+  $("table").appendChild(note);
+}
+
+function method() {
+  const m = DATA.machine, v = VERSIONS;
+  const items = [
+    ["Same work, same budget", `Every server implements the same four endpoints and a WebSocket echo at /ws, and is pinned to cores 0–${m.server_cpus - 1} with taskset. Each runs one worker per core, as it would be deployed: Go and Viper schedule across cores themselves, Node runs a node:cluster process per core, Uvicorn and Gunicorn run ${m.server_cpus} worker processes.`],
+    ["Load generator", `A small Go program pinned to the other ${m.cpus - m.server_cpus} cores, using keep-alive HTTP/1.1 connections opened before timing starts. In fixed-rate runs, a request that waited for the server's previous answer is timed from when it was due, so queueing counts against the server; one sent on a free connection is timed from when it was sent, so the generator's own timer does not count. A server stops at the first rate it cannot hold (95% of the rate, with no errors).`],
+    ["Memory", "Proportional set size (PSS) from /proc/<pid>/smaps_rollup, summed over the server's process tree and sampled every 100 ms. Idle WebSocket memory is measured on a freshly started server, so heap grown by earlier load does not hide the cost of a connection."],
+    ["CPU", "User plus system time from /proc/<pid>/stat over the process tree, read before and after each endpoint run."],
+    ["Versions", `Viper (this repository, release build) · Go ${m.go.replace("go", "")} net/http, gorilla/websocket ${v.gorilla} · Node ${m.node.replace("v", "")}: Fastify ${v.fastify}, Express ${v.express}, ws ${v.ws} · Python ${m.python}: FastAPI ${v.fastapi} on Uvicorn ${v.uvicorn} with uvloop and httptools, Flask ${v.flask} on Gunicorn ${v.gunicorn} (gthread, 16 threads per worker).`],
+    ["Limits", "Everything runs on one machine over loopback, so network cost is absent. Viper and Go are fast enough that the load generator, not the server, sets their top rates. Each figure comes from a single 5-second run."],
+  ];
+  $("method-body").innerHTML = "";
+  items.forEach(([h, p]) => {
+    const d = document.createElement("div");
+    d.innerHTML = "<h3></h3><p></p>";
+    d.querySelector("h3").textContent = h;
+    d.querySelector("p").textContent = p;
+    $("method-body").appendChild(d);
+  });
+}
+
+function drawAll() { drawEndpoints(); drawLoad(); drawMemory(); drawWs(); drawCpu(); }
+header(); tiles(); legendLoad(); readLoad(); table(); method();
+filters("endpoint-filter", ENDPOINTS.map(e => [e, e]), endpoint, k => { endpoint = k; drawEndpoints(); });
+filters("pct-filter", [["p50", "p50"], ["p90", "p90"], ["p99", "p99"]], pct, k => { pct = k; drawLoad(); });
+drawAll();
+let lastW = innerWidth;
+addEventListener("resize", () => { if (Math.abs(innerWidth - lastW) > 4) { lastW = innerWidth; drawAll(); } });
+})();
+</script>

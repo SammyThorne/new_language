@@ -1,0 +1,81 @@
+# The Viper server for bench/compare: the REST endpoints of bench/http/server.vi and a
+# WebSocket echo at /ws. Usage: server PORT
+
+import http
+import io
+import os
+
+@derive(Json)
+struct Message:
+    message: str
+
+@derive(Json)
+struct Item:
+    id: int
+    name: str
+    price: float
+    tags: list[str]
+
+@derive(Json)
+struct User:
+    id: int
+    name: str
+    email: str
+    active: bool
+
+@derive(Json)
+@frozen
+struct Line:
+    sku: str
+    qty: int
+    price: float
+
+@derive(Json)
+@frozen
+struct Order:
+    customer: str
+    lines: list[Line]
+
+@derive(Json)
+struct Receipt:
+    customer: str
+    count: int
+    total: float
+
+def message(req: http.Request) -> Result[http.Response]:
+    return http.json(Message("Hello, World!"))
+
+def items(req: http.Request) -> Result[http.Response]:
+    return http.json([Item(i, f"item {i}", float(i) * 1.5, ["a", "b"]) for i in range(20)])
+
+@http.get("/users/{id}")
+def user(id: int) -> User:
+    return User(id, f"user {id}", f"user{id}@example.com", id % 2 == 0)
+
+@http.post("/orders", status=200)
+def order(body: Order) -> Receipt:
+    total = 0.0
+    count = 0
+    for line in body.lines:
+        total += float(line.qty) * line.price
+        count += line.qty
+    return Receipt(body.customer, count, total)
+
+def echo(ws: http.WebSocket):
+    for msg in ws:
+        match msg:
+            case Text(body):
+                _ = ws.send(body)
+            case Binary(data):
+                _ = ws.send_bytes(data)
+
+def main():
+    server = http.Server()
+    server.get("/json", message)
+    server.get("/items", items)
+    server.mount(user)
+    server.mount(order)
+    server.ws("/ws", echo)
+    port = server.bind(f"127.0.0.1:{os.args()[1]}").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()
