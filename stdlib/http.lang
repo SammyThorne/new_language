@@ -171,6 +171,12 @@ def cancel_deadline_raw() -> int
 @extern("lrt_http_set_route_timeout")
 def set_route_timeout_raw(route: int, nanos: int)
 
+@extern("lrt_rate_new")
+def rate_new_raw(interval_ns: int, burst: int) -> int
+
+@extern("lrt_rate_take")
+def rate_take_raw(id: int, key: str) -> int
+
 @extern("lrt_http_client_headers")
 def client_headers() -> str
 
@@ -453,6 +459,19 @@ impl Request:
                         extra.error_headers = {name: value}
             case None:
                 self.extra = RequestExtra(None, None, {name: value})
+
+    priv def append_error_header(self, name: str, value: str):
+        match self.error_headers():
+            case Some(headers):
+                match headers.get(name):
+                    case Some(existing):
+                        headers[name] = f"{existing}, {value}"
+                        return
+                    case None:
+                        pass
+            case None:
+                pass
+        self.add_error_header(name, value)
 
     priv def error_headers(self) -> dict[str, str]?:
         match self.extra:
@@ -1523,6 +1542,131 @@ def find_header(response: Response, name: str) -> str?:
             return value
     return None
 
+# ---- rate limiting -------------------------------------------------------------------------
+
+@frozen
+struct RateLimiter:
+    id: int
+    key: (def(Request) -> str)?
+    # The policy's name, and its `RateLimit-Policy` value.
+    name: str
+    policy: str
+
+pub def rate_limit(
+    rate: str = "",
+    per_second: float = 0.0,
+    burst: int = 0,
+    key: (def(Request) -> str)? = None,
+    name: str = "default",
+) -> Middleware:
+    """
+    Middleware that limits how often each client may call, with a token bucket per client:
+
+        server.use(http.rate_limit(per_second=20.0, burst=40))
+        api.use(http.rate_limit("100/minute", key=lambda req: req.header("X-API-Key").unwrap_or(req.client_ip())))
+
+    A client may make `burst` requests at once, and then `per_second` a second. `rate` says
+    both at once: `"100/minute"` is a burst of 100, refilled at 100 a minute; the period is
+    `second`, `minute`, `hour` or `day`. Clients are told apart by `req.client_ip()` (which
+    honours `server.trusted_proxies`), or by `key`.
+
+    A refused request is a 429 with `Retry-After`, made like any other error (`on_error`
+    applies). Every response says where the client stands, in the IETF draft's headers:
+    `RateLimit-Policy: default;q=40;w=2` (the quota and the seconds it refills in) and
+    `RateLimit: default;a=37;w=1` (the requests available, and the seconds until the quota is
+    whole). `name` names the policy in them, to tell several limits apart.
+
+    The limits are kept in memory, per process: several instances of a service each count on
+    their own. At most 100,000 clients are tracked; past that, those seen longest ago are
+    forgotten first, so a flood of addresses cannot use up memory.
+    """
+    return new_rate_limit(rate, per_second, burst, key, name, "`http.rate_limit`")
+
+def parse_rate(text: str, what: str) -> tuple[float, int, int]:
+    # `"5/minute"` as the tokens a second, the burst and the period in seconds.
+    parts = text.split("/")
+    periods = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
+    if len(parts) == 2:
+        match int.parse(parts[0].strip()):
+            case Ok(count):
+                match periods.get(parts[1].strip()):
+                    case Some(period):
+                        if count > 0 and count < 2147483648:
+                            return (float(count) / float(period), count, period)
+                    case None:
+                        pass
+            case Err(_):
+                pass
+    panic(f"{what} has the rate {text!r}, which is not a number of requests and a period such as \"5/minute\" (the period is second, minute, hour or day)")
+
+def new_rate_limit(rate: str, per_second: float, burst: int, key: (def(Request) -> str)?, name: str, what: str) -> Middleware:
+    window = 0
+    if rate != "":
+        if per_second > 0.0 or burst > 0:
+            panic(f"{what} takes a `rate` such as \"5/minute\", or `per_second` and `burst`, not both")
+        parsed = parse_rate(rate, what)
+        per_second = parsed[0]
+        burst = parsed[1]
+        window = parsed[2]
+    if per_second <= 0.0:
+        panic(f"{what} needs `per_second` above 0, or a `rate` such as \"5/minute\"")
+    if burst <= 0:
+        burst = max(1, int(per_second + 0.999999))
+    if burst >= 2147483648:
+        panic(f"{what} has burst={burst}, more than it can count")
+    if window == 0:
+        window = max(1, int(float(burst) / per_second + 0.999999))
+    if name == "" or not name[0:1].is_alpha() or not all([c.is_alnum() or c in "_-." for c in name]):
+        panic(f"{what} has the name {name!r}; a policy name is a letter, then letters, digits, `_`, `-` or `.`")
+    interval = max(1, int(1000000000.0 / per_second))
+    limiter = RateLimiter(rate_new_raw(interval, burst), key, name, f"{name};q={burst};w={window}")
+    return lambda req, next: limiter.handle(req, next)
+
+impl RateLimiter:
+    def handle(self, req: Request, next: Handler) -> Result[Response]:
+        client = req.client_ip()
+        match self.key:
+            case Some(choose):
+                client = choose(req)
+            case None:
+                pass
+        verdict = rate_take_raw(self.id, client)
+        if verdict < 0:
+            wait = str(0 - verdict)
+            req.add_error_header("Retry-After", wait)
+            req.append_error_header("RateLimit-Policy", self.policy)
+            req.append_error_header("RateLimit", f"{self.name};a=0;w={wait}")
+            return Err(HttpError(429, "too many requests"))
+        state = f"{self.name};a={verdict // 4294967296};w={verdict % 4294967296}"
+        result = next(req)
+        match result:
+            case Ok(response):
+                append_header(response, "RateLimit-Policy", self.policy)
+                append_header(response, "RateLimit", state)
+            case Err(_):
+                req.append_error_header("RateLimit-Policy", self.policy)
+                req.append_error_header("RateLimit", state)
+        return result
+
+def limited(handler: Handler, rate: str, method: str, path: str) -> Handler:
+    # A route's handler behind its own `rate_limit`, inside any middleware.
+    if rate == "":
+        return handler
+    limit = new_rate_limit(rate, 0.0, 0, None, "route", f"the route {method.upper()} {path}")
+    return lambda req: limit(req, handler)
+
+def append_header(response: Response, name: str, value: str):
+    """Add `value` to a list-valued response header."""
+    key = name
+    for existing in response.headers.keys():
+        if existing.lower() == name.lower():
+            key = existing
+    match response.headers.get(key):
+        case Some(present):
+            response.headers[key] = f"{present}, {value}"
+        case None:
+            response.headers[key] = value
+
 # ---- compression ---------------------------------------------------------------------------
 
 @frozen
@@ -1735,28 +1879,29 @@ pub struct Server:
     priv security_schemes: dict[str, SecurityScheme] = {}
 
 impl Server:
-    def route(self, method: str, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
+    def route(self, method: str, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0, rate_limit: str = ""):
         """Register a handler for a method and a path such as `/todos/{id}` or `/files/{rest...}`.
-        `max_body` is the largest request body it reads, in bytes, and `timeout` the seconds its
-        handler may run, in place of the server's."""
-        self.routes.append(new_route(method.upper(), path, handler, max_body, timeout))
+        `max_body` is the largest request body it reads, in bytes, `timeout` the seconds its
+        handler may run, in place of the server's, and `rate_limit` how often each client may
+        call it, such as `"5/minute"` (see `http.rate_limit`)."""
+        self.routes.append(new_route(method.upper(), path, limited(handler, rate_limit, method, path), max_body, timeout))
         self.chain = None
         self.docs_json = ""
 
-    def get(self, path: str, handler: Handler, timeout: float = 0.0):
-        self.route("GET", path, handler, 0, timeout)
+    def get(self, path: str, handler: Handler, timeout: float = 0.0, rate_limit: str = ""):
+        self.route("GET", path, handler, 0, timeout, rate_limit)
 
-    def post(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
-        self.route("POST", path, handler, max_body, timeout)
+    def post(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0, rate_limit: str = ""):
+        self.route("POST", path, handler, max_body, timeout, rate_limit)
 
-    def put(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
-        self.route("PUT", path, handler, max_body, timeout)
+    def put(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0, rate_limit: str = ""):
+        self.route("PUT", path, handler, max_body, timeout, rate_limit)
 
-    def patch(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
-        self.route("PATCH", path, handler, max_body, timeout)
+    def patch(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0, rate_limit: str = ""):
+        self.route("PATCH", path, handler, max_body, timeout, rate_limit)
 
-    def delete(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
-        self.route("DELETE", path, handler, max_body, timeout)
+    def delete(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0, rate_limit: str = ""):
+        self.route("DELETE", path, handler, max_body, timeout, rate_limit)
 
     def head(self, path: str, handler: Handler):
         self.route("HEAD", path, handler)
@@ -2246,8 +2391,8 @@ pub struct Group:
     timeout: float = 0.0
 
 impl Group:
-    def route(self, method: str, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
-        wrapped = handler
+    def route(self, method: str, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0, rate_limit: str = ""):
+        wrapped = limited(handler, rate_limit, method, self.prefix + path)
         for i in range(len(self.middleware) - 1, -1, -1):
             wrapped = wrap(self.middleware[i], wrapped)
         limit = max_body if max_body > 0 else self.max_body
@@ -2259,20 +2404,20 @@ impl Group:
                 preflight = wrap(self.middleware[i], preflight)
             server.routes[len(server.routes) - 1].preflight = preflight
 
-    def get(self, path: str, handler: Handler, timeout: float = 0.0):
-        self.route("GET", path, handler, 0, timeout)
+    def get(self, path: str, handler: Handler, timeout: float = 0.0, rate_limit: str = ""):
+        self.route("GET", path, handler, 0, timeout, rate_limit)
 
-    def post(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
-        self.route("POST", path, handler, max_body, timeout)
+    def post(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0, rate_limit: str = ""):
+        self.route("POST", path, handler, max_body, timeout, rate_limit)
 
-    def put(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
-        self.route("PUT", path, handler, max_body, timeout)
+    def put(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0, rate_limit: str = ""):
+        self.route("PUT", path, handler, max_body, timeout, rate_limit)
 
-    def patch(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
-        self.route("PATCH", path, handler, max_body, timeout)
+    def patch(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0, rate_limit: str = ""):
+        self.route("PATCH", path, handler, max_body, timeout, rate_limit)
 
-    def delete(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0):
-        self.route("DELETE", path, handler, max_body, timeout)
+    def delete(self, path: str, handler: Handler, max_body: int = 0, timeout: float = 0.0, rate_limit: str = ""):
+        self.route("DELETE", path, handler, max_body, timeout, rate_limit)
 
     def ws(self, path: str, handler: WsHandler):
         self.route("GET", path, lambda req: upgrade(req, handler))

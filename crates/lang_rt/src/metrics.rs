@@ -1045,55 +1045,31 @@ pub unsafe extern "C-unwind" fn lrt_metrics_credentials(
 
 // ---- failed sign-ins ------------------------------------------------------------------------
 
-/// Failures from one client within [`FAILURE_WINDOW`] that lock it out for [`LOCK_OUT`].
-const MAX_FAILURES: u32 = 10;
-const FAILURE_WINDOW: Duration = Duration::from_secs(60);
-const LOCK_OUT: Duration = Duration::from_secs(60);
-/// Clients tracked at once; past this, those with no recent failure are forgotten first.
-const MAX_CLIENTS: usize = 4096;
+/// Failed sign-ins: a client has [`MAX_FAILURES`], refilled at that many a minute (docs/14,
+/// milestone 14). The failure that uses the last locks the client out for [`LOCK_OUT`]
+/// seconds; after that it has one try, and all ten again a minute later.
+const MAX_FAILURES: u64 = 10;
+const LOCK_OUT: u64 = 60;
 
-struct Attempts {
-    failures: u32,
-    since: std::time::Instant,
-    locked_until: Option<std::time::Instant>,
+fn sign_ins() -> &'static crate::ratelimit::Limiter {
+    static LIMITER: OnceLock<crate::ratelimit::Limiter> = OnceLock::new();
+    LIMITER.get_or_init(|| crate::ratelimit::Limiter::new(LOCK_OUT * 1_000_000_000 / MAX_FAILURES, MAX_FAILURES))
 }
 
-static ATTEMPTS: Mutex<Option<HashMap<Box<str>, Attempts>>> = Mutex::new(None);
-
 /// Seconds `client` is still locked out for, if it is.
-fn locked(client: &str, now: std::time::Instant) -> Option<u64> {
-    let mut table = ATTEMPTS.lock().unwrap_or_else(|p| p.into_inner());
-    let attempts = table.as_mut()?.get(client)?;
-    let until = attempts.locked_until?;
-    (until > now).then(|| (until - now).as_secs_f64().ceil() as u64)
+fn locked(client: &str, now: i64) -> Option<u64> {
+    sign_ins().waiting(client, now)
 }
 
 /// Count a failed sign-in from `client`; true when it has just been locked out.
-fn failed(client: &str, now: std::time::Instant) -> bool {
-    let mut table = ATTEMPTS.lock().unwrap_or_else(|p| p.into_inner());
-    let table = table.get_or_insert_with(HashMap::new);
-    if !table.contains_key(client) && table.len() >= MAX_CLIENTS {
-        table.retain(|_, a| a.locked_until.is_some_and(|u| u > now) || now - a.since < FAILURE_WINDOW);
-        if table.len() >= MAX_CLIENTS {
-            let victim = table.iter().find(|(_, a)| a.locked_until.is_none()).map(|(k, _)| k.clone());
-            match victim {
-                Some(victim) => {
-                    table.remove(&victim);
-                }
-                None => return false,
-            }
+fn failed(client: &str, now: i64) -> bool {
+    match sign_ins().take(client, now) {
+        crate::ratelimit::Decision::Allowed { available: 0, .. } => {
+            sign_ins().lock_out(client, now);
+            true
         }
+        _ => false,
     }
-    let attempts = table.entry(client.into()).or_insert(Attempts { failures: 0, since: now, locked_until: None });
-    if now - attempts.since >= FAILURE_WINDOW || attempts.locked_until.is_some_and(|u| u <= now) {
-        *attempts = Attempts { failures: 0, since: now, locked_until: None };
-    }
-    attempts.failures += 1;
-    if attempts.failures >= MAX_FAILURES && attempts.locked_until.is_none() {
-        attempts.locked_until = Some(now + LOCK_OUT);
-        return true;
-    }
-    false
 }
 
 static WARNED_PLAIN_HTTP: AtomicBool = AtomicBool::new(false);
@@ -1115,7 +1091,7 @@ pub unsafe extern "C-unwind" fn lrt_metrics_authorized(
     handle: i64,
 ) -> i64 {
     let (header, client) = unsafe { (Str::from_raw(header, header_len), Str::from_raw(client, client_len)) };
-    let now = std::time::Instant::now();
+    let now = crate::ratelimit::now();
     if let Some(seconds) = locked(client, now) {
         return -(seconds.max(1) as i64);
     }
@@ -1141,8 +1117,7 @@ pub unsafe extern "C-unwind" fn lrt_metrics_authorized(
         crate::log::write_line(
             "warn",
             &format!(
-                "{MAX_FAILURES} failed sign-ins to the metrics from {client} within a minute; refusing it for {} s",
-                LOCK_OUT.as_secs()
+                "{MAX_FAILURES} failed sign-ins to the metrics from {client} within a minute; refusing it for {LOCK_OUT} s"
             ),
             "",
         );
@@ -1254,7 +1229,8 @@ mod tests {
 
     #[test]
     fn ten_failures_in_a_minute_lock_a_client_out() {
-        let now = std::time::Instant::now();
+        const SECOND: i64 = 1_000_000_000;
+        let now = 1000 * SECOND;
         let client = "192.0.2.77";
         for _ in 0..MAX_FAILURES - 1 {
             assert!(!failed(client, now));
@@ -1262,16 +1238,21 @@ mod tests {
         assert_eq!(locked(client, now), None);
         assert!(failed(client, now), "the tenth failure locks the client out");
         assert_eq!(locked(client, now), Some(60));
-        assert_eq!(locked(client, now + Duration::from_secs(30)), Some(30));
+        assert_eq!(locked(client, now + 30 * SECOND), Some(30));
         assert_eq!(locked("192.0.2.78", now), None, "other clients are not affected");
-        let later = now + Duration::from_secs(61);
+        let later = now + 61 * SECOND;
         assert_eq!(locked(client, later), None);
-        // After the lock-out the count starts again.
-        assert!(!failed(client, later));
+        // A minute after the lock-out the client has one try; another failure locks it again.
+        assert!(failed(client, later));
+        // Two minutes after, it has all ten again.
+        let much_later = later + 120 * SECOND;
+        for _ in 0..MAX_FAILURES - 1 {
+            assert!(!failed(client, much_later));
+        }
         // Failures spread over more than a minute never add up to ten.
         let slow = "192.0.2.79";
-        for i in 0..30u64 {
-            assert!(!failed(slow, now + Duration::from_secs(7 * i)));
+        for i in 0..30 {
+            assert!(!failed(slow, now + 7 * i * SECOND));
         }
     }
 

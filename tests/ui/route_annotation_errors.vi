@@ -65,6 +65,18 @@ impl Api:
     def two_and_a_half_seconds(self) -> str:
         return "ok"
 
+    @http.post("/n", rate_limit="5 per minute")
+    def rate_in_words(self) -> str:
+        return "n"
+
+    @http.post("/o", rate_limit="0/minute")
+    def no_requests_at_all(self) -> str:
+        return "o"
+
+    @http.post("/ok3", rate_limit="5/minute")
+    def five_a_minute(self) -> str:
+        return "ok"
+
     @http.get("/ok", tags=["todos", "admin"], deprecated=True, errors=[409, 404, 404], security=["token", "token"])
     def fine(self) -> str:
         """Everything here is accepted."""

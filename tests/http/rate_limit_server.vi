@@ -1,0 +1,24 @@
+# Rate limits (docs/14, milestone 14) over the wire. Run by crates/lang_cli/tests/rate_limit.rs,
+# which sends 1000 requests at once to a route allowing 50, reads the headers, and sends
+# 400,000 requests with distinct keys to see that memory stays bounded.
+
+import http
+import io
+
+def ok(req: http.Request) -> Result[http.Response]:
+    return http.text("ok")
+
+def main():
+    server = http.Server()
+    # Hardly refilled: 50 requests, then refusals.
+    burst = server.group("/burst")
+    burst.use(http.rate_limit(per_second=0.001, burst=50))
+    burst.get("", ok)
+    # A key per request, from a header.
+    keyed = server.group("/keyed")
+    keyed.use(http.rate_limit(per_second=1.0, burst=5, key=lambda req: req.header("X-Key").unwrap_or("")))
+    keyed.get("", ok)
+    server.post("/login", ok, rate_limit="3/minute")
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()

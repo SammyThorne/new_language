@@ -35,6 +35,11 @@ pub extern "C-unwind" fn lrt_dt_now_ns() -> i64 {
     }
 }
 
+/// The instant `lrt_dt_set_clock` fixed, if it is fixed.
+pub(crate) fn fixed_now() -> Option<i64> {
+    FIXED.load(Ordering::Acquire).then(|| FIXED_NS.load(Ordering::Acquire))
+}
+
 /// Make `now()` return `ns` (when `on` is 1), or the system clock again (0).
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_dt_set_clock(ns: i64, on: i64) {

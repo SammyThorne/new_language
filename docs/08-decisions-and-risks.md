@@ -1243,6 +1243,19 @@ Section 4.10 of docs/14:
 - **`connect_timeout`** is a separate, optional limit inside `timeout`, and timeout errors now name the limit that expired, as section 4.10 asks.
 - **Not done:** `spawn_scoped` (tasks that are also cancelled by a hang-up), and a yield check that would let a timeout interrupt a loop that never waits; `http.check_cancelled()` covers the latter.
 
+### D119. Rate limiting (production web plan, milestone 14)
+
+Section 4.12 of docs/14:
+
+- **The buckets live in the runtime.** `http.rate_limit` is middleware written in the standard library, but the buckets are a Rust table of 64 shards, each a mutex over a map, picked by a hash that is random per limiter (so an attacker cannot aim at one shard). Keeping them in the language would mean a `Mutex[dict]` per shard and a collector that walks 100,000 entries; in Rust a request costs one lock, one lookup and a few floating-point operations, and 1000 simultaneous requests let exactly `burst` through.
+- **The headers follow draft 12 of the IETF RateLimit fields**, which was checked before building, as section 7 asked: `RateLimit-Policy: name;q=..;w=..` and `RateLimit: name;a=..;w=..`. The parameters changed from the `r` and `t` of earlier drafts to `a` (available) and `w` (window), so the older `X-RateLimit-*` headers, decision 12's alternative, are not sent. For a token bucket, `w` in `RateLimit` is the seconds until the bucket is full again, and in `RateLimit-Policy` the seconds a whole burst takes to refill. A refused request gets `Retry-After` in seconds and `a=0` with the same `w`, as the draft suggests.
+- **Memory is bounded without a thread.** A bucket that has refilled to `burst` carries no information, so it can be dropped at any time. Each shard drops those when a request reaches it more than a minute after its last sweep, rather than on a timer. Past the cap of 100,000 keys (1562 a shard), a new key first drops the full buckets, then the eighth of the shard used longest ago, found with a partial sort, so a flood of new keys pays one scan per 195 keys. Keys longer than 128 bytes are kept as a prefix and a hash. Measured over the wire: about 22 MB for the first 100,000 keys, and under 1 MB more for each further 200,000.
+- **The clock** is the monotonic clock, unless `datetime.set_clock_for_tests` has fixed the wall clock; then that. Tests step through a refill without sleeping, and production never sees a wall-clock jump.
+- **A refusal is an error, not a response.** The middleware returns `Err(HttpError(429, ...))` and adds `Retry-After` and the rate headers as error headers (as `http.cors` does), so `server.on_error` shapes the body like any other error. Several limits on one route each add their item to the same headers, as the draft's list syntax allows.
+- **`rate_limit="5/minute"` is checked by the compiler** in annotations and turned into the route's own limiter, named `route`, inside the server's and the group's middleware (so a group's CORS headers reach its 429s). The OpenAPI description lists a 429 for such routes. `server.route` and the verb methods take the same text.
+- **The dashboard's lock-out is a limiter** of 10 a minute. The failure that takes the last token sets the bucket to `1 - burst`, so the next token comes a minute later, as before. Unlike the old table, the count does not start again at once after a lock-out: the client has one try, and all ten a minute after that. The old table held 4096 addresses; the limiter holds 100,000.
+- **Not done:** a shared store for several instances (Redis, Milestone 25), and limits on concurrent requests rather than their rate.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

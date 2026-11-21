@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 13 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 14 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1168,6 +1168,15 @@ Done (D118):
   - Concurrency: no more than `burst` allowed out of 1000 simultaneous requests.
 - **Docs:** docs/05.
 
+Done (D119):
+
+- `http.rate_limit(rate="", per_second=0.0, burst=0, key=None, name="default")`: a token bucket per key in the runtime, over 64 shards; full buckets dropped once a minute per shard; at most 100,000 keys, the longest unused evicted first; long keys hashed.
+- Headers as in draft 12 of the IETF RateLimit fields (checked; it uses `a` and `w`, not the earlier `r` and `t`): `RateLimit-Policy: default;q=40;w=2` and `RateLimit: default;a=37;w=1`. A refusal is a 429 error, so `on_error` applies, with `Retry-After`.
+- `rate_limit="5/minute"` on annotations, checked by the compiler, and on `server.route`, the verb methods and groups; the OpenAPI description lists the 429.
+- The dashboard's lock-out uses a limiter of 10 a minute.
+- The limiter's clock follows `datetime.set_clock_for_tests`.
+- Tests: unit tests in `ratelimit.rs` (burst, refusal and refill on a fixed clock, the lock-out, the key cap, the sweep, long keys, 16 threads against a burst of 50); `tests/run/http_rate_limit.vi` (the same through middleware with a fixed clock, the headers, keys, a route's limit inside the server's, the annotation, `on_error`, OpenAPI); `crates/lang_cli/tests/rate_limit.rs` over the wire (1000 requests at once let exactly 50 through, the headers, and 400,000 distinct keys: memory grew 22 MB for the first 200,000 and under 1 MB for the next); `tests/ui/route_annotation_errors.vi` covers bad rates.
+
 ### Track E: responses
 
 #### Milestone 15: streaming and Server-Sent Events (about 2.5 days)
@@ -1304,7 +1313,7 @@ About 55 days of work through Milestone 22, and 6.5 more for track H:
 - **Several providers and the scheme rename** (Milestone 21) touch the OpenAPI goldens and the compiler's `SIGN_IN_SCHEME`. Keep the `googleSession` alias for one release.
 - **The size of this plan.** At about 60 days it will not be built at once. Each milestone stands alone and is useful by itself, and the order can change (decision 15).
 - **Not verified word for word**, to check before the milestone that relies on each:
-  - The `RateLimit` draft's current header syntax (Milestone 14); it has changed between drafts.
+  - The `RateLimit` draft's current header syntax (Milestone 14); it has changed between drafts. (Checked for Milestone 14: draft 12 uses `a` and `w`.)
   - OTLP/HTTP JSON's encoding rules: hex trace IDs and integer fields as strings (Milestone 10).
   - Microsoft's multi-tenant issuer validation (Milestone 21).
   - GitHub's PKCE support for OAuth apps (Milestone 22).

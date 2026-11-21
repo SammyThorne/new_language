@@ -1,0 +1,85 @@
+# expect: 200 default;q=3;w=2 default;a=2;w=1
+# expect: 200 default;a=1;w=1
+# expect: 200 default;a=0;w=2
+# expect: 429 retry=1 default;a=0;w=1 {"error":"too many requests"}
+# expect: after 0.4s: 429
+# expect: after 0.5s: 200 default;a=0;w=2
+# expect: after 2s more: 200 default;a=2;w=1
+# expect: key bob: 200 default;a=2;w=1
+# expect: route: 200 route;q=2;w=60, default;q=3;w=2 route;a=1;w=30, default;a=2;w=1
+# expect: route: 200
+# expect: route: 429 retry=30 route;q=2;w=60, default;q=3;w=2 route;a=0;w=30, default;a=0;w=2
+# expect: annotated: 200 route;a=0;w=60
+# expect: annotated: 418 retry=60 slow down
+# expect: openapi lists 429: True
+# expect: hourly: hourly;q=3600;w=3600 hourly;a=3599;w=1
+# Rate limits (docs/14, milestone 14) on a fixed test clock: the burst, then a refusal, then
+# the refill; the headers; keys; per-route limits, from `route` and from annotations, inside
+# the server's; and `on_error` applied to the 429.
+
+import datetime
+import http
+
+def ok(req: http.Request) -> Result[http.Response]:
+    return http.text("ok")
+
+@http.post("/annotated", rate_limit="1/minute")
+def annotated() -> Result[str, http.HttpError]:
+    """Once a minute."""
+    return "done"
+
+def header(response: http.Response, name: str) -> str:
+    return response.headers.get(name).unwrap_or("-")
+
+def show(response: http.Response) -> str:
+    if response.status == 429:
+        return f"429 retry={header(response, 'Retry-After')} {header(response, 'RateLimit')} {response.body.strip()}"
+    return f"{response.status} {header(response, 'RateLimit')}"
+
+def main():
+    start = datetime.at(2026, 11, 21, 12)
+    datetime.set_clock_for_tests(Some(start))
+    server = http.Server()
+    server.use(http.rate_limit(per_second=2.0, burst=3, key=lambda req: req.header("X-User").unwrap_or("anonymous")))
+    server.get("/", ok)
+
+    first = server.handle(http.test_request("GET", "/"))
+    print(first.status, header(first, "RateLimit-Policy"), header(first, "RateLimit"))
+    print(show(server.handle(http.test_request("GET", "/"))))
+    print(show(server.handle(http.test_request("GET", "/"))))
+    print(show(server.handle(http.test_request("GET", "/"))))
+    datetime.set_clock_for_tests(Some(start.add(datetime.millis(400))))
+    print("after 0.4s:", server.handle(http.test_request("GET", "/")).status)
+    datetime.set_clock_for_tests(Some(start.add(datetime.millis(500))))
+    print("after 0.5s:", show(server.handle(http.test_request("GET", "/"))))
+    datetime.set_clock_for_tests(Some(start.add(datetime.millis(2500))))
+    print("after 2s more:", show(server.handle(http.test_request("GET", "/"))))
+    print("key bob:", show(server.handle(http.test_request("GET", "/", headers={"X-User": "bob"}))))
+
+    # A route's own limit, inside the server's.
+    other = http.Server()
+    other.use(http.rate_limit(per_second=2.0, burst=3))
+    other.get("/limited", ok, rate_limit="2/minute")
+    response = other.handle(http.test_request("GET", "/limited"))
+    print("route:", response.status, header(response, "RateLimit-Policy"), header(response, "RateLimit"))
+    print("route:", other.handle(http.test_request("GET", "/limited")).status)
+    refused = other.handle(http.test_request("GET", "/limited"))
+    print("route:", refused.status, f"retry={header(refused, 'Retry-After')}", header(refused, "RateLimit-Policy"), header(refused, "RateLimit"))
+
+    # The annotation's short form, and `on_error` for the 429.
+    mounted = http.Server()
+    mounted.mount(annotated)
+    mounted.on_error(lambda req, error: http.text("slow down", status=418 if error.status == 429 else error.status))
+    print("annotated:", show(mounted.handle(http.test_request("POST", "/annotated"))))
+    teapot = mounted.handle(http.test_request("POST", "/annotated"))
+    print("annotated:", teapot.status, f"retry={header(teapot, 'Retry-After')}", teapot.body)
+    spec = mounted.openapi_json()
+    print("openapi lists 429:", "\"429\"" in spec)
+
+    # The `rate` text.
+    hourly = http.Server()
+    hourly.use(http.rate_limit("3600/hour", name="hourly"))
+    hourly.get("/", ok)
+    response = hourly.handle(http.test_request("GET", "/"))
+    print("hourly:", header(response, "RateLimit-Policy"), header(response, "RateLimit"))
+    datetime.set_clock_for_tests(None)

@@ -36,6 +36,7 @@ pub mod overflow;
 pub mod panic;
 pub mod pg;
 pub mod poll;
+pub mod ratelimit;
 pub mod re;
 pub mod static_files;
 pub mod strings;

@@ -46,7 +46,7 @@ error[E0340]: `@http.ws` takes a path and, optionally, `tags=` and `deprecated=`
    |
    = help: for example `@http.ws("/chat")`
 
-error[E0340]: a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=`, `security=`, `max_body=` and `timeout=`
+error[E0340]: a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=`, `security=`, `max_body=`, `timeout=` and `rate_limit=`
   --> tests/ui/route_annotation_errors.vi:32:21
    |
 32 |     @http.get("/g", summary="no such keyword")
@@ -102,4 +102,20 @@ error[E0340]: `timeout=` takes the seconds the handler may run
    |
    = help: for example `timeout=10.0`
 
-error: could not compile `tests/ui/route_annotation_errors.vi` due to 13 errors
+error[E0340]: `rate_limit=` takes how many requests a client may make in a period
+  --> tests/ui/route_annotation_errors.vi:68:22
+   |
+68 |     @http.post("/n", rate_limit="5 per minute")
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^ not a rate such as "5/minute"
+   |
+   = help: for example `rate_limit="5/minute"`; the period is `second`, `minute`, `hour` or `day`
+
+error[E0340]: `rate_limit=` takes how many requests a client may make in a period
+  --> tests/ui/route_annotation_errors.vi:72:22
+   |
+72 |     @http.post("/o", rate_limit="0/minute")
+   |                      ^^^^^^^^^^^^^^^^^^^^^ not a rate such as "5/minute"
+   |
+   = help: for example `rate_limit="5/minute"`; the period is `second`, `minute`, `hour` or `day`
+
+error: could not compile `tests/ui/route_annotation_errors.vi` due to 15 errors

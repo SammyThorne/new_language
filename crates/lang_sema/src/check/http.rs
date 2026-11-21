@@ -171,6 +171,8 @@ pub(super) struct Route {
     pub max_body: Option<i64>,
     /// `timeout=`: the seconds its handler may run.
     pub timeout: Option<f64>,
+    /// `rate_limit=`: how often each client may call it, such as `"5/minute"`.
+    pub rate_limit: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -446,6 +448,7 @@ impl<'m> Checker<'_, 'm> {
         let mut doc = RouteDoc::default();
         let mut max_body = None;
         let mut timeout = None;
+        let mut rate_limit = None;
         for arg in &annotation.args {
             match (&arg.keyword, &arg.value) {
                 (None, ast::AnnotationValue::Str(text)) if path.is_none() => path = Some(text.clone()),
@@ -541,6 +544,18 @@ impl<'m> Checker<'_, 'm> {
                         }
                     }
                 }
+                (Some(k), value) if k.name == "rate_limit" && !ws => match value {
+                    ast::AnnotationValue::Str(text) if valid_rate(text) => rate_limit = Some(text.clone()),
+                    _ => {
+                        self.route_error(
+                            "`rate_limit=` takes how many requests a client may make in a period",
+                            arg.span,
+                            "not a rate such as \"5/minute\"",
+                            Some("for example `rate_limit=\"5/minute\"`; the period is `second`, `minute`, `hour` or `day`"),
+                        );
+                        return None;
+                    }
+                },
                 (Some(k), value) if k.name == "deprecated" => {
                     let ast::AnnotationValue::Bool(flag) = value else {
                         self.route_error(
@@ -582,7 +597,7 @@ impl<'m> Checker<'_, 'm> {
                         if ws {
                             "`@http.ws` takes a path and, optionally, `tags=` and `deprecated=`"
                         } else {
-                            "a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=`, `security=`, `max_body=` and `timeout=`"
+                            "a route annotation takes a path and, optionally, `status=`, `tags=`, `deprecated=`, `errors=`, `security=`, `max_body=`, `timeout=` and `rate_limit=`"
                         },
                         arg.span,
                         "not expected here",
@@ -929,6 +944,11 @@ impl<'m> Checker<'_, 'm> {
             }
         }
         let name = function.name.name.clone();
+        // A rate-limited route can answer 429; say so in its documentation.
+        if rate_limit.is_some() && !doc.errors.contains(&429) {
+            doc.errors.push(429);
+            doc.errors.sort_unstable();
+        }
         Some(Route {
             method,
             path,
@@ -945,6 +965,7 @@ impl<'m> Checker<'_, 'm> {
             doc,
             max_body,
             timeout,
+            rate_limit,
         })
     }
 
@@ -1238,6 +1259,9 @@ impl<'m> Checker<'_, 'm> {
             if let Some(seconds) = route.timeout {
                 limit.push_str(&format!(", timeout={seconds:?}"));
             }
+            if let Some(rate) = &route.rate_limit {
+                limit.push_str(&format!(", rate_limit={rate:?}"));
+            }
             text.push_str(&format!(
                 "    __server.route({:?}, __prefix + {:?}, __route_{index}{limit})\n",
                 route.method, route.path
@@ -1321,6 +1345,16 @@ impl<'m> Checker<'_, 'm> {
 }
 
 /// A function's docstring: its first statement, if that is a plain string.
+/// Whether `text` is a rate such as `5/minute`, as `http.rate_limit` reads it.
+fn valid_rate(text: &str) -> bool {
+    let Some((count, period)) = text.split_once('/') else { return false };
+    let count = count.trim();
+    !count.is_empty()
+        && count.bytes().all(|b| b.is_ascii_digit())
+        && count.parse::<u64>().is_ok_and(|n| (1..1 << 31).contains(&n))
+        && matches!(period.trim(), "second" | "minute" | "hour" | "day")
+}
+
 fn docstring(function: &ast::Function) -> Option<&str> {
     match &function.body.first()?.kind {
         ast::StmtKind::Expr(ast::Expr { kind: ast::ExprKind::Str(text), .. }) => Some(text),
