@@ -35,7 +35,7 @@ COMPILER := target/$(PROFILE)/$(CLI)
 RUNTIME  := target/$(PROFILE)/liblang_rt.a
 
 .DEFAULT_GOAL := build
-.PHONY: build release debug run program test stress lint clippy fmt fmt-check check-deps \
+.PHONY: build release debug run program test stress site-check lint clippy fmt fmt-check check-deps \
 	install link uninstall bench bench-http bench-ws clean help
 
 ## Building
@@ -93,6 +93,9 @@ test: ## Run every test: unit tests, the end-to-end programs, the guide, the HTT
 
 stress: release ## Run the concurrency programs many times: make stress [RUNS=1000]
 	sh tests/stress.sh $(RUNS)
+
+site-check: build ## Compile and run the documentation site's examples, and compare their output
+	$(PYTHON) site/check_examples.py --weby $(COMPILER)
 
 lint: clippy fmt-check ## Run clippy and check the Rust formatting
 

@@ -1,8 +1,10 @@
 # Continuous integration: every push to main and every pull request builds the compiler and
 # runtime, runs every test (unit tests, the tests/run programs in all five modes, the tests/ui
-# golden files, the guide's examples, the HTTP servers) and the lints, and runs the concurrency
-# stress programs. The benchmark checks (bench/run.py --check, bench/http/counts.py --check) are
-# not run here: they compare against numbers recorded on one machine and need pinned cores.
+# golden files, the guide's examples, the HTTP servers) and the lints, checks the examples on the
+# documentation site (site/check_examples.py, once the site is in the repository), and runs the
+# concurrency stress programs. The benchmark checks (bench/run.py --check,
+# bench/http/counts.py --check) are not run here: they compare against numbers recorded on one
+# machine and need pinned cores.
 name: CI
 
 on:
@@ -53,6 +55,10 @@ jobs:
 
       - name: Tests
         run: make test
+
+      - name: Documentation site examples
+        if: hashFiles('site/check_examples.py') != ''
+        run: make site-check PROFILE=debug
 
       - name: Stress the concurrency programs
         run: make stress RUNS=100
