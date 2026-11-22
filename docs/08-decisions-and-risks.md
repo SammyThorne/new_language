@@ -1381,6 +1381,16 @@ Section 4.19 of docs/14:
 - **Tests:** `tests/run/response_cache.vi` (tags, every `If-None-Match` form, other methods, binary bodies, own tags, errors; cache hits, the key, bypasses, what is not kept, size limits, least-recently-used eviction, expiry with a real one-second wait, `cache` with `etag`, and `cache_control`), and a check over a socket that a stack of `compress`, `cache` and `etag` answers a `304` without a body.
 - **Not done:** serving stale responses while revalidating, caching `HEAD` apart from `GET`, honouring the request's `Cache-Control`, and invalidating one entry (the `ttl` and `max_bytes` bound what is stale and large).
 
+### D129. The router's tree of path segments (production web plan, milestone 24)
+
+Section 4.19 of docs/14 said to build a radix tree only if 200 parameterised routes showed the scan costing more than 5% at `/users/42`.
+
+- **Measured first** (`bench/http/routes.py`, `server.vi ... routes200`): the 200 extra routes cost 0.76 µs of a 3.34 µs request, 22.8%, so the tree was built. After it: 0.01 µs, 0.3% (`docs/web-performance.md`, "Many routes").
+- **The tree is one level a segment,** not a character-level radix tree: patterns are already split into segments, and a segment-level tree has the same speed where it matters (the number of routes visited no longer depends on how many there are) with far less code. A node has a map of literal children, one `{name}` child shared by every parameter name, and the routes that end there or take the rest of the path.
+- **Behaviour is unchanged: the first route added that fits and accepts the method wins.** A literal and a `{name}` can both fit, so both branches are searched and the lowest registration index is chosen; this is why `/users/{id}` added before `/users/me` still takes `/users/me`. The tree stores indexes into `routes`, so it is built from the list in `compose`, like the fixed-path map, and the 404/405 answers still scan the list (they are not the fast path).
+- **Tests:** `tests/run/router_tree.vi` has the cases above and 400 random route sets, up to seven routes each with literals, parameters, rests and two methods, compared with a scan written in the test for 34 requests apiece (0 disagreements). `counts.json` is unchanged.
+- **Not done:** a router that prefers the most specific route (that would change which handler a path gets), and compressing chains of literal segments.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

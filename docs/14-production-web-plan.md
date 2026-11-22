@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 23 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 24 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1347,6 +1347,12 @@ Done (D128):
 
 - First, add a 200-route endpoint to `bench/http` and measure it.
 - Build the radix tree only if 4.19's threshold is crossed. Otherwise, record the measurement in docs/web-performance.md and close the milestone.
+
+Done (D129):
+
+- Measured first: 200 extra parameterised routes cost 22.8% of a `GET /users/42` request (0.76 µs of 3.34 µs on one CPU), over the 5% threshold, so the tree was built.
+- `Server` finds routes through a tree of path segments, built in `compose`; with it the 200 routes cost 0.3%. The first-added-wins rule is kept.
+- `bench/http/routes.py`, the `routes200` mode of `bench/http/server.vi`, and `docs/web-performance.md` "Many routes". Tests: `tests/run/router_tree.vi`; counts unchanged.
 
 #### Milestone 25: Redis (about 3 days)
 

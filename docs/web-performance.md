@@ -183,6 +183,17 @@ Handlers do more than the HTTP layer. These are the standard benchmarks in `benc
 
 Viper is ahead of Go on all eight, and 3.7 to 63 times faster than CPython. The weak spot is memory in allocation-heavy programs: `binary_trees` peaks at 65 MB against Go's 40 MB, and `sort` at 149 MB against 75 MB. The cause is object layout, not collection: each object carries an 8-byte header and is rounded to 16-byte granules, and a list of structs holds pointers to them where Go stores the values inline.
 
+## Many routes
+
+The router (docs/14, milestone 24) was a scan of the routes in order. With the plan's worst case, `GET /users/42` behind 210 parameterised routes, `bench/http/routes.py` measured one CPU, 64 connections, best of 5 runs of 4 s:
+
+| Router | 10 routes before | 210 routes before | Cost of the 200 |
+|---|---|---|---|
+| Scan, in order | 2.58 µs per request | 3.34 µs | 0.76 µs, 22.8% of a request |
+| Tree of path segments | 2.55 µs | 2.56 µs | 0.01 µs, 0.3% |
+
+The plan said to build a tree only if the scan cost more than 5% of a request; it cost four times that. Paths that are exactly a route without parameters were already found by a map, and are not slower with either.
+
 ## What these numbers do not cover
 
 - **One machine, loopback, client and server together.** A real network adds latency and its own CPU costs, and production servers have more cores and different caches.
@@ -204,6 +215,10 @@ python3 bench/http/run.py --connections 64,256 --runs 3 --seconds 5
 
 ```bash
 python3 bench/http/one_core.py
+```
+
+```bash
+python3 bench/http/routes.py
 ```
 
 ```bash

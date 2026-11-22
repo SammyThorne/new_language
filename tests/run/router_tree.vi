@@ -1,0 +1,130 @@
+# The router finds a route through a tree of path segments (docs/14, milestone 24); the answer
+# must be the one a scan in registration order gives: the first route the path fits and that
+# accepts the method.
+# expect: first registered wins: user:42 user:me
+# expect: reversed: user:42 me:
+# expect: rest: files: files:a/b files:a
+# expect: methods: get:7 post:7 405 GET, POST 404
+# expect: trailing slash: user:42
+# expect: two deep routes: p1:b p2:c
+# expect: many routes: route 299:5 route 0:5 404
+# expect: random sets agree with a scan: 400 sets, 0 disagreements
+
+import http
+
+def answer(label: str, name: str, req: http.Request) -> Result[http.Response]:
+    value = req.param(name) if name != "" else ""
+    return Ok(http.text(f"{label}:{value}"))
+
+def add(server: http.Server, method: str, pattern: str, label: str, name: str = ""):
+    if method == "POST":
+        server.post(pattern, lambda req: answer(label, name, req))
+    else:
+        server.get(pattern, lambda req: answer(label, name, req))
+
+def ask(server: http.Server, method: str, path: str) -> http.Response:
+    return server.handle(http.test_request(method, path))
+
+def text(server: http.Server, path: str) -> str:
+    r = ask(server, "GET", path)
+    return r.body if r.status == 200 else str(r.status)
+
+# ---- a reference: the scan the router replaced ----------------------------------------------
+
+def parts(path: str) -> list[str]:
+    return [part for part in path.split("/") if part != ""]
+
+def fits_scan(pattern: list[str], path: list[str]) -> bool:
+    for i in range(len(pattern)):
+        part = pattern[i]
+        if part.starts_with("{") and part.ends_with("...}"):
+            return True
+        if i >= len(path):
+            return False
+        if not part.starts_with("{") and part != path[i]:
+            return False
+    return len(path) == len(pattern)
+
+def reference(patterns: list[str], methods: list[str], path: str, method: str) -> str:
+    segments = parts(path)
+    for i in range(len(patterns)):
+        if fits_scan(parts(patterns[i]), segments) and methods[i] == method:
+            return f"route {i}"
+    return "none"
+
+# A small pseudo-random generator, the same on every run.
+def step(state: int) -> int:
+    return (state * 1103515245 + 12345) % 2147483648
+
+def pick(state: int, options: list[str]) -> str:
+    return options[(state // 65536) % len(options)]
+
+def main():
+    ordered = http.Server()
+    add(ordered, "GET", "/users/{id}", "user", "id")
+    add(ordered, "GET", "/users/me", "me")
+    print("first registered wins:", text(ordered, "/users/42"), text(ordered, "/users/me"))
+
+    flipped = http.Server()
+    add(flipped, "GET", "/users/me", "me")
+    add(flipped, "GET", "/users/{id}", "user", "id")
+    print("reversed:", text(flipped, "/users/42"), text(flipped, "/users/me"))
+
+    files = http.Server()
+    add(files, "GET", "/files/{path...}", "files", "path")
+    print("rest:", text(files, "/files"), text(files, "/files/a/b"), text(files, "/files/a"))
+
+    methods = http.Server()
+    add(methods, "GET", "/items/{id}", "get", "id")
+    add(methods, "POST", "/items/{id}", "post", "id")
+    put = ask(methods, "PUT", "/items/7")
+    print("methods:", text(methods, "/items/7"), ask(methods, "POST", "/items/7").body, put.status, put.headers.get_or("Allow", ""), text(methods, "/nothing"))
+    print("trailing slash:", text(ordered, "/users/42/"))
+
+    deep = http.Server()
+    add(deep, "GET", "/a/{x}/c", "p1", "x")
+    add(deep, "GET", "/a/b/{y}", "p2", "y")
+    other = http.Server()
+    add(other, "GET", "/a/b/{y}", "p2", "y")
+    add(other, "GET", "/a/{x}/c", "p1", "x")
+    print("two deep routes:", text(deep, "/a/b/c"), text(other, "/a/b/c"))
+
+    many = http.Server()
+    for i in range(300):
+        add(many, "GET", f"/r{i}/{{id}}", f"route {i}", "id")
+    print("many routes:", text(many, "/r299/5"), text(many, "/r0/5"), text(many, "/r300/5"))
+
+    names = ["a", "b", "c", "{p}", "{q}"]
+    paths = ["/", "/a", "/b", "/d", "/a/b", "/a/c", "/b/a", "/c/d", "/a/b/c", "/a/a/a", "/b/c/a", "/d/d/d", "/a/b/c/d", "/a/b/a/b", "/c/c/c/c", "/a/", "/a/b/"]
+    state = 7
+    disagreements = 0
+    for _ in range(400):
+        server = http.Server()
+        patterns: list[str] = []
+        verbs: list[str] = []
+        for _ in range(7):
+            state = step(state)
+            depth = 1 + (state // 65536) % 3
+            pattern = ""
+            for _level in range(depth):
+                state = step(state)
+                pattern += "/" + pick(state, names)
+            state = step(state)
+            if (state // 65536) % 5 == 0:
+                pattern += "/{r...}"
+            state = step(state)
+            verb = "POST" if (state // 65536) % 3 == 0 else "GET"
+            key = verb + " " + pattern
+            if key in [verbs[i] + " " + patterns[i] for i in range(len(patterns))]:
+                continue
+            add(server, verb, pattern, f"route {len(patterns)}")
+            patterns.append(pattern)
+            verbs.append(verb)
+        for path in paths:
+            for verb in ["GET", "POST"]:
+                r = ask(server, verb, path)
+                got = r.body.partition(":")[0] if r.status == 200 else "none"
+                if got != reference(patterns, verbs, path, verb):
+                    disagreements += 1
+                    print("disagree:", patterns, verbs, verb, path, got)
+    print("random sets agree with a scan: 400 sets,", disagreements, "disagreements")

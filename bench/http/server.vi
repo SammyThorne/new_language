@@ -5,7 +5,7 @@
 #
 # With `observed` after the port, it runs as a production server would: with the access log
 # (`request_log`) and request metrics (`metrics`), for bench/http/counts.py --observed. With
-# `metrics`, only the metrics are on.
+# `metrics`, only the metrics are on. With `routes200`, 200 more parameterised routes come first.
 
 import http
 import io
@@ -86,6 +86,11 @@ def main():
     server.get("/items", items)
     for i in range(10):
         server.get(f"/api/v1/resource{i}/{{id}}", other)
+    if mode == "routes200":
+        # 200 more parameterised routes ahead of `/users/{id}`, for bench/http/routes.py: the
+        # worst case for the router's linear scan (docs/14, milestone 24).
+        for i in range(200):
+            server.get(f"/api/v2/group{i}/{{id}}", other)
     server.mount(user)
     server.mount(order)
     port = server.bind(f"127.0.0.1:{args[1]}").unwrap()

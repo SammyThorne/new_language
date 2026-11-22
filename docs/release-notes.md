@@ -79,6 +79,8 @@ Not yet in a numbered release; `viper --version` still says 1.1.0.
 
 **ETags and response caching** (milestone 23, D128): `server.use(http.etag())` tags `GET` responses with a hash of the body and answers a matching `If-None-Match` with `304`. `server.use(http.cache(datetime.seconds(30)))` keeps `200` responses in memory, bounded in bytes with least-recently-used eviction, never for requests with `Authorization` or `Cookie` unless you give a `key`. `response.cache_control(max_age=..., public=True)` writes the header.
 
+**The router** (milestone 24, D129) finds a route through a tree of path segments. With 200 parameterised routes ahead of the one a request wants, a request cost 23% more with the old scan; it now costs 0.3% more. Which route a path gets does not change: the first one added that fits and accepts the method.
+
 **Signing in with Google** ([plan](13-google-oauth-plan.md), D100 to D104). The new `auth` module signs users in with their Google accounts from the credentials file the Google Cloud console makes, as Passport, Authlib or NextAuth do in other languages:
 
 - `provider.install(server)` adds the login, callback and logout routes and a signed session cookie. It uses the authorization code flow with PKCE, `state` and `nonce`, and checks the ID token's RS256 signature against Google's keys, which are cached.

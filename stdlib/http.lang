@@ -1407,6 +1407,80 @@ def params_of(route: Route, path: list[str]) -> dict[str, str]:
 def accepts(route: Route, method: str) -> bool:
     return route.method == method or (method == "HEAD" and route.method == "GET")
 
+struct RouteNode:
+    """A node of the router's tree of path segments: the routes' patterns, one segment a level,
+    so that finding the route for `/users/42` among hundreds visits a few nodes, not every route."""
+    literals: dict[str, RouteNode]
+    # The child for a `{name}` segment; every name shares it.
+    param: RouteNode?
+    # The routes (indexes into the server's list, ascending) whose pattern ends here, and those
+    # whose `{name...}` here takes whatever is left of the path, including nothing.
+    ends: list[int]
+    rests: list[int]
+
+def build_tree(routes: list[Route]) -> RouteNode:
+    root = RouteNode({}, None, [], [])
+    for index in range(len(routes)):
+        route = routes[index]
+        node = root
+        takes_rest = False
+        for i in range(len(route.kinds)):
+            kind = route.kinds[i]
+            if kind == REST:
+                node.rests.append(index)
+                takes_rest = True
+                break
+            if kind == PARAM:
+                match node.param:
+                    case Some(existing):
+                        node = existing
+                    case None:
+                        made = RouteNode({}, None, [], [])
+                        node.param = Some(made)
+                        node = made
+            else:
+                match node.literals.get(route.names[i]):
+                    case Some(known):
+                        node = known
+                    case None:
+                        fresh = RouteNode({}, None, [], [])
+                        node.literals[route.names[i]] = fresh
+                        node = fresh
+        if not takes_rest:
+            node.ends.append(index)
+    return root
+
+def find_route(node: RouteNode, routes: list[Route], segments: list[str], depth: int, method: str) -> int:
+    """The index of the first route, in the order they were added, that the path fits and that
+    accepts the method; -1 if none. A literal and a `{name}` can both fit, so both are tried."""
+    best = -1
+    for index in node.rests:
+        if accepts(routes[index], method):
+            best = index
+            break
+    if depth == len(segments):
+        for index in node.ends:
+            if accepts(routes[index], method):
+                if best < 0 or index < best:
+                    best = index
+                break
+        return best
+    match node.literals.get(segments[depth]):
+        case Some(by_name):
+            found = find_route(by_name, routes, segments, depth + 1, method)
+            if found >= 0 and (best < 0 or found < best):
+                best = found
+        case None:
+            pass
+    match node.param:
+        case Some(by_value):
+            other = find_route(by_value, routes, segments, depth + 1, method)
+            if other >= 0 and (best < 0 or other < best):
+                best = other
+        case None:
+            pass
+    return best
+
 struct Candidate:
     """A route a path fits, with the parameters it gives."""
     route: Route
@@ -2681,6 +2755,8 @@ pub struct Server:
     # For each path that is exactly a route's pattern without parameters, every route that
     # path fits, in order, with its parameters: worked out once, in `compose`.
     priv fixed: dict[str, list[Candidate]] = {}
+    # Every route in a tree of path segments, for the other paths: worked out once, in `compose`.
+    priv tree: RouteNode = RouteNode({}, None, [], [])
     # The parameters of a request on a route without any, shared by all such requests. Never
     # changed: `params` is only ever replaced, and read.
     priv no_params: dict[str, str] = {}
@@ -2795,11 +2871,12 @@ impl Server:
             case None:
                 pass
         segments = split_path(req.path)
-        for route in self.routes:
-            if fits(route, segments) and accepts(route, req.method):
-                req.params = params_of(route, segments) if route.has_params else self.no_params
-                req.routed(route)
-                return route.handler(req)
+        index = find_route(self.tree, self.routes, segments, 0, req.method)
+        if index >= 0:
+            route = self.routes[index]
+            req.params = params_of(route, segments) if route.has_params else self.no_params
+            req.routed(route)
+            return route.handler(req)
         return self.unrouted(req, [route for route in self.routes if fits(route, segments)])
 
     def unrouted(self, req: Request, fitting: list[Route]) -> Result[Response]:
@@ -2872,6 +2949,7 @@ impl Server:
             case None:
                 pass
         self.build_fixed()
+        self.tree = build_tree(self.routes)
         set_form_limits_raw(self.max_files, self.max_fields, self.max_part_headers, self.upload_dir)
         for route in self.routes:
             seconds = route.timeout if route.timeout > 0.0 else self.timeout
