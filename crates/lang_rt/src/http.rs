@@ -760,6 +760,11 @@ pub struct Request {
     refused: u16,
     /// Temporary files holding large uploads, removed when the request ends.
     uploads: crate::multipart::TempFiles,
+    /// An HTTP/1.0 request: a stream's end is the connection's.
+    http10: bool,
+    /// A streamed response in progress (`http.stream`), and whether there was one.
+    streaming: Option<Box<Streaming>>,
+    streamed: bool,
 }
 
 impl Request {
@@ -1244,6 +1249,9 @@ impl Connection {
             limit: 0,
             refused: 0,
             uploads: crate::multipart::TempFiles(Vec::new()),
+            http10,
+            streaming: None,
+            streamed: false,
         })
     }
 
@@ -1639,6 +1647,10 @@ fn cancelled_request(request: &mut Request, reason: crate::cancel::Reason) {
         metrics::request_failed(metrics::ErrorKind::Timeout);
     }
     if request.upgraded.is_some() {
+        return;
+    }
+    if request.streamed {
+        request.keep_alive = false;
         return;
     }
     // SAFETY: the connection outlives its requests.
@@ -2344,6 +2356,183 @@ fn write_response(
     write_head(out, status, content_type, headers, body.len() as u64, keep_alive);
     if !head && status != 204 && status != 304 {
         out.extend_from_slice(body);
+    }
+}
+
+// ---- streamed responses (docs/14, milestone 15) -----------------------------------------
+
+/// Bytes a stream gathers before it sends them as a chunk.
+const STREAM_BUFFER: usize = 16 * 1024;
+
+/// A response sent as it is written (`http.stream`, `http.sse`).
+struct Streaming {
+    /// `Transfer-Encoding: chunked`; otherwise the body ends when the connection closes.
+    chunked: bool,
+    /// HEAD, 204 or 304: the head only, and writes are dropped.
+    bodiless: bool,
+    /// Written and not yet sent.
+    pending: Vec<u8>,
+    /// The client is gone: writes fail.
+    broken: bool,
+}
+
+/// Send what the stream has gathered, as a chunk, with whatever else waits in the output (the
+/// head, the first time). False once the client is gone.
+fn flush_stream(request: &mut Request) -> bool {
+    // SAFETY: the connection outlives its requests.
+    let connection = unsafe { &mut *request.connection };
+    let Some(stream) = request.streaming.as_mut() else { return false };
+    if stream.broken {
+        return false;
+    }
+    if !stream.pending.is_empty() {
+        request.bytes += stream.pending.len() as u64;
+        if stream.chunked {
+            connection.out.extend_from_slice(format!("{:x}\r\n", stream.pending.len()).as_bytes());
+            connection.out.extend_from_slice(&stream.pending);
+            connection.out.extend_from_slice(b"\r\n");
+        } else {
+            connection.out.extend_from_slice(&stream.pending);
+        }
+        stream.pending.clear();
+        if stream.pending.capacity() > 4 * STREAM_BUFFER {
+            stream.pending = Vec::with_capacity(STREAM_BUFFER);
+        }
+    }
+    request.out_start = 0;
+    if !connection.flush() {
+        stream.broken = true;
+        return false;
+    }
+    true
+}
+
+/// Start a streamed response: its status and headers go out with the first flush. The route's
+/// timeout no longer applies; a hang-up still cancels the handler.
+///
+/// # Safety
+/// `handle` is a live request; the pointer and length pairs describe UTF-8 strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_stream_start(
+    handle: i64,
+    status: i64,
+    content_type: *const u8,
+    content_type_len: i64,
+    headers: *const u8,
+    headers_len: i64,
+) {
+    let content_type = unsafe { Str::from_raw(content_type, content_type_len) };
+    let headers = unsafe { Str::from_raw(headers, headers_len) };
+    let request = unsafe { request(handle) };
+    // SAFETY: the connection outlives the handler call.
+    let out = unsafe { &mut (*request.connection).out };
+    out.truncate(request.out_start);
+    request.stream = None;
+    request.file = None;
+    request.responded = true;
+    request.streamed = true;
+    request.status = status;
+    request.bytes = 0;
+    let bodiless = request.head || status == 204 || status == 304;
+    let chunked = !request.http10 && !bodiless;
+    if bodiless {
+        write_head(out, status, content_type, headers, 0, request.keep_alive);
+    } else {
+        if !chunked {
+            request.keep_alive = false;
+        }
+        let framing = if chunked { "Transfer-Encoding: chunked\r\n" } else { "" };
+        let mut all = String::with_capacity(headers.len() + framing.len());
+        all.push_str(headers);
+        all.push_str(framing);
+        write_stream_head(out, status, content_type, &all, request.keep_alive);
+    }
+    request.streaming =
+        Some(Box::new(Streaming { chunked, bodiless, pending: Vec::with_capacity(STREAM_BUFFER), broken: false }));
+    crate::cancel::clear_deadline();
+}
+
+/// Write to a stream: 0, or -1 once the client is gone.
+///
+/// # Safety
+/// `handle` is a live request with a stream; `data` and `len` describe bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_stream_write(handle: i64, data: *const u8, len: i64) -> i64 {
+    let data: &[u8] = if len <= 0 { &[] } else { unsafe { std::slice::from_raw_parts(data, len as usize) } };
+    let request = unsafe { request(handle) };
+    let Some(stream) = request.streaming.as_mut() else { return -1 };
+    if stream.broken {
+        return -1;
+    }
+    if stream.bodiless || data.is_empty() {
+        return 0;
+    }
+    stream.pending.extend_from_slice(data);
+    if stream.pending.len() >= STREAM_BUFFER && !flush_stream(request) {
+        return -1;
+    }
+    0
+}
+
+/// Send what a stream has gathered now: 0, or -1 once the client is gone.
+///
+/// # Safety
+/// `handle` is a live request with a stream.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_stream_flush(handle: i64) -> i64 {
+    let request = unsafe { request(handle) };
+    if flush_stream(request) { 0 } else { -1 }
+}
+
+/// Whether the client of a stream has gone: 1 or 0.
+///
+/// # Safety
+/// `handle` is a live request.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_stream_closed(handle: i64) -> i64 {
+    let request = unsafe { request(handle) };
+    let broken = request.streaming.as_ref().is_none_or(|s| s.broken);
+    i64::from(broken || request.connection().socket.hung_up())
+}
+
+/// End a stream. With `ok`, what is gathered is sent and the body ends properly; without (the
+/// callback failed), the connection closes with the body cut short, so the client sees that
+/// it is incomplete.
+///
+/// # Safety
+/// `handle` is a live request.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_stream_end(handle: i64, ok: i64) {
+    let request = unsafe { request(handle) };
+    let Some(stream) = request.streaming.as_ref() else { return };
+    if stream.bodiless {
+        request.streaming = None;
+        return;
+    }
+    let (chunked, broken) = (stream.chunked, stream.broken);
+    if ok != 0 && !broken {
+        if flush_stream(request) && chunked {
+            // SAFETY: the connection outlives its requests.
+            let out = unsafe { &mut (*request.connection).out };
+            out.extend_from_slice(b"0\r\n\r\n");
+        }
+    } else if !broken {
+        flush_stream(request);
+    }
+    if ok == 0 || request.streaming.as_ref().is_some_and(|s| s.broken) {
+        request.keep_alive = false;
+    }
+    request.streaming = None;
+}
+
+/// The head of a streamed response: as [`write_head`], without `Content-Length`.
+fn write_stream_head(out: &mut Vec<u8>, status: i64, content_type: &str, headers: &str, keep_alive: bool) {
+    let start = out.len();
+    write_head(out, status, content_type, headers, 0, keep_alive);
+    // Drop the `Content-Length: 0` line write_head adds.
+    let head = &out[start..];
+    if let Some(at) = head.windows(19).position(|w| w == b"Content-Length: 0\r\n") {
+        out.drain(start + at..start + at + 19);
     }
 }
 

@@ -1256,6 +1256,21 @@ Section 4.12 of docs/14:
 - **The dashboard's lock-out is a limiter** of 10 a minute. The failure that takes the last token sets the bucket to `1 - burst`, so the next token comes a minute later, as before. Unlike the old table, the count does not start again at once after a lock-out: the client has one try, and all ten a minute after that. The old table held 4096 addresses; the limiter holds 100,000.
 - **Not done:** a shared store for several instances (Redis, Milestone 25), and limits on concurrent requests rather than their rate.
 
+### D120. Streams and Server-Sent Events (production web plan, milestone 15)
+
+Section 4.11 of docs/14:
+
+- **The body runs after the middleware, on the connection's task.** `http.stream` returns an ordinary `Response` holding the function that writes it; the code that sends responses runs that function instead of writing a body. Middleware therefore sees the response before a byte is sent and can still add headers, and no hand-over like a WebSocket upgrade is needed. Section 4.11 had suggested the upgrade's route; this is simpler, since the connection stays an HTTP connection and can take the next request.
+- **Framing and buffering are in the runtime.** A stream gathers writes in a 16 KiB buffer and sends each full buffer as one chunk through the connection's output; `flush` sends what has gathered. The head is written by the same code as other responses, without `Content-Length`, with `Transfer-Encoding: chunked` over HTTP/1.1. HTTP/1.0 has no chunked encoding, so there the connection closes after the body. Measured: a 1 GiB stream peaks at 12.5 MB of resident memory in total.
+- **A failed stream is cut short.** Once the head has gone, a 500 is impossible. Ending without the last chunk and closing the connection is how HTTP/1.1 says a body is incomplete; clients report it (curl exits with 18). The failure is logged unless the client had gone.
+- **The deadline is cleared when a stream starts.** The route's timeout covers the handler, which usually does the slow work of deciding what to send; a stream runs as long as the client reads. A hang-up still cancels the task, so a stream waiting on a channel ends.
+- **Server-Sent Events are a stream** with the headers decision 4.11 lists, each event flushed. The heartbeat is a task per stream that wakes every `heartbeat` seconds and writes `: ping` if nothing else was written in the last 90% of that, under the stream's mutex, so it never interleaves with an event; it also notices a client that has gone between events. It ends on its next wake after the stream does.
+- **Test requests collect.** `server.handle` runs the function with a stream that keeps what is written, then sets the body (as bytes if it is not UTF-8). There is no connection, so no heartbeat runs and `closed()` is false.
+- **`Response` is no bigger.** A first version added a `streamer` field beside `data`, and `bench/http/counts.py` caught it: 16 more bytes per request on `/plaintext` and `/json`, the next size class (as in D105). Both now share one private field holding an enum, `Data(bytes)` or `Streamed(function)`, so the counts are unchanged; a binary response pays one small allocation more for the enum.
+- **Compression leaves streams alone,** since gzip holds data back until its window fills, which would defeat `flush`.
+- **The dashboard's live mode** is an SSE route beside `data.json`, behind the same password, sending each sample as an event whose id is the sample's number: a browser that reconnects sends it back as `Last-Event-ID` and gets only the samples after it. The page uses `EventSource` and falls back to polling when the stream fails before opening, which `EventSource` reports as closed rather than reconnecting. Checked in the built-in browser: the page runs in live mode, pauses and resumes, and polls when the events route is missing.
+- **Not done:** OpenAPI does not describe streams as `text/event-stream` (section 4.11 asked for it; the route's response type is `http.Response`, so the documentation cannot tell an SSE route from another), and a stream cannot be compressed as it goes.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

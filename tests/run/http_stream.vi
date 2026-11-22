@@ -1,0 +1,59 @@
+# expect: 200 text/csv id,name|1,ada|2,grace|3,linus|
+# expect: compressed: none
+# expect: 200 text/event-stream no-store no
+# expect: event: hello|id: 7|retry: 3000|data: first line|data: second line||: just a comment||data: resumed from 41||
+# expect: binary: 4 bytes, not text: True
+# expect: failed: 200 partial
+# Streams and Server-Sent Events (docs/14, milestone 15) through test requests:
+# `server.handle` runs the stream and gives what it wrote as the body.
+
+import http
+
+def rows(out: http.Stream) -> Result[None]:
+    out.write("id,name\n")?
+    for i, name in enumerate(["ada", "grace", "linus"]):
+        out.write(f"{i + 1},{name}\n")?
+    out.flush()?
+    return Ok(None)
+
+def export(req: http.Request) -> Result[http.Response]:
+    return http.stream(req, rows, content_type="text/csv")
+
+def greet(events: http.Events) -> Result[None]:
+    events.send("first line\nsecond line", event="hello", id="7", retry=3000)?
+    events.comment("just a comment")?
+    match events.last_id():
+        case Some(id):
+            events.send(f"resumed from {id}")?
+        case None:
+            events.send("from the start")?
+    return Ok(None)
+
+def binary(out: http.Stream) -> Result[None]:
+    # Half of a two-byte character: not UTF-8.
+    data = "ab".encode() + "é".encode().slice(0, 1) + "z".encode()
+    out.write_bytes(data)?
+    return Ok(None)
+
+def broken(out: http.Stream) -> Result[None]:
+    out.write("partial")?
+    return Err(http.Error(500, "the export broke"))
+
+def main():
+    server = http.Server()
+    server.use(http.compress(min_size=1))
+    server.get("/export", export)
+    server.get("/events", lambda req: http.sse(req, greet))
+    server.get("/binary", lambda req: http.stream(req, binary))
+    server.get("/broken", lambda req: http.stream(req, broken))
+
+    response = server.handle(http.test_request("GET", "/export", headers={"Accept-Encoding": "gzip"}))
+    print(response.status, response.content_type, response.body.replace("\n", "|"))
+    print("compressed:", response.headers.get("Content-Encoding").unwrap_or("none"))
+    events = server.handle(http.test_request("GET", "/events", headers={"Last-Event-ID": "41"}))
+    print(events.status, events.content_type, events.headers["Cache-Control"], events.headers["X-Accel-Buffering"])
+    print(events.body.replace("\n", "|"))
+    data = server.handle(http.test_request("GET", "/binary")).body_bytes()
+    print(f"binary: {len(data)} bytes, not text: {data.decode() is None}")
+    failed = server.handle(http.test_request("GET", "/broken"))
+    print("failed:", failed.status, failed.body)

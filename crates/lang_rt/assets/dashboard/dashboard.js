@@ -1,11 +1,13 @@
-// The metrics dashboard: polls data.json for the samples it has not seen, and draws the
-// tiles, charts and tables. No libraries; charts are SVG drawn here.
+// The metrics dashboard: follows the server's event stream (or, without one, polls data.json)
+// for the samples it has not seen, and draws the tiles, charts and tables. No libraries;
+// charts are SVG drawn here.
 "use strict";
 (function () {
   const SVG = "http://www.w3.org/2000/svg";
   const KEEP = 720;
   // Against the origin, not the page's address, which may carry a user name and password.
   const dataUrl = new URL(document.body.dataset.data, location.origin).href;
+  const eventsUrl = document.body.dataset.events ? new URL(document.body.dataset.events, location.origin).href : "";
   const $ = (id) => document.getElementById(id);
   let samples = [];
   let last = 0;
@@ -14,6 +16,9 @@
   let range = 300;
   let paused = false;
   let timer = 0;
+  // The live stream while it works; once it fails for good, polling takes over.
+  let source = null;
+  let live = !!eventsUrl && typeof EventSource === "function";
   let sortKey = "requests";
   let sortDir = -1;
   let filter = "";
@@ -362,24 +367,67 @@
     s.classList.toggle("bad", !!bad);
   }
 
+  function apply(d, how) {
+    if (d.last < last) samples = [];
+    for (const s of d.samples) if (!samples.length || s.seq > samples[samples.length - 1].seq) samples.push(s);
+    if (samples.length > KEEP) samples = samples.slice(samples.length - KEEP);
+    last = d.last;
+    interval = d.interval || 5;
+    latest = d;
+    draw();
+    status(how + " " + clock(d.now));
+  }
+
   async function poll() {
     clearTimeout(timer);
     try {
       const response = await fetch(dataUrl + "?since=" + last, { credentials: "same-origin", cache: "no-store" });
       if (!response.ok) throw new Error("HTTP " + response.status);
-      const d = await response.json();
-      if (d.last < last) samples = [];
-      for (const s of d.samples) if (!samples.length || s.seq > samples[samples.length - 1].seq) samples.push(s);
-      if (samples.length > KEEP) samples = samples.slice(samples.length - KEEP);
-      last = d.last;
-      interval = d.interval || 5;
-      latest = d;
-      draw();
-      status("Updated " + clock(d.now));
+      apply(await response.json(), "Updated");
     } catch (error) {
       status("Cannot reach the server (" + error.message + "); retrying", true);
     }
     if (!paused) timer = setTimeout(poll, interval * 1000);
+  }
+
+  // Server-Sent Events: each sample arrives as it is taken. The browser reconnects by itself,
+  // sending the last sample's number as Last-Event-ID; a stream refused outright (an old
+  // server, a proxy that buffers) falls back to polling.
+  function follow() {
+    let opened = false;
+    source = new EventSource(eventsUrl);
+    source.addEventListener("open", () => {
+      opened = true;
+      document.body.dataset.mode = "live";
+    });
+    source.addEventListener("message", (e) => {
+      try {
+        apply(JSON.parse(e.data), "Live,");
+      } catch (error) {
+        status("Unreadable data from the server (" + error.message + ")", true);
+      }
+    });
+    source.addEventListener("error", () => {
+      if (source && source.readyState === EventSource.CLOSED) {
+        source = null;
+        if (!opened) live = false;
+        document.body.dataset.mode = "polling";
+        if (!paused) poll();
+      } else status("Connection lost; reconnecting", true);
+    });
+  }
+
+  function start() {
+    if (live) follow();
+    else poll();
+  }
+
+  function stop() {
+    clearTimeout(timer);
+    if (source) {
+      source.close();
+      source = null;
+    }
   }
 
   // ---- controls ----
@@ -395,9 +443,9 @@
     $("pause").setAttribute("aria-pressed", String(paused));
     $("pause").textContent = paused ? "Resume" : "Pause";
     if (paused) {
-      clearTimeout(timer);
+      stop();
       status("Paused");
-    } else poll();
+    } else start();
   });
   $("route-filter").addEventListener("input", (e) => {
     filter = e.target.value.trim().toLowerCase();
@@ -426,5 +474,5 @@
     cancelAnimationFrame(resizing);
     resizing = requestAnimationFrame(drawCharts);
   });
-  poll();
+  start();
 })();

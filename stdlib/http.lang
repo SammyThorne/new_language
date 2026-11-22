@@ -22,6 +22,7 @@ import datetime
 import json as jsonlib
 import log
 import os
+import time
 import uuid
 
 @extern("lrt_http_listen")
@@ -170,6 +171,21 @@ def cancel_deadline_raw() -> int
 
 @extern("lrt_http_set_route_timeout")
 def set_route_timeout_raw(route: int, nanos: int)
+
+@extern("lrt_stream_start")
+def stream_start_raw(handle: int, status: int, content_type: str, headers: str)
+
+@extern("lrt_stream_write")
+def stream_write_raw(handle: int, data: str) -> int
+
+@extern("lrt_stream_flush")
+def stream_flush_raw(handle: int) -> int
+
+@extern("lrt_stream_closed")
+def stream_closed_raw(handle: int) -> int
+
+@extern("lrt_stream_end")
+def stream_end_raw(handle: int, ok: int)
 
 @extern("lrt_rate_new")
 def rate_new_raw(interval_ns: int, burst: int) -> int
@@ -914,17 +930,24 @@ pub struct Response:
     body: str = ""
     content_type: str = "text/plain; charset=utf-8"
     headers: dict[str, str] = {}
-    # The body of a response made by `http.binary`, sent instead of `body`.
-    priv data: bytes? = None
+    # A body sent instead of `body`. One field for both kinds: a second would move every
+    # response into the next allocation size class (D120).
+    priv raw: RawBody? = None
+
+enum RawBody:
+    # The body of a response made by `http.binary`.
+    Data(data: bytes)
+    # The body of a response made by `http.stream` or `http.sse`, written as it is sent.
+    Streamed(body: def(Stream) -> Result[None])
 
 impl Response:
     def body_bytes(self) -> bytes:
         """The body as sent: the data of a response made by `http.binary`, otherwise `body` in
         UTF-8. For tests."""
-        match self.data:
-            case Some(data):
+        match self.raw:
+            case Some(RawBody.Data(data)):
                 return data
-            case None:
+            case _:
                 return self.body.encode()
 
     def with_header(self, name: str, value: str) -> Response:
@@ -1018,7 +1041,7 @@ pub def json[T: ToJson](value: T, status: int = 200) -> Response:
 pub def binary(data: bytes, content_type: str = "application/octet-stream", status: int = 200) -> Response:
     """A response whose body is any bytes: an image, a download, a binary format."""
     response = Response(status, "", content_type)
-    response.data = data
+    response.raw = RawBody.Data(data)
     return response
 
 pub def error(status: int, message: str) -> Response:
@@ -1221,6 +1244,47 @@ def dashboard_data(req: Request, credentials: int) -> Response:
             pass
     return guarded(Response(200, dashboard_data_raw(since), "application/json"), False, False)
 
+def dashboard_events(req: Request, credentials: int) -> Result[Response]:
+    # The dashboard's live mode: each sample as an event, with its number as the id.
+    match metrics_refusal(req, credentials):
+        case Some(refusal):
+            return Ok(guarded(refusal, False, False))
+        case None:
+            pass
+    response = sse(req, dashboard_feed)?
+    return Ok(guarded(response, False, False))
+
+def json_number(text: str, key: str) -> float:
+    # A number in the dashboard's JSON, which the runtime writes without spaces.
+    marker = f"\"{key}\":"
+    at = text.find(marker)
+    if at < 0:
+        return 0.0
+    rest = text[at + len(marker):]
+    end = 0
+    while end < len(rest) and rest[end:end + 1] in "0123456789.-e":
+        end += 1
+    return float.parse(rest[0:end]).unwrap_or(0.0)
+
+def dashboard_feed(events: Events) -> Result[None]:
+    since = 0
+    match events.last_id():
+        case Some(text):
+            since = int.parse(text).unwrap_or(0)
+        case None:
+            pass
+    first = True
+    while True:
+        data = dashboard_data_raw(since)
+        last = int(json_number(data, "last"))
+        if first or last != since:
+            events.send(data, id=str(last))?
+            since = last
+            first = False
+        # A tenth of the sampling interval: each sample goes out soon after it is taken.
+        interval = json_number(data, "interval")
+        time.sleep(max(0.05, (interval if interval > 0.0 else 5.0) / 10.0))
+
 # How long each readiness check has, in seconds.
 const CHECK_SECONDS = 2.0
 
@@ -1375,7 +1439,7 @@ impl StaticFiles:
                 headers[name] = value
         response = Response(status, "", content_type, headers)
         if req.handle < 0 and len(raw) > end + 1:
-            response.data = raw.slice(end + 1, len(raw))
+            response.raw = RawBody.Data(raw.slice(end + 1, len(raw)))
         return response
 
 # ---- CORS ---------------------------------------------------------------------------------
@@ -1541,6 +1605,263 @@ def find_header(response: Response, name: str) -> str?:
         if key.lower() == lowered:
             return value
     return None
+
+# ---- streams and Server-Sent Events --------------------------------------------------------
+
+def header_text(response: Response) -> str:
+    # A response's extra headers as the runtime takes them: `Name: value` lines.
+    if len(response.headers) == 0:
+        return ""
+    header_lines: list[str] = []
+    for name, value in response.headers.items():
+        if "\n" in value or "\r" in value:
+            # Several values (`add_header`, `set_cookie`): one line each. A line break can
+            # never start a header of another name.
+            for line in value.replace("\r", "").split("\n"):
+                header_lines.append(f"{name}: {line}\r\n")
+        else:
+            header_lines.append(f"{name}: {value}\r\n")
+    return "".join(header_lines)
+
+pub struct StreamClosed:
+    """The client of a stream has gone: writing to it fails with this."""
+    message: str = "the client closed the connection"
+
+impl Error for StreamClosed:
+    def message(self) -> str:
+        return self.message
+
+    def status(self) -> int:
+        return 499
+
+struct StreamState:
+    # False once the stream has ended: the request is gone, and nothing may be written.
+    open: bool
+    # When something was last written, for the heartbeat.
+    written: float
+    # What a test request's stream wrote.
+    collected: bytes
+
+@frozen
+pub struct Stream:
+    """
+    The body of a streamed response, given to the function passed to `http.stream`. What is
+    written is gathered and sent in chunks of 16 KiB; `flush` sends it at once. Writing fails
+    with `StreamClosed` once the client has gone.
+    """
+    priv handle: int
+    priv state: Mutex[StreamState]
+
+impl Stream:
+    def write(self, text: str) -> Result[None, StreamClosed]:
+        """Write text, in UTF-8."""
+        return self.put(text.encode(), text, False)
+
+    def write_bytes(self, data: bytes) -> Result[None, StreamClosed]:
+        """Write bytes."""
+        return self.put(data, "", True)
+
+    def flush(self) -> Result[None, StreamClosed]:
+        """Send what has been written now, instead of when 16 KiB have gathered."""
+        failed = False
+        with self.state.lock() as state:
+            if not state.open:
+                failed = True
+            elif self.handle >= 0:
+                failed = stream_flush_raw(self.handle) < 0
+        if failed:
+            return Err(StreamClosed())
+        return Ok(None)
+
+    def closed(self) -> bool:
+        """Whether the client has gone (or the stream has ended)."""
+        result = False
+        with self.state.lock() as state:
+            result = not state.open or (self.handle >= 0 and stream_closed_raw(self.handle) == 1)
+        return result
+
+    priv def put(self, data: bytes, text: str, binary: bool) -> Result[None, StreamClosed]:
+        failed = False
+        with self.state.lock() as state:
+            if not state.open:
+                failed = True
+            elif self.handle < 0:
+                state.collected = state.collected + data
+            else:
+                written = 0
+                if binary:
+                    written = stream_write_raw(self.handle, __bytes_data(data))
+                else:
+                    written = stream_write_raw(self.handle, text)
+                failed = written < 0
+                state.written = time.monotonic()
+        if failed:
+            return Err(StreamClosed())
+        return Ok(None)
+
+    priv def ping(self, every: float) -> bool:
+        # The heartbeat: a comment if nothing was sent for `every` seconds. False once the
+        # stream has ended.
+        going = True
+        with self.state.lock() as state:
+            if not state.open:
+                going = False
+            elif time.monotonic() - state.written >= every * 0.9:
+                going = stream_write_raw(self.handle, ": ping\n\n") == 0 and stream_flush_raw(self.handle) == 0
+                state.written = time.monotonic()
+        return going
+
+    priv def end(self):
+        with self.state.lock() as state:
+            state.open = False
+
+def new_stream(handle: int) -> Stream:
+    return Stream(handle, Mutex(StreamState(True, time.monotonic(), "".encode())))
+
+pub def stream(req: Request, body: def(Stream) -> Result[None], content_type: str = "application/octet-stream", status: int = 200) -> Result[Response]:
+    """
+    A response sent while `body` writes it, for exports, logs and anything too large to hold:
+
+        def export(req: http.Request) -> Result[http.Response]:
+            return http.stream(req, lambda out: write_rows(db, out), content_type="text/csv")
+
+        def write_rows(db: postgres.Db, out: http.Stream) -> Result[None]:
+            for row in db.query("select ...")?:
+                out.write(row.str("line")?)?
+            return Ok(None)
+
+    `body` runs after the middleware, once the status and headers are settled; they are sent
+    with the first chunk. Over HTTP/1.1 the body is chunked; over HTTP/1.0 it ends when the
+    connection closes. If `body` returns an error, the connection is closed with the body cut
+    short, so the client knows it is incomplete. A stream is not compressed, and the route's
+    `timeout` stops applying once it starts. In tests, `server.handle(http.test_request(...))`
+    runs `body` and gives what it wrote as the response's body.
+    """
+    return Ok(Response(status, "", content_type, {}, RawBody.Streamed(body)))
+
+def send_stream(req: Request, response: Response, headers: str, body: def(Stream) -> Result[None]):
+    # Run a streamed response's body on the connection.
+    stream_start_raw(req.handle, response.status, response.content_type, headers)
+    out = new_stream(req.handle)
+    ok = 1
+    match body(out):
+        case Ok(_):
+            pass
+        case Err(problem):
+            ok = 0
+            if not out.closed():
+                log.error(f"{req.method} {req.path}: the stream failed: {problem.message()}")
+    out.end()
+    stream_end_raw(req.handle, ok)
+
+def collect_stream(response: Response):
+    # A test request's streamed response: run its body, and keep what it wrote.
+    match response.raw:
+        case Some(RawBody.Streamed(body)):
+            out = new_stream(-1)
+            match body(out):
+                case Ok(_):
+                    pass
+                case Err(problem):
+                    log.error(f"the stream failed: {problem.message()}")
+            out.end()
+            data = "".encode()
+            with out.state.lock() as state:
+                data = state.collected
+            match data.decode():
+                case Some(text):
+                    response.body = text
+                case None:
+                    response.raw = RawBody.Data(data)
+                    return
+            response.raw = None
+        case _:
+            pass
+
+@frozen
+pub struct Events:
+    """
+    A Server-Sent Events stream, given to the function passed to `http.sse`. Each `send`
+    reaches the browser's `EventSource` at once.
+    """
+    priv out: Stream
+    priv last: str?
+
+impl Events:
+    def send(self, data: str, event: str = "", id: str = "", retry: int = 0) -> Result[None, StreamClosed]:
+        """Send an event: `data` (several lines become several `data:` lines, joined again by
+        the browser), with an optional `event` type, an `id` the browser sends back as
+        `Last-Event-ID` when it reconnects, and `retry`, the milliseconds it waits before
+        reconnecting."""
+        if "\n" in event or "\r" in event:
+            panic(f"an event type cannot hold a line break: {event!r}")
+        if "\n" in id or "\r" in id or "\0" in id:
+            panic(f"an event id cannot hold a line break or NUL: {id!r}")
+        lines: list[str] = []
+        if event != "":
+            lines.append(f"event: {event}\n")
+        if id != "":
+            lines.append(f"id: {id}\n")
+        if retry > 0:
+            lines.append(f"retry: {retry}\n")
+        for line in data.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            lines.append(f"data: {line}\n")
+        lines.append("\n")
+        self.out.write("".join(lines))?
+        return self.out.flush()
+
+    def comment(self, text: str) -> Result[None, StreamClosed]:
+        """Send a comment line, which the browser ignores."""
+        for line in text.replace("\r", "\n").split("\n"):
+            self.out.write(f": {line}\n")?
+        self.out.write("\n")?
+        return self.out.flush()
+
+    def last_id(self) -> str?:
+        """The `Last-Event-ID` the browser sent on reconnecting: the id of the last event it
+        received, to carry on from."""
+        return self.last
+
+    def closed(self) -> bool:
+        """Whether the client has gone."""
+        return self.out.closed()
+
+pub def sse(req: Request, handler: def(Events) -> Result[None], heartbeat: float = 15.0) -> Result[Response]:
+    """
+    A Server-Sent Events stream, which a browser reads with `new EventSource(url)`:
+
+        def updates(req: http.Request) -> Result[http.Response]:
+            return http.sse(req, lambda events: follow(feed, events))
+
+        def follow(feed: Channel[str], events: http.Events) -> Result[None]:
+            for update in feed:
+                events.send(update, event="update")?
+            return Ok(None)
+
+    The response is `text/event-stream`, never cached or buffered by proxies (`Cache-Control:
+    no-store`, `X-Accel-Buffering: no`). A comment is sent after `heartbeat` seconds without an
+    event, so proxies keep the connection open; 0 sends none. When the client goes,
+    `events.send` fails, `events.closed()` is true, and waits in the handler end early.
+    """
+    last = req.header("Last-Event-ID")
+    every = heartbeat
+    response = stream(req, lambda out: run_events(out, handler, last, every), content_type="text/event-stream")?
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Accel-Buffering"] = "no"
+    return Ok(response)
+
+def run_events(out: Stream, handler: def(Events) -> Result[None], last: str?, every: float) -> Result[None]:
+    # The headers go at once, so the browser knows the stream is open.
+    out.flush()?
+    if every > 0.0 and out.handle >= 0:
+        spawn heartbeat(out, every)
+    return handler(Events(out, last))
+
+def heartbeat(out: Stream, every: float):
+    while True:
+        time.sleep(every)
+        if not out.ping(every):
+            return
 
 # ---- rate limiting -------------------------------------------------------------------------
 
@@ -1725,16 +2046,22 @@ impl Compression:
         status = response.status
         if status < 200 or status == 204 or status == 206 or status == 304:
             return
+        match response.raw:
+            case Some(RawBody.Streamed(_)):
+                # Sent as it is written; compressing would hold it back.
+                return
+            case _:
+                pass
         match find_header(response, "Content-Encoding"):
             case Some(_):
                 return
             case None:
                 pass
         size = len(response.body)
-        match response.data:
-            case Some(data):
+        match response.raw:
+            case Some(RawBody.Data(data)):
                 size = len(data)
-            case None:
+            case _:
                 pass
         if size == 0:
             return
@@ -1755,7 +2082,7 @@ impl Compression:
                     return
             case None:
                 pass
-        response.data = __bytes(gzip_raw(__bytes_data(response.body_bytes()), self.level))
+        response.raw = RawBody.Data(__bytes(gzip_raw(__bytes_data(response.body_bytes()), self.level)))
         response.body = ""
         response.headers["Content-Encoding"] = "gzip"
         add_vary(response, "Accept-Encoding")
@@ -2022,6 +2349,8 @@ impl Server:
         handler = self.compose()
         match handler(req):
             case Ok(response):
+                if req.handle < 0:
+                    collect_stream(response)
                 return response
             case Err(problem):
                 status = problem.status()
@@ -2097,20 +2426,12 @@ impl Server:
             response = server.handle(req)
             # The runtime writes the status line, `Content-Type` and its own headers straight
             # into the response; only extra headers need a string here.
-            headers = ""
-            if len(response.headers) > 0:
-                header_lines: list[str] = []
-                for name, value in response.headers.items():
-                    if "\n" in value or "\r" in value:
-                        # Several values (`add_header`, `set_cookie`): one line each. A line
-                        # break can never start a header of another name.
-                        for line in value.replace("\r", "").split("\n"):
-                            header_lines.append(f"{name}: {line}\r\n")
-                    else:
-                        header_lines.append(f"{name}: {value}\r\n")
-                headers = "".join(header_lines)
-            match response.data:
-                case Some(data):
+            headers = header_text(response)
+            match response.raw:
+                case Some(RawBody.Streamed(body)):
+                    send_stream(req, response, headers, body)
+                    return
+                case Some(RawBody.Data(data)):
                     respond_raw(handle, response.status, response.content_type, headers, __bytes_data(data))
                 case None:
                     respond_raw(handle, response.status, response.content_type, headers, response.body)
@@ -2178,6 +2499,7 @@ impl Server:
         self.special_route(board + "/dashboard.css", lambda req: Ok(dashboard_file(req, credentials, style)), UNMETERED)
         self.special_route(board + "/dashboard.js", lambda req: Ok(dashboard_file(req, credentials, script)), UNMETERED)
         self.special_route(board + "/data.json", lambda req: Ok(dashboard_data(req, credentials)), UNMETERED)
+        self.special_route(board + "/events", lambda req: dashboard_events(req, credentials), UNMETERED)
 
     def health(self, live: str = "/healthz", ready: str = "/readyz", checks: dict[str, def() -> Result[None]] = {}):
         """

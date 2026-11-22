@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 14 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 15 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1190,6 +1190,16 @@ Done (D119):
   - SSE parsing in the built-in browser's `EventSource` (the dashboard).
   - `test_request` collecting a stream.
 - **Docs:** docs/05, and a site section.
+
+Done (D120):
+
+- `http.stream(req, body, content_type=..., status=200)` and `http.Stream` (`write`, `write_bytes`, `flush`, `closed`): chunked over HTTP/1.1, ended by closing over HTTP/1.0, 16 KiB buffering, the body cut short when the function fails. The function runs after the middleware.
+- `http.sse(req, handler, heartbeat=15.0)` and `http.Events` (`send` with `event`, `id` and `retry`; `comment`; `last_id`; `closed`), a `: ping` heartbeat, and `http.StreamClosed` once the client has gone.
+- Streams are left out of `http.compress`, and the route's timeout stops when a stream starts; a hang-up still cancels it.
+- `server.handle(http.test_request(...))` runs the stream and gives what it wrote as the body.
+- The metrics dashboard follows `path + "/dashboard/events"` with `EventSource`, resuming by sample number, and polls `data.json` when the stream fails.
+- Not done: `text/event-stream` in the OpenAPI document (D120).
+- Tests: `tests/run/http_stream.vi` (collection, no compression, the SSE format, `Last-Event-ID`, binary data, a failed stream); `crates/lang_cli/tests/stream.rs` over the wire (chunked framing checked chunk by chunk and read by the language's client; 1 GiB with a peak of 12.5 MB resident; events and heartbeats noticing a hang-up; a stream outliving its route's 0.3 s timeout; a failed stream without its last chunk; HTTP/1.0; the dashboard's events resuming after `Last-Event-ID`). The dashboard checked in the built-in browser: live mode, pause and resume, and the fallback to polling.
 
 #### Milestone 16: templates (about 4 days)
 

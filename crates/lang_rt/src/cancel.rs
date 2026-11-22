@@ -223,6 +223,17 @@ pub(crate) fn set_timeout(nanos: u64) {
     watch(fiber, deadline);
 }
 
+/// The running task has no deadline any more: a streamed response, which runs as long as the
+/// client listens. A cancellation that already happened stands.
+pub(crate) fn clear_deadline() {
+    let Some(fiber) = fiber::current() else { return };
+    let state = state(fiber);
+    if state.slot.get() != NOT_WATCHED {
+        unwatch(fiber);
+    }
+    state.deadline.set(0);
+}
+
 /// A handler is about to run on the running task's connection: from now a hang-up cancels it.
 /// `hung_up` says whether the client has hung up already.
 #[inline]

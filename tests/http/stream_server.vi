@@ -1,0 +1,91 @@
+# Streams and Server-Sent Events (docs/14, milestone 15) over the wire. Run by
+# crates/lang_cli/tests/stream.rs, which reads chunked bodies, a 1 GiB stream, events,
+# heartbeats and HTTP/1.0 streams, and hangs up in the middle of streams.
+
+import http
+import io
+import time
+
+@frozen
+struct State:
+    # What streams saw when they ended, for `/log`.
+    log: Channel[str]
+
+def rows(out: http.Stream) -> Result[None]:
+    for i in range(1000):
+        out.write(f"row {i}\n")?
+    return Ok(None)
+
+# `mib` MiB in writes of 64 KiB.
+def big(req: http.Request) -> Result[http.Response]:
+    mib = http.query_int(req, "mib").unwrap_or(1)
+    block = "x" * 65536
+    def body(out: http.Stream) -> Result[None]:
+        for _ in range(mib * 16):
+            out.write(block)?
+        return Ok(None)
+    return http.stream(req, body)
+
+# Ticks until the client goes, then says how it ended.
+def ticks(events: http.Events, state: State) -> Result[None]:
+    count = 0
+    while True:
+        match events.send(f"tick {count}", id=str(count)):
+            case Ok(_):
+                count += 1
+            case Err(_):
+                state.log.send(f"ticker stopped after a failed send, closed={events.closed()}")
+                return Ok(None)
+        time.sleep(0.05)
+
+# Waits for a hang-up without sending anything but heartbeats.
+def quiet(events: http.Events, state: State) -> Result[None]:
+    started = time.monotonic()
+    while not events.closed() and time.monotonic() - started < 10.0:
+        time.sleep(0.05)
+    state.log.send(f"quiet ended, closed={events.closed()}")
+    return Ok(None)
+
+def slow_rows(out: http.Stream) -> Result[None]:
+    for i in range(10):
+        out.write(f"slow {i}\n")?
+        out.flush()?
+        time.sleep(0.1)
+    return Ok(None)
+
+def broken(out: http.Stream) -> Result[None]:
+    out.write("partial\n")?
+    out.flush()?
+    return Err(http.Error(500, "the export broke"))
+
+def fetch_self(req: http.Request) -> Result[http.Response]:
+    port = req.query("port").unwrap_or("0")
+    response = http.fetch("GET", f"http://127.0.0.1:{port}/rows")?
+    text = response.text()?
+    return http.text(f"{response.status} {len(text.split_lines())} lines, last {text.split_lines()[999]}")
+
+def log(req: http.Request, state: State) -> Result[http.Response]:
+    for _ in range(100):
+        match state.log.try_recv():
+            case Some(line):
+                return http.text(line)
+            case None:
+                time.sleep(0.05)
+    return http.text("nothing")
+
+def main():
+    state = State(Channel[str](16))
+    server = http.Server()
+    server.use(http.compress(min_size=1))
+    server.get("/rows", lambda req: http.stream(req, rows, content_type="text/plain"))
+    server.get("/big", big)
+    server.get("/ticks", lambda req: http.sse(req, lambda events: ticks(events, state)))
+    server.get("/quiet", lambda req: http.sse(req, lambda events: quiet(events, state), heartbeat=0.2))
+    server.get("/slow", lambda req: http.stream(req, slow_rows), timeout=0.3)
+    server.get("/broken", lambda req: http.stream(req, broken))
+    server.get("/fetch", fetch_self)
+    server.get("/log", lambda req: log(req, state))
+    server.metrics(public=True)
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()
