@@ -1,0 +1,39 @@
+# A server with a queue and a schedule, for crates/lang_cli/tests/jobs.rs: after SIGTERM the
+# running job finishes, the queued ones are dropped (and counted in the log), and the schedule
+# starts nothing more.
+
+import datetime
+import http
+import io
+import jobs
+import log
+import time
+
+@frozen
+struct Item:
+    n: int
+
+def handle(item: Item) -> Result[None]:
+    time.sleep(0.6)
+    log.warn(f"handled {item.n}")
+    return Ok(None)
+
+def tick(runs: Atomic) -> Result[None]:
+    runs.increment()
+    return Ok(None)
+
+def main():
+    queue = jobs.queue[Item](handle, name="work")
+    runs = Atomic(0)
+    _ = jobs.every(datetime.millis(50), lambda: tick(runs))
+    server = http.Server()
+    server.post("/enqueue", lambda req: enqueue(queue, int.parse(req.query("n").unwrap_or("0")).unwrap_or(0)))
+    server.get("/runs", lambda req: Ok(http.text(str(runs.get()))))
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()
+    log.warn(f"schedule ran {runs.get() > 0}")
+
+def enqueue(queue: jobs.Queue[Item], n: int) -> Result[http.Response]:
+    queue.submit(Item(n))?
+    return Ok(http.text("queued"))

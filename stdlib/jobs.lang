@@ -1,0 +1,574 @@
+"""
+Background work inside the program: jobs that run on a schedule, and a queue of work done by
+a few tasks at a time.
+
+    import datetime
+    import jobs
+
+    jobs.every(datetime.minutes(5), refresh_feed)
+    jobs.cron("0 3 * * *", prune_old, zone="Europe/London")
+
+    mail = jobs.queue(send_email, workers=4, retries=3, backoff=datetime.seconds(10))
+    mail.submit(Email(to="ada@example.com")).unwrap()
+
+A job is a function that takes nothing and returns `Result[None]`; an `Err` is logged and
+counted as a failure. A schedule runs one job at a time: a run that is still going when the next
+is due makes that one be skipped, and the skip is logged. After SIGTERM (or `server.stop`) no new
+job starts, and the server waits up to ten seconds for the running ones. Queues live in memory,
+so what is waiting when the program stops is lost, and the log says how much.
+The full description is in docs/05 ("Jobs and schedules").
+"""
+
+import crypto
+import datetime
+import log
+import metrics
+import time
+import trace
+
+@extern("lrt_jobs_stopping")
+def stopping_raw() -> int
+
+@extern("lrt_jobs_running")
+def running_raw(delta: int) -> int
+
+pub struct JobError:
+    """A schedule or queue that cannot be made, or work that was refused."""
+    reason: str
+    full: bool = False
+
+impl Error for JobError:
+    def message(self) -> str:
+        return self.reason
+
+    def status(self) -> int:
+        if self.full:
+            return 503
+        return 500
+
+impl Display for JobError:
+    def to_str(self) -> str:
+        return self.reason
+
+# ---- cron ---------------------------------------------------------------------------------
+
+@frozen
+pub struct Cron:
+    """A parsed five-field cron expression: minute, hour, day of month, month, day of week."""
+    text: str
+    minutes: tuple[bool, ...]
+    hours: tuple[bool, ...]
+    days: tuple[bool, ...]
+    months: tuple[bool, ...]
+    weekdays: tuple[bool, ...]
+    any_day: bool
+    any_weekday: bool
+
+def number_of(word: str, names: list[str], first: int) -> int?:
+    lower = word.lower()
+    for i in range(len(names)):
+        if names[i] == lower:
+            return Some(first + i)
+    match int.parse(word):
+        case Ok(n):
+            return Some(n)
+        case Err(_):
+            return None
+
+def parse_field(text: str, low: int, high: int, names: list[str], first: int, what: str) -> Result[list[bool]]:
+    """The values a field names, as a list indexed by value."""
+    out: list[bool] = [False for _ in range(high + 1)]
+    for part in text.split(","):
+        if part == "":
+            return Err(JobError(f"the {what} field `{text}` has an empty item"))
+        range_text, slash, step_text = part.partition("/")
+        step = 1
+        if slash == "/":
+            match int.parse(step_text):
+                case Ok(n):
+                    step = n
+                case Err(_):
+                    return Err(JobError(f"the step `{step_text}` in the {what} field is not a number"))
+            if step < 1:
+                return Err(JobError(f"the step in the {what} field must be at least 1"))
+        start = low
+        end = high
+        if range_text != "*":
+            from_text, dash, to_text = range_text.partition("-")
+            match number_of(from_text, names, first):
+                case Some(n):
+                    start = n
+                case None:
+                    return Err(JobError(f"`{from_text}` in the {what} field is not a value"))
+            if dash == "-":
+                match number_of(to_text, names, first):
+                    case Some(n):
+                        end = n
+                    case None:
+                        return Err(JobError(f"`{to_text}` in the {what} field is not a value"))
+            else:
+                if slash == "":
+                    end = start
+        if start > end and start >= low and end <= high:
+            return Err(JobError(f"`{part}` in the {what} field is a range that ends before it starts"))
+        if start < low or end > high:
+            return Err(JobError(f"`{part}` in the {what} field is outside {low} to {high}"))
+        v = start
+        while v <= end:
+            out[v] = True
+            v += step
+    return Ok(out)
+
+def expand_name(text: str) -> str:
+    if text == "@hourly":
+        return "0 * * * *"
+    if text == "@daily" or text == "@midnight":
+        return "0 0 * * *"
+    if text == "@weekly":
+        return "0 0 * * 0"
+    if text == "@monthly":
+        return "0 0 1 * *"
+    if text == "@yearly" or text == "@annually":
+        return "0 0 1 1 *"
+    return text
+
+pub def parse_cron(expression: str) -> Result[Cron]:
+    """Five fields: minute (0-59), hour (0-23), day of month (1-31), month (1-12 or `jan`),
+    day of week (0-7 or `sun`; 0 and 7 are Sunday). Each is `*`, a value, a range `a-b`, a step
+    `*/n` or `a-b/n`, or a comma-separated list of these. `@hourly`, `@daily`, `@weekly`,
+    `@monthly` and `@yearly` are shorthands. When both day fields are restricted, a day
+    matching either runs, as in cron."""
+    fields = expand_name(expression.strip()).split()
+    if len(fields) != 5:
+        return Err(JobError(f"`{expression}` has {len(fields)} fields; a cron expression has 5: minute hour day month weekday"))
+    minutes = parse_field(fields[0], 0, 59, [], 0, "minute")?
+    hours = parse_field(fields[1], 0, 23, [], 0, "hour")?
+    days = parse_field(fields[2], 1, 31, [], 1, "day of month")?
+    months = parse_field(fields[3], 1, 12, ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1, "month")?
+    sundays = parse_field(fields[4], 0, 7, ["sun", "mon", "tue", "wed", "thu", "fri", "sat"], 0, "day of week")?
+    # The days of the week as `datetime` counts them: Monday is 0.
+    weekdays: list[bool] = [False for _ in range(7)]
+    for d in range(8):
+        if sundays[d]:
+            weekdays[(d + 6) % 7] = True
+    return Ok(Cron(expression, tuple(minutes), tuple(hours), tuple(days), tuple(months), tuple(weekdays), fields[2].starts_with("*"), fields[4].starts_with("*")))
+
+def day_matches(c: Cron, d: datetime.Date) -> bool:
+    if not c.months[d.month()]:
+        return False
+    by_day = c.days[d.day()]
+    by_weekday = c.weekdays[d.weekday()]
+    if c.any_day and c.any_weekday:
+        return True
+    if c.any_day:
+        return by_weekday
+    if c.any_weekday:
+        return by_day
+    return by_day or by_weekday
+
+def gap_end(candidate: datetime.DateTime, zone: datetime.Zone) -> datetime.DateTime:
+    """The first instant after the clocks jumped forward over a wall-clock time that does not
+    exist, given the instant `datetime.at` moved it to."""
+    after = zone.offset_at(candidate)
+    low = candidate.unix() - 86400
+    high = candidate.unix()
+    # The offset changed somewhere between a day before and the candidate: find where.
+    while high - low > 1:
+        middle = (low + high) // 2
+        if zone.offset_at(datetime.from_unix(middle)) == after:
+            high = middle
+        else:
+            low = middle
+    return datetime.from_unix(high)
+
+impl Cron:
+    def next_after(self, t: datetime.DateTime, zone: datetime.Zone) -> Result[datetime.DateTime]:
+        """The first run strictly after `t`, with the fields read as wall-clock time in `zone`.
+        A wall-clock time the clocks skip (spring forward) runs at the first instant after the
+        gap; one that happens twice (fall back) runs once, the first time."""
+        start = t.to_zone(zone)
+        day = start.date()
+        hour = start.hour()
+        minute = start.minute() + 1
+        if minute == 60:
+            minute = 0
+            hour += 1
+        if hour == 24:
+            hour = 0
+            day = day.add_days(1)
+        # Eight years cover every expression that can ever match, Feb 29 included.
+        for _ in range(2922):
+            if day_matches(self, day):
+                for h in range(hour, 24):
+                    if self.hours[h]:
+                        first = 0
+                        if h == hour:
+                            first = minute
+                        for m in range(first, 60):
+                            if self.minutes[m]:
+                                found = datetime.at(day.year(), day.month(), day.day(), h, m, 0, 0, zone)
+                                local = found.to_zone(zone)
+                                if local.hour() != h or local.minute() != m:
+                                    found = gap_end(found, zone)
+                                if found > t:
+                                    return Ok(found)
+            day = day.add_days(1)
+            hour = 0
+            minute = 0
+        return Err(JobError(f"`{self.text}` never matches a day"))
+
+pub def next_run(expression: str, after: datetime.DateTime, zone: str = "UTC") -> Result[datetime.DateTime]:
+    """When `expression` next runs after `after`, in a time zone by name (`"Europe/London"`)."""
+    cron = parse_cron(expression)?
+    match datetime.zone(zone):
+        case Ok(z):
+            return cron.next_after(after, z)
+        case Err(_):
+            return Err(JobError(f"unknown time zone `{zone}`"))
+
+# ---- schedules ----------------------------------------------------------------------------
+
+def nanos_of(t: datetime.DateTime) -> int:
+    return t.unix() * 1_000_000_000 + t.nanosecond()
+
+def instant(ns: int) -> datetime.DateTime:
+    return datetime.from_unix(ns // 1_000_000_000, ns % 1_000_000_000)
+
+@frozen
+struct Timetable:
+    """What a schedule shares with the task that runs it: when it is due, and how it went."""
+    name: str
+    interval_ns: int
+    cron: Cron?
+    zone: datetime.Zone
+    due: Atomic
+    stopped: Atomic
+    runs: Atomic
+    skipped: Atomic
+    failures: Atomic
+    ids: Atomic
+
+def run_job(name: str, id: str, job: def() -> Result[None]) -> bool:
+    """One run: counted as running (the server waits for it), logged, and traced."""
+    running_raw(1)
+    logger = log.with_fields({"job": id})
+    logger.info(f"job {name} started")
+    ok = True
+    with trace.span(f"job {name}", {"job.id": id}) as span:
+        match job():
+            case Ok(_):
+                pass
+            case Err(problem):
+                span.fail(problem.message())
+                logger.error(f"job {name} failed: {problem.message()}")
+                ok = False
+    if ok:
+        logger.info(f"job {name} finished")
+    running_raw(-1)
+    return ok
+
+impl Timetable:
+    def next_due(self, after: datetime.DateTime) -> datetime.DateTime:
+        """The first run after `after`: a multiple of the interval from the last due time, or
+        the next cron time."""
+        match self.cron:
+            case Some(c):
+                match c.next_after(after, self.zone):
+                    case Ok(t):
+                        return t
+                    case Err(_):
+                        # An expression that never matches: look again in a day.
+                        return after.add(datetime.days(1))
+            case None:
+                return after.add(datetime.nanos(self.interval_ns))
+
+    def tick(self, now: datetime.DateTime, took: datetime.Duration, job: def() -> Result[None]) -> bool:
+        due = instant(self.due.get())
+        if now < due:
+            return False
+        id = f"{self.name}#{self.ids.increment()}"
+        ok = run_job(self.name, id, job)
+        self.runs.increment()
+        if not ok:
+            self.failures.increment()
+        finished = now.add(took)
+        if datetime.now() > finished:
+            finished = datetime.now()
+        # The next run is the first one after the job finished; every one that came due
+        # while it ran is skipped, never run late and never run twice at once.
+        next = self.next_due_after(due, finished)
+        missed = self.count_between(due, finished)
+        if missed > 0:
+            self.skipped.add(missed)
+            log.warn(f"job {self.name}: skipped {missed} run(s) because the last one was still going", {"job": id})
+        self.due.set(nanos_of(next))
+        return True
+
+    def next_due_after(self, due: datetime.DateTime, finished: datetime.DateTime) -> datetime.DateTime:
+        match self.cron:
+            case Some(_):
+                return self.next_due(finished)
+            case None:
+                step = self.interval_ns
+                late = nanos_of(finished) - nanos_of(due)
+                if late < 0:
+                    late = 0
+                return instant(nanos_of(due) + (late // step + 1) * step)
+
+    def count_between(self, due: datetime.DateTime, finished: datetime.DateTime) -> int:
+        """How many runs after `due` were due by the time the job finished."""
+        match self.cron:
+            case Some(c):
+                count = 0
+                at = due
+                while count < 1000:
+                    match c.next_after(at, self.zone):
+                        case Ok(t):
+                            if t > finished:
+                                return count
+                            count += 1
+                            at = t
+                        case Err(_):
+                            return count
+                return count
+            case None:
+                late = nanos_of(finished) - nanos_of(due)
+                if late < 0:
+                    return 0
+                return late // self.interval_ns
+
+
+pub struct Schedule:
+    """A job that runs on a timetable, from `every` or `cron`."""
+    table: Timetable
+    job: def() -> Result[None]
+
+impl Schedule:
+    def tick(self, now: datetime.DateTime, took: datetime.Duration = datetime.nanos(0)) -> bool:
+        """Run the job if it is due at `now`; returns whether it ran. `took` is how long a run
+        is taken to last, for tests with a fixed clock: the runs that came due meanwhile are
+        skipped and logged. (A schedule that is started calls this itself.)"""
+        return self.table.tick(now, took, self.job)
+
+    def stop(self):
+        """Run no more; a run in progress finishes."""
+        self.table.stopped.set(1)
+
+    def next_run(self) -> datetime.DateTime:
+        return instant(self.table.due.get())
+
+    def run_count(self) -> int:
+        return self.table.runs.get()
+
+    def skip_count(self) -> int:
+        return self.table.skipped.get()
+
+    def failure_count(self) -> int:
+        return self.table.failures.get()
+
+def schedule_loop(s: Timetable, job: def() -> Result[None]):
+    while stopping_raw() == 0 and s.stopped.get() == 0:
+        now = datetime.now()
+        if not s.tick(now, datetime.nanos(0), job):
+            wait = instant(s.due.get()).since(now).seconds()
+            # Wake at least twice a second to see a stop.
+            time.sleep(max(0.01, min(wait, 0.5)))
+
+def make_schedule(name: str, interval_ns: int, cron: Cron?, zone: datetime.Zone, job: def() -> Result[None], first: datetime.DateTime, start: bool) -> Schedule:
+    table = Timetable(name, interval_ns, cron, zone, Atomic(nanos_of(first)), Atomic(0), Atomic(0), Atomic(0), Atomic(0), Atomic(0))
+    if start:
+        spawn schedule_loop(table, job)
+    return Schedule(table, job)
+
+pub def every(interval: datetime.Duration, job: def() -> Result[None], name: str = "", start: bool = True) -> Schedule:
+    """Run `job` every `interval`, the first time one interval from now. With `start=False` the
+    schedule only runs when `tick` is called, for tests."""
+    if interval.nanoseconds() <= 0:
+        panic("jobs.every: the interval must be positive")
+    label = name
+    if label == "":
+        label = f"every({interval})"
+    return make_schedule(label, interval.nanoseconds(), None, datetime.utc(), job, datetime.now().add(interval), start)
+
+pub def cron(expression: str, job: def() -> Result[None], zone: str = "UTC", name: str = "", start: bool = True) -> Result[Schedule]:
+    """Run `job` at the times a cron expression names, read as wall-clock time in `zone`
+    (`"Europe/London"`). An expression or zone that is wrong is an error here, at startup."""
+    parsed = parse_cron(expression)?
+    z = datetime.utc()
+    match datetime.zone(zone):
+        case Ok(found):
+            z = found
+        case Err(_):
+            return Err(JobError(f"unknown time zone `{zone}`"))
+    label = name
+    if label == "":
+        label = f"cron({expression})"
+    first = parsed.next_after(datetime.now(), z)?
+    return Ok(make_schedule(label, 0, Some(parsed), z, job, first, start))
+
+pub def run_due_for_tests(schedules: list[Schedule], now: datetime.DateTime) -> int:
+    """Run every schedule that is due at `now`, in order, and return how many ran. For tests
+    with schedules made with `start=False`."""
+    ran = 0
+    for s in schedules:
+        if s.tick(now):
+            ran += 1
+    return ran
+
+# ---- queues -------------------------------------------------------------------------------
+
+@frozen
+pub struct Queue[T: Shareable]:
+    """Work waiting for a few tasks to do it, from `jobs.queue`."""
+    name: str
+    items: Channel[T]
+    capacity: int
+    retries: int
+    backoff_ns: int
+    waiting: Atomic
+    active: Atomic
+    workers_alive: Atomic
+    failed: Atomic
+    succeeded: Atomic
+    closed: Atomic
+    ids: Atomic
+    queued_gauge: metrics.Gauge
+    running_gauge: metrics.Gauge
+    failed_counter: metrics.Counter
+
+pub def backoff_delay(base: datetime.Duration, attempt: int, jitter: float = 0.0) -> datetime.Duration:
+    """How long to wait after failure number `attempt` (1 is the first): `base`, then twice
+    that, then four times, up to an hour, plus up to a quarter more at random (`jitter`
+    is a number from 0.0 to 1.0 scaling the extra quarter)."""
+    ns = base.nanoseconds()
+    for _ in range(attempt - 1):
+        ns = ns * 2
+        if ns > 3_600_000_000_000:
+            ns = 3_600_000_000_000
+    extra = int(float(ns) * 0.25 * jitter)
+    return datetime.nanos(ns + extra)
+
+def random_fraction() -> float:
+    return float(crypto.random_bytes(1)[0]) / 255.0
+
+def pause(seconds: float):
+    """Sleep, but wake early when a stop comes."""
+    left = seconds
+    while left > 0.0 and stopping_raw() == 0:
+        step = min(left, 0.2)
+        time.sleep(step)
+        left -= step
+
+impl[T: Shareable] Queue[T]:
+    def submit(self, item: T) -> Result[None]:
+        """Add work. `Err` when the queue is full (`full` is true on the error; 503 if it reaches
+        a handler), closed, or the program is stopping."""
+        if self.closed.get() == 1 or stopping_raw() == 1:
+            return Err(JobError(f"queue {self.name} is closed"))
+        if self.waiting.increment() > self.capacity:
+            self.waiting.decrement()
+            return Err(JobError(f"queue {self.name} is full ({self.capacity} waiting)", True))
+        self.items.send(item)
+        self.queued_gauge.set(float(self.waiting.get()), {"queue": self.name})
+        return Ok(None)
+
+    def queued(self) -> int:
+        """Items waiting for a worker."""
+        return self.waiting.get()
+
+    def running(self) -> int:
+        """Items being worked on now."""
+        return self.active.get()
+
+    def failures(self) -> int:
+        """Items that failed every attempt."""
+        return self.failed.get()
+
+    def successes(self) -> int:
+        return self.succeeded.get()
+
+    def close(self):
+        """Take no more work; the workers finish what is queued and stop."""
+        self.closed.set(1)
+
+    def wait(self, timeout: float = 10.0) -> bool:
+        """Wait until nothing is queued or running; false if `timeout` seconds pass first."""
+        deadline = time.monotonic() + timeout
+        while self.waiting.get() > 0 or self.active.get() > 0:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.005)
+        return True
+
+def attempt[T: Shareable](q: Queue[T], handler: def(T) -> Result[None], item: T, id: str) -> bool:
+    """Try an item up to `retries + 1` times, waiting longer after each failure."""
+    tries = 0
+    while True:
+        tries += 1
+        match handler(item):
+            case Ok(_):
+                return True
+            case Err(problem):
+                if tries > q.retries or stopping_raw() == 1:
+                    log.error(f"queue {q.name}: item failed after {tries} attempt(s): {problem.message()}", {"job": id})
+                    return False
+                wait = backoff_delay(datetime.nanos(q.backoff_ns), tries, random_fraction())
+                log.warn(f"queue {q.name}: attempt {tries} failed ({problem.message()}); trying again in {wait}", {"job": id})
+                pause(wait.seconds())
+
+def queue_worker[T: Shareable](q: Queue[T], handler: def(T) -> Result[None]):
+    idle = 0.001
+    while stopping_raw() == 0:
+        match q.items.try_recv():
+            case Some(item):
+                idle = 0.001
+                q.waiting.decrement()
+                q.active.increment()
+                running_raw(1)
+                q.running_gauge.set(float(q.active.get()), {"queue": q.name})
+                id = f"{q.name}#{q.ids.increment()}"
+                if attempt(q, handler, item, id):
+                    q.succeeded.increment()
+                else:
+                    q.failed.increment()
+                    q.failed_counter.inc({"queue": q.name})
+                q.active.decrement()
+                running_raw(-1)
+                q.running_gauge.set(float(q.active.get()), {"queue": q.name})
+                q.queued_gauge.set(float(q.waiting.get()), {"queue": q.name})
+            case None:
+                if q.closed.get() == 1 and q.waiting.get() <= 0:
+                    break
+                time.sleep(idle)
+                idle = min(idle * 2.0, 0.05)
+    if q.workers_alive.decrement() == 0 and q.waiting.get() > 0:
+        log.warn(f"queue {q.name}: {q.waiting.get()} queued item(s) dropped at shutdown")
+
+pub def queue[T: Shareable](handler: def(T) -> Result[None], name: str = "queue", workers: int = 1, capacity: int = 1000, retries: int = 0, backoff: datetime.Duration = datetime.seconds(1)) -> Queue[T]:
+    """A queue whose items `workers` tasks pass to `handler` one at a time each. An item that
+    fails is tried again up to `retries` times, with `backoff` doubling between tries and some
+    random extra; after that it is logged and counted in `jobs_failed_total`. At most `capacity`
+    items wait: `submit` fails after that. `jobs_queued`, `jobs_running` and
+    `jobs_failed_total` carry the queue's name as a label."""
+    if workers < 1 or capacity < 1 or retries < 0:
+        panic("jobs.queue: workers and capacity must be at least 1, and retries at least 0")
+    q = Queue[T](
+        name,
+        Channel[T](capacity),
+        capacity,
+        retries,
+        backoff.nanoseconds(),
+        Atomic(0),
+        Atomic(0),
+        Atomic(workers),
+        Atomic(0),
+        Atomic(0),
+        Atomic(0),
+        Atomic(0),
+        metrics.gauge("jobs_queued", "Items waiting in a queue.", ["queue"]),
+        metrics.gauge("jobs_running", "Items being worked on.", ["queue"]),
+        metrics.counter("jobs_failed_total", "Items that failed every attempt.", ["queue"]),
+    )
+    for _ in range(workers):
+        spawn queue_worker(q, handler)
+    return q

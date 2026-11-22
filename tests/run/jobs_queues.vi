@@ -1,0 +1,154 @@
+# expect: first due in 10s
+# expect: early: False 0
+# expect: on time: True 1 next in 10s
+# expect: slow: True 2
+# expect: skipped: 3 next in 50s
+# expect: failing: True 1 1
+# expect: cron next: 2026-11-21T03:00:00Z
+# expect: ran: 2 4
+# expect: cron after: 2026-11-22T03:00:00Z
+# expect: never: `0 0 31 2 *` never matches a day
+# expect: zone: unknown time zone `Nowhere/Land`
+# expect: skipped some: True overlapped: 0
+# expect: ran: True
+# expect: done: True 5 0
+# expect: attempts: [3, 3, 3, 3, 3]
+# expect: done: True 0 1
+# expect: failed metric: 1.0 0.0
+# expect: full: queue slow is full (2 waiting) 503
+# expect: waiting: 2 running: 1
+# expect: drained: True 3
+# expect: queue slow is closed
+# expect: 1 10s 12.5s
+# expect: 2 20s 25s
+# expect: 3 40s 50s
+# expect: 4 1m20s 1m40s
+# expect: 5 2m40s 3m20s
+# expect: 1h0m0s
+# Schedules and queues (docs/14, milestone 19), with a fixed clock where the time matters: due
+# times, skipped runs, failures, a running schedule that never overlaps itself, retries with
+# backoff, a bounded queue, and the backoff table.
+
+import datetime
+import jobs
+import metrics
+import time
+
+@frozen
+struct Item:
+    n: int
+
+def fixed(text: str) -> datetime.DateTime:
+    return datetime.parse(text).unwrap()
+
+def tally(n: Atomic) -> Result[None]:
+    n.increment()
+    return Ok(None)
+
+def flaky(item: Item, tries: Mutex[dict[int, int]], fail_first: int) -> Result[None]:
+    with tries.lock() as seen:
+        seen[item.n] = seen.get_or(item.n, 0) + 1
+        if seen[item.n] <= fail_first:
+            return Err(jobs.JobError(f"item {item.n} failed"))
+    return Ok(None)
+
+def wait_for(gate: Channel[int]) -> Result[None]:
+    _ = gate.recv()
+    return Ok(None)
+
+def exclusive(inside: Atomic, overlapped: Atomic, runs: Atomic) -> Result[None]:
+    if inside.increment() > 1:
+        overlapped.increment()
+    time.sleep(0.08)
+    inside.decrement()
+    runs.increment()
+    return Ok(None)
+
+def schedules():
+    datetime.set_clock_for_tests(Some(fixed("2026-11-20T10:00:00Z")))
+    count = Atomic(0)
+    s = jobs.every(datetime.seconds(10), lambda: tally(count), start=False)
+    first = s.next_run()
+    print("first due in", first.since(datetime.now()))
+    print("early:", s.tick(first.sub(datetime.seconds(1))), count.get())
+    print("on time:", s.tick(first), count.get(), "next in", s.next_run().since(first))
+    print("slow:", s.tick(s.next_run(), datetime.seconds(35)), count.get())
+    print("skipped:", s.skip_count(), "next in", s.next_run().since(first))
+    failing = jobs.every(datetime.seconds(1), lambda: Err(jobs.JobError("boom")), start=False)
+    print("failing:", failing.tick(failing.next_run()), failing.run_count(), failing.failure_count())
+    daily = jobs.cron("0 3 * * *", lambda: tally(count), zone="Europe/London", start=False).unwrap()
+    print("cron next:", daily.next_run())
+    print("ran:", jobs.run_due_for_tests([s, daily], daily.next_run()), count.get())
+    print("cron after:", daily.next_run())
+    match jobs.cron("0 0 31 2 *", lambda: tally(count), start=False):
+        case Ok(_):
+            print("accepted")
+        case Err(e):
+            print("never:", e.message())
+    match jobs.cron("0 0 * * *", lambda: tally(count), zone="Nowhere/Land", start=False):
+        case Ok(_):
+            print("accepted")
+        case Err(e):
+            print("zone:", e.message())
+    datetime.set_clock_for_tests(None)
+
+def running_schedule():
+    # A job that takes longer than its interval never overlaps itself; the runs it misses are skipped.
+    inside = Atomic(0)
+    overlapped = Atomic(0)
+    runs = Atomic(0)
+    s = jobs.every(datetime.millis(20), lambda: exclusive(inside, overlapped, runs))
+    deadline = time.monotonic() + 10.0
+    while s.skip_count() == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    s.stop()
+    print("skipped some:", s.skip_count() > 0, "overlapped:", overlapped.get())
+    while inside.get() > 0:
+        time.sleep(0.01)
+    print("ran:", runs.get() >= 1)
+
+def queues():
+    tries: Mutex[dict[int, int]] = Mutex({})
+    q = jobs.queue[Item](lambda item: flaky(item, tries, 2), name="flaky", workers=2, retries=3, backoff=datetime.millis(1))
+    for n in range(5):
+        q.submit(Item(n)).unwrap()
+    print("done:", q.wait(10.0), q.successes(), q.failures())
+    with tries.lock() as seen:
+        print("attempts:", sorted(seen.values()))
+
+    always = jobs.queue[Item](lambda item: flaky(item, tries, 100), name="always", retries=2, backoff=datetime.millis(1))
+    always.submit(Item(99)).unwrap()
+    print("done:", always.wait(10.0), always.successes(), always.failures())
+    snap = metrics.snapshot_for_tests()
+    print("failed metric:", snap['jobs_failed_total{queue="always"}'], snap['jobs_queued{queue="always"}'])
+
+    gate = Channel[int](10)
+    slow = jobs.queue[Item](lambda item: wait_for(gate), name="slow", capacity=2)
+    slow.submit(Item(1)).unwrap()
+    while slow.running() == 0:
+        time.sleep(0.001)
+    slow.submit(Item(2)).unwrap()
+    slow.submit(Item(3)).unwrap()
+    match slow.submit(Item(4)):
+        case Ok(_):
+            print("accepted")
+        case Err(e):
+            print("full:", e.message(), e.status())
+    print("waiting:", slow.queued(), "running:", slow.running())
+    for _ in range(3):
+        gate.send(1)
+    print("drained:", slow.wait(10.0), slow.successes())
+    slow.close()
+    match slow.submit(Item(5)):
+        case Ok(_):
+            print("accepted")
+        case Err(e):
+            print(e.message())
+    for attempt in range(1, 6):
+        print(attempt, jobs.backoff_delay(datetime.seconds(10), attempt), jobs.backoff_delay(datetime.seconds(10), attempt, 1.0))
+    print(jobs.backoff_delay(datetime.seconds(10), 30))
+
+def main():
+    schedules()
+    running_schedule()
+    queues()

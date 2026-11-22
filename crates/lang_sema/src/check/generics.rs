@@ -1161,6 +1161,7 @@ impl<'m> Checker<'_, 'm> {
         let mut values: Vec<hir::Expr> = extra.receiver.iter().cloned().collect();
         values.extend(self.call_args(cx, &name, signature.name_span, written, args, span));
         values.extend(extra.location);
+        self.check_jobs_call(cx, func, &values);
         hir::Expr { kind: hir::ExprKind::Call { func, args: values }, ty: signature.ret, span }
     }
 

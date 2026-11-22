@@ -1,0 +1,77 @@
+# expect: */15 * * * * after 2026-11-20T10:07:00Z in UTC: ['2026-11-20T10:15:00Z', '2026-11-20T10:30:00Z', '2026-11-20T10:45:00Z', '2026-11-20T11:00:00Z']
+# expect: 0 0 31 * * after 2026-01-31T00:00:00Z in UTC: ['2026-03-31T00:00:00Z', '2026-05-31T00:00:00Z', '2026-07-31T00:00:00Z', '2026-08-31T00:00:00Z']
+# expect: 0 0 29 2 * after 2026-01-01T00:00:00Z in UTC: ['2028-02-29T00:00:00Z', '2032-02-29T00:00:00Z', '2036-02-29T00:00:00Z']
+# expect: 30 9 * * mon-fri after 2026-11-20T10:00:00Z in UTC: ['2026-11-23T09:30:00Z', '2026-11-24T09:30:00Z', '2026-11-25T09:30:00Z']
+# expect: 0 12 13 * fri after 2026-11-01T00:00:00Z in UTC: ['2026-11-06T12:00:00Z', '2026-11-13T12:00:00Z', '2026-11-20T12:00:00Z', '2026-11-27T12:00:00Z']
+# expect: @hourly after 2026-11-20T10:30:00Z in UTC: ['2026-11-20T11:00:00Z', '2026-11-20T12:00:00Z', '2026-11-20T13:00:00Z']
+# expect: @weekly after 2026-11-20T10:30:00Z in UTC: ['2026-11-22T00:00:00Z', '2026-11-29T00:00:00Z', '2026-12-06T00:00:00Z']
+# expect: 0 0 1 jan,jul * after 2026-11-20T10:30:00Z in UTC: ['2027-01-01T00:00:00Z', '2027-07-01T00:00:00Z', '2028-01-01T00:00:00Z']
+# expect: 5-10/2 1 * * 0 after 2026-11-20T10:30:00Z in UTC: ['2026-11-22T01:05:00Z', '2026-11-22T01:07:00Z', '2026-11-22T01:09:00Z', '2026-11-29T01:05:00Z']
+# expect: 30 2 * * * after 2026-03-07T12:00:00Z in America/New_York: ['2026-03-08T03:00:00-04:00', '2026-03-09T02:30:00-04:00', '2026-03-10T02:30:00-04:00']
+# expect: 30 1 * * * after 2026-11-01T00:00:00Z in America/New_York: ['2026-11-01T01:30:00-04:00', '2026-11-02T01:30:00-05:00', '2026-11-03T01:30:00-05:00']
+# expect: */30 * * * * after 2026-11-01T04:45:00Z in America/New_York: ['2026-11-01T01:00:00-04:00', '2026-11-01T01:30:00-04:00', '2026-11-01T02:00:00-05:00', '2026-11-01T02:30:00-05:00', '2026-11-01T03:00:00-05:00', '2026-11-01T03:30:00-05:00']
+# expect: 0 3 * * * after 2026-10-24T12:00:00Z in Europe/London: ['2026-10-25T03:00:00Z', '2026-10-26T03:00:00Z', '2026-10-27T03:00:00Z']
+# expect: 0 0 * * * after 2026-11-20T10:30:00+05:30 in Asia/Kolkata: ['2026-11-21T00:00:00+05:30', '2026-11-22T00:00:00+05:30']
+# expect: '* * * *': `* * * *` has 4 fields; a cron expression has 5: minute hour day month weekday
+# expect: '61 * * * *': `61` in the minute field is outside 0 to 59
+# expect: '*/0 * * * *': the step in the minute field must be at least 1
+# expect: 'a * * * *': `a` in the minute field is not a value
+# expect: '5-3 * * * *': `5-3` in the minute field is a range that ends before it starts
+# expect: '1,,2 * * * *': the minute field `1,,2` has an empty item
+# expect: accepted 0 0 31 2 *
+# expect: `0 0 31 2 *` never matches a day
+# expect: unknown time zone `Mars/Base`
+# Cron expressions (docs/14, milestone 19): the next run of each across month ends, Feb 29, days
+# of the week, names and steps, daylight-saving gaps and overlaps, and the errors for bad ones.
+
+import datetime
+import jobs
+
+def show(expr: str, after: str, zone: str = "UTC", count: int = 3):
+    t = datetime.parse(after).unwrap()
+    z = datetime.zone(zone).unwrap()
+    out: list[str] = []
+    for _ in range(count):
+        t = jobs.next_run(expr, t, zone).unwrap()
+        out.append(str(t.to_zone(z)))
+    print(f"{expr} after {after} in {zone}: {out}")
+
+def bad(expr: str):
+    match jobs.parse_cron(expr):
+        case Ok(_):
+            print("accepted", expr)
+        case Err(e):
+            print(f"{expr!r}: {e.message()}")
+
+def main():
+    show("*/15 * * * *", "2026-11-20T10:07:00Z", count=4)
+    show("0 0 31 * *", "2026-01-31T00:00:00Z", count=4)
+    show("0 0 29 2 *", "2026-01-01T00:00:00Z", count=3)
+    show("30 9 * * mon-fri", "2026-11-20T10:00:00Z", count=3)
+    show("0 12 13 * fri", "2026-11-01T00:00:00Z", count=4)
+    show("@hourly", "2026-11-20T10:30:00Z")
+    show("@weekly", "2026-11-20T10:30:00Z")
+    show("0 0 1 jan,jul *", "2026-11-20T10:30:00Z", count=3)
+    show("5-10/2 1 * * 0", "2026-11-20T10:30:00Z", count=4)
+    show("30 2 * * *", "2026-03-07T12:00:00Z", "America/New_York", 3)
+    show("30 1 * * *", "2026-11-01T00:00:00Z", "America/New_York", 3)
+    show("*/30 * * * *", "2026-11-01T04:45:00Z", "America/New_York", 6)
+    show("0 3 * * *", "2026-10-24T12:00:00Z", "Europe/London", 3)
+    show("0 0 * * *", "2026-11-20T10:30:00+05:30", "Asia/Kolkata", 2)
+    bad("* * * *")
+    bad("61 * * * *")
+    bad("*/0 * * * *")
+    bad("a * * * *")
+    bad("5-3 * * * *")
+    bad("1,,2 * * * *")
+    bad("0 0 31 2 *")
+    match jobs.next_run("0 0 31 2 *", datetime.now(), "UTC"):
+        case Ok(_):
+            print("accepted")
+        case Err(e):
+            print(e.message())
+    match jobs.next_run("0 0 * * *", datetime.now(), "Mars/Base"):
+        case Ok(_):
+            print("accepted")
+        case Err(e):
+            print(e.message())

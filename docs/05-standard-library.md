@@ -23,6 +23,7 @@ The standard library is what makes Viper a backend language and not a general-pu
 | `postgres` | PostgreSQL client with a connection pool | M12 | Runtime protocol code; Viper API layer |
 | `sqlite` | SQLite databases in files or memory, with the shape of `postgres` | docs/14, milestone 17 | Viper API over `libsqlite3`, loaded with `dlopen`; a thread per database in the runtime |
 | `migrate` | Numbered SQL migrations for `postgres` and `sqlite`: checksums, a lock, `viper migrate new` and `status` | docs/14, milestone 18 | Viper API; each database module implements the `Backend` trait; `lrt_pg_session` for the lock |
+| `jobs` | Schedules (`every`, `cron` with time zones) and in-memory queues with retries and backoff | docs/14, milestone 19 | Viper API; two runtime calls tie it to SIGTERM |
 | `crypto` | Secure random values, SHA-256, HMAC, constant-time comparison, base64, RS256 checks | post-prototype (D101) | Viper API over the `ring` crate |
 | `auth` | Sign-in with Google: login, callback and logout routes, a signed session cookie, route protection | post-prototype (D102) | Viper, on `http` and `crypto` |
 
@@ -961,6 +962,51 @@ viper migrate status --dir db/migrations --database postgres://app:secret@localh
 ```
 
 `migrate new` takes the number after the highest in the directory, which it creates if need be. `migrate status` compiles and runs a small program that calls the module, so it needs the same system libraries as any program, and it exits with 1 when the files and the database disagree. It does not apply anything: do that from the program, at startup, or from a release step. A path given to `--database` that does not exist is created, as `sqlite.open` would.
+
+## Jobs and schedules (docs/14, milestone 19)
+
+`jobs` runs work in the background of the program, without another process or a database:
+
+```python
+import datetime
+import jobs
+
+@frozen
+struct Email:
+    to: str
+
+def refresh_feed() -> Result[None]:
+    ...
+
+def main():
+    jobs.every(datetime.minutes(5), refresh_feed)                       # the first run is in 5 minutes
+    jobs.cron("0 3 * * *", prune_old, zone="Europe/London").unwrap()    # 03:00 London time, DST-aware
+
+    mail = jobs.queue[Email](send_email, name="mail", workers=4, retries=3, backoff=datetime.seconds(10))
+    mail.submit(Email("ada@example.com")).unwrap()
+```
+
+A job is a function with no parameters that returns `Result[None]`; an `Err` is logged and counted as a failure (a panic is not caught). It runs in a task of its own, so what it captures must be shareable, and the compiler checks that where the function is given to `jobs`: use a `Mutex`, an `Atomic`, a channel or `@frozen` data, not a list.
+
+**Schedules.** `jobs.every(interval, job)` and `jobs.cron(expression, job, zone="UTC")` start a task and return a `Schedule`.
+- **No overlap.** A schedule runs one job at a time. A run that is still going when the next is due makes the runs that came due meanwhile be skipped, not queued: they are counted (`skip_count()`) and logged as a warning, and the next run is the first one after the job ended.
+- **Context.** Each run has an id, `name#1`, `name#2`, which is on the `job` field of the log lines it makes and an attribute of its span when tracing is on. The name is `name=` or `every(5m)` / `cron(0 3 * * *)`.
+- **`Schedule`:** `stop()`, `next_run()`, `run_count()`, `skip_count()`, `failure_count()`.
+- **Cron** has the five standard fields (minute, hour, day of month, month, day of week) with `*`, values, ranges `a-b`, steps `*/n` and `a-b/n`, and lists; `jan` to `dec` and `sun` to `sat` as names; `@hourly`, `@daily` (`@midnight`), `@weekly`, `@monthly` and `@yearly`. Day of week 0 and 7 are Sunday. When both day fields are restricted, a day matching either one runs, as in cron. The fields are wall-clock time in `zone`:
+  - a time the clocks skip (spring forward) runs at the first instant after the gap, and not again;
+  - a time that happens twice (fall back) runs once, the first time;
+  - `0 0 29 2 *` runs every Feb 29, and `cron` fails at startup, with the expression in the message, for one that can never match (`0 0 31 2 *`), an unknown zone, or a field out of range.
+- **`jobs.next_run(expression, after, zone="UTC")`** gives the next time an expression runs, and `jobs.parse_cron` checks one.
+
+**Queues.** `jobs.queue[T](handler, name="queue", workers=1, capacity=1000, retries=0, backoff=datetime.seconds(1))` starts `workers` tasks that pass each item to `handler`. `T` must be shareable.
+- `submit(item)` returns `Err` at once when `capacity` items are waiting (the error's `full` is true, and its status 503), when the queue is closed, or when the program is stopping. It never blocks.
+- A failed item is tried again up to `retries` times. The wait is `backoff`, then twice that, four times, and so on up to an hour, plus a random extra of up to a quarter (`jobs.backoff_delay` gives the numbers). After the last try it is logged and counted.
+- **Metrics,** with the queue's name as the `queue` label: `jobs_queued`, `jobs_running`, and `jobs_failed_total`.
+- `queued()`, `running()`, `successes()`, `failures()`, `wait(timeout)` (until nothing is queued or running) and `close()` (take no more work; the workers finish what is queued).
+
+**Shutdown.** After SIGTERM or `server.stop()` schedules start nothing, workers take no more items, and `serve` waits up to ten seconds for the jobs that are running before it returns. What was still queued is lost, and the log says how many items: `queue mail: 12 queued item(s) dropped at shutdown`. Queues are in memory: a crash loses everything in them, so keep work that must not be lost in a database table. (Durable queues over PostgreSQL are a later addition with the same calls.)
+
+**Testing.** `jobs.every(..., start=False)` and `jobs.cron(..., start=False)` make a schedule that runs only when `tick(now)` is called, or with `jobs.run_due_for_tests(schedules, now)`; `tick(now, took=...)` pretends the job took that long. With `datetime.set_clock_for_tests` the whole timetable is deterministic.
 
 ## Configuration (docs/14, milestone 7)
 

@@ -1,0 +1,12 @@
+# A job runs in a task of its own, so what it captures must be shareable: a list is not, an
+# `Atomic` or a `Mutex` is.
+import datetime
+import jobs
+
+def remember(seen: list[int]) -> Result[None]:
+    seen.append(1)
+    return Ok(None)
+
+def main():
+    seen: list[int] = []
+    _ = jobs.every(datetime.seconds(1), lambda: remember(seen))

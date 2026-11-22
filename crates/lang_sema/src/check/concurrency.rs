@@ -165,6 +165,23 @@ impl Checker<'_, '_> {
     }
 
     /// Whether a function is declared in a standard library module.
+    /// A call of a `jobs` function from the program: the functions it is given run in tasks of
+    /// their own (a schedule's job, a queue's handler), so they must be shareable.
+    pub(super) fn check_jobs_call(&mut self, cx: &FnCx, func: hir::FuncId, args: &[hir::Expr]) {
+        if self.is_stdlib_module(self.current_module) {
+            return;
+        }
+        let module = self.module_of(self.signatures[func.0].name_span);
+        if self.module_names.get(module).map(String::as_str) != Some("jobs") {
+            return;
+        }
+        for arg in args {
+            if matches!(self.types.kind(arg.ty), TyKind::Func(..)) {
+                self.require_shareable(cx, arg, "run in another task");
+            }
+        }
+    }
+
     pub(super) fn is_stdlib_function(&self, func: hir::FuncId) -> bool {
         self.is_stdlib_module(self.module_of(self.signatures[func.0].name_span))
     }

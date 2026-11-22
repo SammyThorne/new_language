@@ -795,6 +795,7 @@ impl Checker<'_, '_> {
                         }
                     }
                 }
+                self.check_jobs_call(cx, id, &values);
                 mk(K::Call { func: id, args: values }, ret, span)
             }
             Global::GenericFunction(index) => self.call_generic(cx, index, args, span, expected),
@@ -1040,6 +1041,7 @@ impl Checker<'_, '_> {
             (signature.name.clone(), signature.name_span, signature.params.clone(), signature.ret);
         let mut all: Vec<hir::Expr> = receiver.into_iter().collect();
         all.extend(self.call_args(cx, &name, def_span, &params, args, span));
+        self.check_jobs_call(cx, func, &all);
         mk(K::Call { func, args: all }, ret, span)
     }
 

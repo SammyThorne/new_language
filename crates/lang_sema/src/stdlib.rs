@@ -25,6 +25,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("postgres", include_str!("../../../stdlib/postgres.lang")),
     ("sqlite", include_str!("../../../stdlib/sqlite.lang")),
     ("migrate", include_str!("../../../stdlib/migrate.lang")),
+    ("jobs", include_str!("../../../stdlib/jobs.lang")),
 ];
 
 /// The source of a standard library module.

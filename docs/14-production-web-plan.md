@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 18 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 19 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1273,6 +1273,12 @@ Done (D123):
   - Bounded `submit`.
   - Draining at SIGTERM.
 - **Docs:** docs/05, and a site section.
+
+Done (D124):
+
+- `stdlib/jobs.lang`: `every`, `cron`, `parse_cron`, `next_run`, `Schedule` (with `tick`, `stop` and counters), `run_due_for_tests`, `queue[T]` and `Queue[T]` (`submit`, `wait`, `close` and counters), `backoff_delay`. The runtime adds `lrt_jobs_stopping` and `lrt_jobs_running`, and `serve` waits for running jobs. The checker requires the functions given to `jobs` to be shareable.
+- Deviations from the plan: `jobs.queue[T](handler, ...)` is a function rather than `Queue[T](...)`, and schedules made with `start=False` are driven by `tick` or `run_due_for_tests(schedules, now)`; D124 says why.
+- Tests: `tests/run/jobs_cron.vi` (month ends, Feb 29, weekdays, names, steps, New York and London gaps and overlaps, Kolkata, the errors), `tests/run/jobs_queues.vi` (fixed-clock schedules, skipped runs, a running schedule that does not overlap, retries, the failure metric, a bounded queue, the backoff table), `tests/ui/jobs_sharing.vi`, `crates/lang_cli/tests/jobs.rs` (SIGTERM: the running job finishes, the queue is dropped and counted, the schedule stops).
 
 ### Track G: sign-in
 

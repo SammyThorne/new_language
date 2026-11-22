@@ -1,0 +1,9 @@
+error[E0338]: a value of type `def() -> Result[None]` cannot be run in another task
+  --> tests/ui/jobs_sharing.vi:12:41
+   |
+12 |     _ = jobs.every(datetime.seconds(1), lambda: remember(seen))
+   |                                         ^^^^^^^^^^^^^^^^^^^^^^ it captures `seen`, a `list[int]`: a `list[int]` can be changed
+   |
+   = help: share an immutable `tuple[int, ...]` made with `tuple(items)`, or wrap the list in `Mutex(...)`
+
+error: could not compile `tests/ui/jobs_sharing.vi` due to 1 error

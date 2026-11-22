@@ -87,6 +87,22 @@ pub extern "C-unwind" fn lrt_http_set_drain(seconds: i64) {
     DRAIN_SECONDS.store(seconds.max(0), Ordering::Relaxed);
 }
 
+/// Background jobs (the `jobs` module) running now; `serve` waits for them before it returns.
+static JOBS_RUNNING: AtomicI64 = AtomicI64::new(0);
+
+/// Whether a stop has been asked for, by SIGTERM, SIGINT or `stop`: 1 or 0. Schedules and queues
+/// start no more jobs once it is 1.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_jobs_stopping() -> i64 {
+    i64::from(STOP_REQUESTED.load(Ordering::SeqCst) || SHUTDOWN.load(Ordering::SeqCst))
+}
+
+/// A job started (`delta` 1) or ended (-1). Returns how many are running.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_jobs_running(delta: i64) -> i64 {
+    JOBS_RUNNING.fetch_add(delta, Ordering::SeqCst) + delta
+}
+
 /// Whether the server is draining before it stops: 1 or 0.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_http_draining() -> i64 {
@@ -279,6 +295,11 @@ pub unsafe extern "C-unwind" fn lrt_http_serve(listener: i64, entry: Entry, code
     let deadline = Instant::now() + Duration::from_secs(10);
     while ACTIVE.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
         poll::wake_all_io();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Jobs that were running when the stop came finish too, within the same time.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while JOBS_RUNNING.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
     crate::log::stop_buffering();
