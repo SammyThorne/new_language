@@ -1,0 +1,39 @@
+# expect: 1000 rows rendered, 148399 bytes
+# A 1000-row table (docs/14, milestone 16 records 1.2 ms to render it in a release build). The
+# time is printed to standard error, where nothing checks it: the stress modes this test runs in
+# are slow on purpose.
+
+import io
+import template
+import time
+
+@derive(Json)
+struct Row:
+    id: int
+    name: str
+    email: str
+    score: float
+    active: bool
+
+@derive(Json)
+struct Table:
+    title: str
+    rows: list[Row]
+
+def main():
+    t = template.from_strings({"table.html": "<h1>{{ title }}</h1><table>{% for r in rows %}<tr class=\"{% if r.active %}on{% else %}off{% endif %}\"><td>{{ r.id }}</td><td>{{ r.name }}</td><td><a href=\"mailto:{{ r.email }}\">{{ r.email }}</a></td><td>{{ r.score }}</td></tr>{% endfor %}</table>"}).unwrap()
+    rows: list[Row] = []
+    for i in range(1000):
+        rows.append(Row(i, f"User <{i}>", f"user{i}@example.com", float(i) / 3.0, i % 2 == 0))
+    table = Table("Users", rows)
+    best = 1.0e9
+    size = 0
+    for _ in range(10):
+        start = time.monotonic()
+        html = t.render("table.html", table).unwrap()
+        took = (time.monotonic() - start) * 1000.0
+        size = len(html)
+        if took < best:
+            best = took
+    print(f"1000 rows rendered, {size} bytes")
+    io.eprint(f"best of 10: {best} ms")

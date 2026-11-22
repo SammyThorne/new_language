@@ -1,0 +1,47 @@
+# The site's tests: run them with the compiler's `test` command.
+
+import http
+import app
+
+def get(path: str) -> http.Response:
+    return app.make_server().handle(http.test_request("GET", path))
+
+@test
+def the_index_lists_the_recipes():
+    r = get("/")
+    assert r.status == 200
+    assert r.content_type == "text/html; charset=utf-8"
+    assert "<a href=\"/recipes/1\">Tomato soup</a>" in r.body
+    assert "(25 min, vegetarian)" in r.body
+    assert "(70 min)" in r.body
+    # A title is escaped.
+    assert "Fish pie &lt;deluxe&gt;" in r.body
+
+@test
+def a_recipe_page_extends_the_base_and_includes_its_parts():
+    r = get("/recipes/1")
+    assert r.status == 200
+    assert "<title>Tomato soup - Pantry</title>" in r.body
+    assert "<p>Warm &amp; quick.</p>" in r.body
+    assert "<li>1 kg tomatoes;</li>" in r.body
+    assert "<li>1 onion.</li>" in r.body
+
+@test
+def a_missing_summary_uses_the_default_and_the_page_carries_json():
+    r = get("/recipes/2")
+    assert "<p>No description.</p>" in r.body
+    # In the script, the recipe is JSON that cannot close the element.
+    assert "const recipe = {\"id\":2,\"title\":\"Fish pie \\u003cdeluxe\\u003e\"" in r.body
+
+@test
+def a_link_with_an_unsafe_scheme_is_replaced():
+    r = get("/recipes/2")
+    assert "<a href=\"#unsafe\">" in r.body
+    assert "javascript:alert" not in r.body.replace("\\u0027", "'").split("<script>")[0]
+
+@test
+def search_and_missing_recipes():
+    assert "Tomato soup" in get("/search?q=SOUP").body
+    assert "No recipes yet." in get("/search?q=nothing").body
+    assert "value=\"&lt;b&gt;\"" in get("/search?q=%3Cb%3E").body
+    assert get("/recipes/9").status == 404

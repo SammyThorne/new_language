@@ -36,6 +36,12 @@ def write_file_raw(path: str, text: str, append: int) -> int
 @extern("lrt_io_exists")
 def exists_raw(path: str) -> int
 
+@extern("lrt_io_is_dir")
+def is_dir_raw(path: str) -> int
+
+@extern("lrt_io_mtime")
+def mtime_raw(path: str) -> int
+
 @extern("lrt_io_remove")
 def remove_raw(path: str) -> int
 
@@ -97,6 +103,14 @@ pub def append_file(path: str, text: str) -> Result[None, IoError]:
 
 pub def exists(path: str) -> bool:
     return exists_raw(path) != 0
+
+pub def is_dir(path: str) -> bool:
+    """Whether the path is a directory."""
+    return is_dir_raw(path) != 0
+
+pub def modified_ns(path: str) -> int:
+    """When a file was last modified, in nanoseconds since 1970; -1 if it cannot be read."""
+    return mtime_raw(path)
 
 pub def remove(path: str) -> Result[None, IoError]:
     if remove_raw(path) == 0:

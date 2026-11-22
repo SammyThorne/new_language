@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}Recipes{% endblock %} - Pantry</title>
+  <style>body { font: 16px/1.5 sans-serif; max-width: 40rem; margin: 2rem auto; }</style>
+</head>
+<body>
+  <nav><a href="/">All recipes</a></nav>
+  {% block content %}{% endblock %}
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ recipe.title }}{% endblock %}
+{% block content %}
+  <h1>{{ recipe.title }}</h1>
+  <p>{{ recipe.summary | default("No description.") }}</p>
+  <h2>Ingredients</h2>
+  <ul>
+  {% for ingredient in recipe.ingredients %}
+    {% include "partials/ingredient.html" %}
+  {% endfor %}
+  </ul>
+  <p>Source: <a href="{{ recipe.source }}">{{ recipe.source | length }} characters of link</a></p>
+{% endblock %}
+{% block scripts %}
+  <script>
+    const recipe = {{ recipe | json }};
+    console.log("viewing", recipe.title);
+  </script>
+{% endblock %}

@@ -1,0 +1,9 @@
+# The recipe site: see README.md. Set DEV=1 to edit the templates while it runs.
+
+import app
+import os
+
+def main():
+    server = app.make_server(reload=os.getenv("DEV").is_some())
+    print("open http://localhost:8080/")
+    server.listen(":8080").unwrap()

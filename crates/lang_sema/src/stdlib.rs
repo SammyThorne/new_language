@@ -13,6 +13,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("datetime", include_str!("../../../stdlib/datetime.lang")),
     ("uuid", include_str!("../../../stdlib/uuid.lang")),
     ("config", include_str!("../../../stdlib/config.lang")),
+    ("template", include_str!("../../../stdlib/template.lang")),
     ("json", include_str!("../../../stdlib/json.lang")),
     ("log", include_str!("../../../stdlib/log.lang")),
     ("metrics", include_str!("../../../stdlib/metrics.lang")),

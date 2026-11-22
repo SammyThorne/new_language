@@ -1,0 +1,1605 @@
+"""
+HTML templates: a small Jinja-like language, checked when it is loaded and escaped when it is
+rendered.
+
+    import template
+
+    pages = template.load_dir("templates", reload=os.getenv("DEV").is_some())?
+    html = pages.render("home.html", {"user": user, "photos": photos})?    # a ToJson context
+
+    # templates/home.html
+    {% extends "base.html" %}
+    {% block content %}
+      <h1>Hello, {{ user.name }}</h1>
+      {% for photo in photos %}
+        <a href="/photos/{{ photo.id | url }}">{{ photo.title | default("untitled") }}</a>
+      {% empty %}
+        <p>No photos yet.</p>
+      {% endfor %}
+    {% endblock %}
+
+Everything printed with `{{ }}` is HTML-escaped. Where escaping is not enough (inside
+`<script>` and `<style>`, in `on...=` and `style=` attributes) the template must say how the
+value is made safe, with `| json`, or loading fails. A reference to a field that is not there
+is an error naming the template, the line and the expression; nothing is silently blank.
+The full syntax is documented in docs/05 ("Templates").
+"""
+
+import datetime
+import io
+import json as jsonlib
+
+# ---- errors -------------------------------------------------------------------------------
+
+pub struct TemplateError:
+    """A template that cannot be loaded or rendered: where, and why."""
+    reason: str
+    name: str = ""
+    line: int = 0
+    missing: bool = False
+
+impl Error for TemplateError:
+    def message(self) -> str:
+        if self.name == "":
+            return self.reason
+        if self.line > 0:
+            return f"{self.name}:{self.line}: {self.reason}"
+        return f"{self.name}: {self.reason}"
+
+    def status(self) -> int:
+        """A template that fails is the program's fault: a 500."""
+        return 500
+
+impl Display for TemplateError:
+    def to_str(self) -> str:
+        return Error.message(self)
+
+def problem(name: str, line: int, reason: str) -> TemplateError:
+    return TemplateError(reason, name, line, False)
+
+# ---- the syntax tree ----------------------------------------------------------------------
+
+enum Expr:
+    Null
+    Bool(value: bool)
+    Int(value: int)
+    Float(value: float)
+    Str(value: str)
+    Var(name: str)
+    Field(base: Expr, name: str)
+    Index(base: Expr, key: Expr)
+    Not(inner: Expr)
+    Bin(op: str, left: Expr, right: Expr)
+    Filter(base: Expr, name: str, args: tuple[Expr, ...])
+    List(items: tuple[Expr, ...])
+
+@frozen
+struct Branch:
+    cond: Expr
+    src: str
+    line: int
+    body: tuple[Node, ...]
+
+# How an `Out` writes its value: 0 HTML-escaped; 1 as it is (`raw`); 2 as JSON that is safe in
+# a script; 3 escaped, as part of a URL attribute; 4 as JSON in an attribute, escaped.
+enum Node:
+    Text(text: str)
+    Out(expr: Expr, mode: int, src: str, line: int)
+    If(branches: tuple[Branch, ...], other: tuple[Node, ...], line: int)
+    For(name: str, key: str, iter: Expr, body: tuple[Node, ...], empty: tuple[Node, ...], src: str, line: int)
+    Set(name: str, expr: Expr, src: str, line: int)
+    Include(name: str, line: int)
+    Block(name: str, body: tuple[Node, ...], line: int)
+    UrlStart
+    UrlEnd
+
+@frozen
+struct Template:
+    name: str
+    parent: str
+    parent_line: int
+    nodes: tuple[Node, ...]
+    blocks: frozendict[str, tuple[Node, ...]]
+    includes: tuple[str, ...]
+    include_lines: tuple[int, ...]
+
+# ---- the lexer ----------------------------------------------------------------------------
+
+struct Chunk:
+    # 0 text, 1 `{{ output }}`, 2 `{% statement %}`
+    kind: int
+    text: str
+    line: int
+    trim_left: bool = False
+    trim_right: bool = False
+
+def lex(name: str, src: str) -> Result[list[Chunk], TemplateError]:
+    chunks: list[Chunk] = []
+    n = len(src)
+    i = 0
+    line = 1
+    start = 0
+    start_line = 1
+    while i < n:
+        two = src[i:i + 2]
+        if two == "{{" or two == "{%" or two == "{#":
+            if i > start:
+                chunks.append(Chunk(0, src[start:i], start_line))
+            close = "}}"
+            what = "{{"
+            if two == "{%":
+                close = "%}"
+                what = "{%"
+            elif two == "{#":
+                close = "#}"
+                what = "{#"
+            tag_line = line
+            j = i + 2
+            while j < n and src[j:j + 2] != close:
+                if src[j:j + 1] == "\n":
+                    line += 1
+                j += 1
+            if j >= n:
+                return Err(problem(name, tag_line, f"`{what}` is never closed"))
+            inner = src[i + 2:j]
+            trim_left = False
+            trim_right = False
+            if inner.starts_with("-"):
+                trim_left = True
+                inner = inner[1:len(inner)]
+            if inner.ends_with("-"):
+                trim_right = True
+                inner = inner[0:len(inner) - 1]
+            if two != "{#":
+                kind = 1 if two == "{{" else 2
+                chunks.append(Chunk(kind, inner.strip(), tag_line, trim_left, trim_right))
+            elif len(chunks) > 0 or trim_left or trim_right:
+                # A comment can trim like any tag; it is not a chunk.
+                chunks.append(Chunk(3, "", tag_line, trim_left, trim_right))
+            i = j + 2
+            start = i
+            start_line = line
+        else:
+            if src[i:i + 1] == "\n":
+                line += 1
+            i += 1
+    if start < n:
+        chunks.append(Chunk(0, src[start:n], start_line))
+    # `{%-` and `-%}` take the white space beside the tag; comments (kind 3) only trim.
+    result: list[Chunk] = []
+    trim_next = False
+    for chunk in chunks:
+        if chunk.kind == 0:
+            text = chunk.text
+            if trim_next:
+                text = text.lstrip()
+                trim_next = False
+            if len(result) > 0 and result[len(result) - 1].trim_left and result[len(result) - 1].kind != 0:
+                pass
+            chunk.text = text
+            result.append(chunk)
+        else:
+            if chunk.trim_left and len(result) > 0 and result[len(result) - 1].kind == 0:
+                result[len(result) - 1].text = result[len(result) - 1].text.rstrip()
+            if chunk.trim_right:
+                trim_next = True
+            else:
+                trim_next = False
+            if chunk.kind != 3:
+                result.append(chunk)
+    final: list[Chunk] = []
+    for chunk in result:
+        if chunk.kind != 0 or chunk.text != "":
+            final.append(chunk)
+    return Ok(final)
+
+# ---- expressions: the lexer and the parser ------------------------------------------------
+
+struct ETok:
+    # 0 word, 1 integer, 2 float, 3 string, 4 punctuation, 5 the end
+    kind: int
+    text: str
+
+def is_space(c: str) -> bool:
+    return c == " " or c == "\t" or c == "\n" or c == "\r"
+
+def is_letter(c: str) -> bool:
+    lower = c.lower()
+    return (lower >= "a" and lower <= "z") or c == "_"
+
+def is_digit(c: str) -> bool:
+    return c >= "0" and c <= "9"
+
+def lex_expr(name: str, line: int, src: str) -> Result[list[ETok], TemplateError]:
+    toks: list[ETok] = []
+    n = len(src)
+    i = 0
+    while i < n:
+        c = src[i:i + 1]
+        if is_space(c):
+            i += 1
+        elif is_letter(c):
+            j = i + 1
+            while j < n and (is_letter(src[j:j + 1]) or is_digit(src[j:j + 1])):
+                j += 1
+            toks.append(ETok(0, src[i:j]))
+            i = j
+        elif is_digit(c):
+            j = i + 1
+            while j < n and is_digit(src[j:j + 1]):
+                j += 1
+            if j + 1 < n and src[j:j + 1] == "." and is_digit(src[j + 1:j + 2]):
+                j += 1
+                while j < n and is_digit(src[j:j + 1]):
+                    j += 1
+                toks.append(ETok(2, src[i:j]))
+            else:
+                toks.append(ETok(1, src[i:j]))
+            i = j
+        elif c == '"' or c == "'":
+            j = i + 1
+            text = ""
+            closed = False
+            while j < n:
+                d = src[j:j + 1]
+                if d == "\\" and j + 1 < n:
+                    e = src[j + 1:j + 2]
+                    if e == "n":
+                        text += "\n"
+                    elif e == "t":
+                        text += "\t"
+                    else:
+                        text += e
+                    j += 2
+                elif d == c:
+                    closed = True
+                    break
+                else:
+                    text += d
+                    j += 1
+            if not closed:
+                return Err(problem(name, line, f"`{src}`: a string is never closed"))
+            toks.append(ETok(3, text))
+            i = j + 1
+        else:
+            two = src[i:i + 2]
+            if two == "==" or two == "!=" or two == "<=" or two == ">=":
+                toks.append(ETok(4, two))
+                i += 2
+            elif c in "<>.[](),|-+":
+                toks.append(ETok(4, c))
+                i += 1
+            else:
+                return Err(problem(name, line, f"`{src}`: unexpected `{c}`"))
+    toks.append(ETok(5, ""))
+    return Ok(toks)
+
+struct ExprParser:
+    toks: list[ETok]
+    at: int
+    name: str
+    line: int
+    src: str
+
+impl ExprParser:
+    def fail(self, reason: str) -> TemplateError:
+        return problem(self.name, self.line, f"`{self.src}`: {reason}")
+
+    def peek(self) -> ETok:
+        return self.toks[self.at]
+
+    def punct(self, text: str) -> bool:
+        tok = self.toks[self.at]
+        return tok.kind == 4 and tok.text == text
+
+    def word(self, text: str) -> bool:
+        tok = self.toks[self.at]
+        return tok.kind == 0 and tok.text == text
+
+    def parse_or(self) -> Result[Expr, TemplateError]:
+        left = self.parse_and()?
+        while self.word("or"):
+            self.at += 1
+            right = self.parse_and()?
+            left = Expr.Bin("or", left, right)
+        return Ok(left)
+
+    def parse_and(self) -> Result[Expr, TemplateError]:
+        left = self.parse_not()?
+        while self.word("and"):
+            self.at += 1
+            right = self.parse_not()?
+            left = Expr.Bin("and", left, right)
+        return Ok(left)
+
+    def parse_not(self) -> Result[Expr, TemplateError]:
+        if self.word("not"):
+            self.at += 1
+            inner = self.parse_not()?
+            return Ok(Expr.Not(inner))
+        return self.parse_compare()
+
+    def parse_compare(self) -> Result[Expr, TemplateError]:
+        left = self.parse_sum()?
+        tok = self.peek()
+        op = ""
+        if tok.kind == 4 and (tok.text == "==" or tok.text == "!=" or tok.text == "<" or tok.text == ">" or tok.text == "<=" or tok.text == ">="):
+            op = tok.text
+            self.at += 1
+        elif self.word("in"):
+            op = "in"
+            self.at += 1
+        elif self.word("not") and self.toks[self.at + 1].kind == 0 and self.toks[self.at + 1].text == "in":
+            op = "not in"
+            self.at += 2
+        if op == "":
+            return Ok(left)
+        right = self.parse_sum()?
+        return Ok(Expr.Bin(op, left, right))
+
+    def parse_sum(self) -> Result[Expr, TemplateError]:
+        left = self.parse_postfix()?
+        while self.punct("+") or self.punct("-"):
+            op = self.peek().text
+            self.at += 1
+            right = self.parse_postfix()?
+            left = Expr.Bin(op, left, right)
+        return Ok(left)
+
+    def parse_postfix(self) -> Result[Expr, TemplateError]:
+        base = self.parse_primary()?
+        while True:
+            if self.punct("."):
+                self.at += 1
+                tok = self.peek()
+                if tok.kind != 0 and tok.kind != 1:
+                    return Err(self.fail("a field name must follow `.`"))
+                self.at += 1
+                if tok.kind == 1:
+                    base = Expr.Index(base, Expr.Int(int.parse(tok.text).unwrap_or(0)))
+                else:
+                    base = Expr.Field(base, tok.text)
+            elif self.punct("["):
+                self.at += 1
+                key = self.parse_or()?
+                if not self.punct("]"):
+                    return Err(self.fail("`]` expected"))
+                self.at += 1
+                base = Expr.Index(base, key)
+            elif self.punct("|"):
+                self.at += 1
+                tok = self.peek()
+                if tok.kind != 0:
+                    return Err(self.fail("a filter name must follow `|`"))
+                self.at += 1
+                args: list[Expr] = []
+                if self.punct("("):
+                    self.at += 1
+                    if not self.punct(")"):
+                        while True:
+                            args.append(self.parse_or()?)
+                            if self.punct(","):
+                                self.at += 1
+                            else:
+                                break
+                    if not self.punct(")"):
+                        return Err(self.fail("`)` expected"))
+                    self.at += 1
+                base = Expr.Filter(base, tok.text, tuple(args))
+            else:
+                return Ok(base)
+
+    def parse_primary(self) -> Result[Expr, TemplateError]:
+        tok = self.peek()
+        if tok.kind == 1:
+            self.at += 1
+            return Ok(Expr.Int(int.parse(tok.text).unwrap_or(0)))
+        if tok.kind == 2:
+            self.at += 1
+            return Ok(Expr.Float(float.parse(tok.text).unwrap_or(0.0)))
+        if tok.kind == 3:
+            self.at += 1
+            return Ok(Expr.Str(tok.text))
+        if tok.kind == 0:
+            self.at += 1
+            text = tok.text
+            if text == "true" or text == "True":
+                return Ok(Expr.Bool(True))
+            if text == "false" or text == "False":
+                return Ok(Expr.Bool(False))
+            if text == "none" or text == "None" or text == "null":
+                return Ok(Expr.Null)
+            return Ok(Expr.Var(text))
+        if tok.kind == 4:
+            if tok.text == "(":
+                self.at += 1
+                inner = self.parse_or()?
+                if not self.punct(")"):
+                    return Err(self.fail("`)` expected"))
+                self.at += 1
+                return Ok(inner)
+            if tok.text == "[":
+                self.at += 1
+                items: list[Expr] = []
+                if not self.punct("]"):
+                    while True:
+                        items.append(self.parse_or()?)
+                        if self.punct(","):
+                            self.at += 1
+                        else:
+                            break
+                if not self.punct("]"):
+                    return Err(self.fail("`]` expected"))
+                self.at += 1
+                return Ok(Expr.List(tuple(items)))
+            if tok.text == "-":
+                self.at += 1
+                next = self.peek()
+                if next.kind == 1:
+                    self.at += 1
+                    return Ok(Expr.Int(0 - int.parse(next.text).unwrap_or(0)))
+                if next.kind == 2:
+                    self.at += 1
+                    return Ok(Expr.Float(0.0 - float.parse(next.text).unwrap_or(0.0)))
+                return Err(self.fail("a number must follow `-`"))
+        if tok.kind == 5:
+            return Err(self.fail("the expression ends too soon"))
+        return Err(self.fail(f"unexpected `{tok.text}`"))
+
+def parse_expr(name: str, src: str, line: int) -> Result[Expr, TemplateError]:
+    toks = lex_expr(name, line, src)?
+    parser = ExprParser(toks, 0, name, line, src)
+    if parser.peek().kind == 5:
+        return Err(parser.fail("the expression is empty"))
+    expr = parser.parse_or()?
+    if parser.peek().kind != 5:
+        return Err(parser.fail(f"unexpected `{parser.peek().text}`"))
+    return Ok(expr)
+
+# ---- the parser ---------------------------------------------------------------------------
+
+struct Parser:
+    name: str
+    chunks: list[Chunk]
+    at: int
+    block_names: list[str]
+    parent: str
+    parent_line: int
+    includes: list[str]
+    include_lines: list[int]
+
+def first_word(text: str) -> str:
+    return text.split(" ")[0]
+
+def rest_after_word(text: str) -> str:
+    word = first_word(text)
+    return text[len(word):len(text)].strip()
+
+def is_name(text: str) -> bool:
+    if text == "" or not is_letter(text[0:1]):
+        return False
+    for i in range(len(text)):
+        c = text[i:i + 1]
+        if not is_letter(c) and not is_digit(c):
+            return False
+    return True
+
+impl Parser:
+    def current_word(self) -> str:
+        if self.at >= len(self.chunks):
+            return ""
+        chunk = self.chunks[self.at]
+        if chunk.kind != 2:
+            return ""
+        return first_word(chunk.text)
+
+    def parse_nodes(self, ends: list[str], what: str, open_line: int) -> Result[list[Node], TemplateError]:
+        nodes: list[Node] = []
+        while self.at < len(self.chunks):
+            chunk = self.chunks[self.at]
+            if chunk.kind == 0:
+                nodes.append(Node.Text(chunk.text))
+                self.at += 1
+            elif chunk.kind == 1:
+                expr = parse_expr(self.name, chunk.text, chunk.line)?
+                nodes.append(Node.Out(expr, 0, chunk.text, chunk.line))
+                self.at += 1
+            else:
+                word = first_word(chunk.text)
+                if word in ends:
+                    return Ok(nodes)
+                self.at += 1
+                rest = rest_after_word(chunk.text)
+                if word == "if":
+                    nodes.append(self.parse_if(rest, chunk.line)?)
+                elif word == "for":
+                    nodes.append(self.parse_for(rest, chunk.line)?)
+                elif word == "set":
+                    left, _, right = rest.partition("=")
+                    target = left.strip()
+                    if not is_name(target) or right.strip() == "":
+                        return Err(problem(self.name, chunk.line, "`{% set %}` needs a name, `=` and an expression"))
+                    expr = parse_expr(self.name, right.strip(), chunk.line)?
+                    nodes.append(Node.Set(target, expr, right.strip(), chunk.line))
+                elif word == "include":
+                    target = self.literal_name(rest, chunk.line, "include")?
+                    self.includes.append(target)
+                    self.include_lines.append(chunk.line)
+                    nodes.append(Node.Include(target, chunk.line))
+                elif word == "extends":
+                    if len(nodes) > 0 or self.parent != "" or self.at > 1:
+                        return Err(problem(self.name, chunk.line, "`{% extends %}` must come first in the template"))
+                    self.parent = self.literal_name(rest, chunk.line, "extends")?
+                    self.parent_line = chunk.line
+                elif word == "block":
+                    nodes.append(self.parse_block(rest, chunk.line)?)
+                else:
+                    return Err(problem(self.name, chunk.line, "unexpected `{% " + chunk.text + " %}`"))
+        if what != "":
+            return Err(problem(self.name, open_line, "`{% " + what + " %}` is never closed"))
+        return Ok(nodes)
+
+    def literal_name(self, rest: str, line: int, word: str) -> Result[str, TemplateError]:
+        expr = parse_expr(self.name, rest, line)?
+        match expr:
+            case Expr.Str(text):
+                return Ok(text)
+            case _:
+                return Err(problem(self.name, line, "`{% " + word + " %}` takes the template's name in quotes"))
+
+    def parse_if(self, rest: str, line: int) -> Result[Node, TemplateError]:
+        branches: list[Branch] = []
+        cond_src = rest
+        cond_line = line
+        other: list[Node] = []
+        while True:
+            cond = parse_expr(self.name, cond_src, cond_line)?
+            body = self.parse_nodes(["elif", "else", "endif"], "if", line)?
+            branches.append(Branch(cond, cond_src, cond_line, tuple(body)))
+            chunk = self.chunks[self.at]
+            self.at += 1
+            word = first_word(chunk.text)
+            if word == "elif":
+                cond_src = rest_after_word(chunk.text)
+                cond_line = chunk.line
+            elif word == "else":
+                other = self.parse_nodes(["endif"], "if", line)?
+                self.at += 1
+                break
+            else:
+                break
+        return Ok(Node.If(tuple(branches), tuple(other), line))
+
+    def parse_for(self, rest: str, line: int) -> Result[Node, TemplateError]:
+        left, found, right = rest.partition(" in ")
+        if found == "":
+            return Err(problem(self.name, line, "`{% for %}` needs `name in expression`"))
+        names = [part.strip() for part in left.split(",")]
+        if len(names) > 2 or not is_name(names[0]) or (len(names) == 2 and not is_name(names[1])):
+            return Err(problem(self.name, line, "`{% for %}` takes one name, or `key, value` for an object"))
+        iter = parse_expr(self.name, right.strip(), line)?
+        body = self.parse_nodes(["empty", "endfor"], "for", line)?
+        chunk = self.chunks[self.at]
+        self.at += 1
+        empty: list[Node] = []
+        if first_word(chunk.text) == "empty":
+            empty = self.parse_nodes(["endfor"], "for", line)?
+            self.at += 1
+        key = ""
+        value = names[0]
+        if len(names) == 2:
+            key = names[0]
+            value = names[1]
+        return Ok(Node.For(value, key, iter, tuple(body), tuple(empty), right.strip(), line))
+
+    def parse_block(self, rest: str, line: int) -> Result[Node, TemplateError]:
+        if not is_name(rest):
+            return Err(problem(self.name, line, "`{% block %}` needs a name"))
+        if rest in self.block_names:
+            return Err(problem(self.name, line, f"the block `{rest}` is defined twice in this template"))
+        self.block_names.append(rest)
+        body = self.parse_nodes(["endblock"], "block", line)?
+        self.at += 1
+        return Ok(Node.Block(rest, tuple(body), line))
+
+# ---- escaping contexts, checked when a template is loaded ---------------------------------
+
+# Where a `{{ }}` sits in the HTML, found by a light tokenizer over the template's text (not a
+# full HTML parser). The modes: 0 text, 1 inside a tag between attributes, 2 in a quoted
+# attribute value, 3 in an unquoted value, 5 in `<script>` or `<style>`, 6 skipping to the `>`
+# of a closing tag or declaration, 7 in a comment, 8 after `<`, 9 in a tag name, 10 in an
+# attribute name, 11 after an attribute name, 12 after `=`.
+struct Scan:
+    name: str
+    mode: int = 0
+    tag: str = ""
+    attr: str = ""
+    quote: str = ""
+
+def is_url_attr(attr: str) -> bool:
+    return attr in ["href", "src", "action", "formaction", "poster", "cite", "background", "data", "ping", "xlink:href"]
+
+def is_script_attr(attr: str) -> bool:
+    return attr.starts_with("on") or attr == "style"
+
+def end_tag(sc: Scan):
+    if sc.tag == "script" or sc.tag == "style":
+        sc.mode = 5
+    else:
+        sc.mode = 0
+
+def scan_text(sc: Scan, text: str, out: list[Node]):
+    n = len(text)
+    i = 0
+    seg = 0
+    while i < n:
+        c = text[i:i + 1]
+        m = sc.mode
+        if m == 0:
+            if c == "<":
+                sc.mode = 8
+            i += 1
+        elif m == 8:
+            if c == "/" or c == "?":
+                sc.mode = 6
+                i += 1
+            elif c == "!":
+                if text[i:i + 3] == "!--":
+                    sc.mode = 7
+                    i += 3
+                else:
+                    sc.mode = 6
+                    i += 1
+            elif is_letter(c):
+                sc.mode = 9
+                sc.tag = c.lower()
+                i += 1
+            else:
+                sc.mode = 0
+        elif m == 9:
+            if is_space(c) or c == "/":
+                sc.mode = 1
+            elif c == ">":
+                end_tag(sc)
+            else:
+                sc.tag += c.lower()
+            i += 1
+        elif m == 1:
+            if c == ">":
+                end_tag(sc)
+            elif not is_space(c) and c != "/":
+                sc.mode = 10
+                sc.attr = c.lower()
+            i += 1
+        elif m == 10:
+            if c == "=":
+                sc.mode = 12
+            elif c == ">":
+                end_tag(sc)
+            elif is_space(c):
+                sc.mode = 11
+            elif c == "/":
+                sc.mode = 1
+            else:
+                sc.attr += c.lower()
+            i += 1
+        elif m == 11:
+            if c == "=":
+                sc.mode = 12
+            elif c == ">":
+                end_tag(sc)
+            elif not is_space(c):
+                sc.mode = 10
+                sc.attr = c.lower()
+            i += 1
+        elif m == 12:
+            if c == '"' or c == "'":
+                sc.mode = 2
+                sc.quote = c
+                if is_url_attr(sc.attr):
+                    out.append(Node.Text(text[seg:i + 1]))
+                    out.append(Node.UrlStart)
+                    seg = i + 1
+            elif c == ">":
+                end_tag(sc)
+            elif not is_space(c):
+                sc.mode = 3
+            i += 1
+        elif m == 2:
+            if c == sc.quote:
+                sc.mode = 1
+                if is_url_attr(sc.attr):
+                    out.append(Node.Text(text[seg:i]))
+                    out.append(Node.UrlEnd)
+                    seg = i
+            i += 1
+        elif m == 3:
+            if is_space(c):
+                sc.mode = 1
+            elif c == ">":
+                end_tag(sc)
+            i += 1
+        elif m == 5:
+            if c == "<" and text[i:i + 2 + len(sc.tag)].lower() == "</" + sc.tag:
+                sc.mode = 6
+            i += 1
+        elif m == 6:
+            if c == ">":
+                sc.mode = 0
+            i += 1
+        else:
+            if c == "-" and text[i:i + 3] == "-->":
+                sc.mode = 0
+                i += 3
+            else:
+                i += 1
+    if seg < n:
+        out.append(Node.Text(text[seg:n]))
+
+def where(sc: Scan) -> str:
+    m = sc.mode
+    if m == 5:
+        return "inside `<" + sc.tag + ">`"
+    if m == 2 or m == 3 or m == 12:
+        return "in the attribute `" + sc.attr + "`"
+    if m == 1 or m == 10 or m == 11:
+        return "inside the tag `<" + sc.tag + ">`, outside an attribute value"
+    if m == 8 or m == 9:
+        return "in a tag name"
+    if m == 6:
+        return "in a closing tag or declaration"
+    return "here"
+
+# How an output is written where it sits: its mode and the expression to evaluate. `raw` and
+# `json` as the last filter choose the mode, and are not evaluated.
+def output_mode(sc: Scan, expr: Expr, src: str, line: int) -> Result[Node, TemplateError]:
+    base = expr
+    last = ""
+    match expr:
+        case Expr.Filter(inner, fname, _):
+            if fname == "raw" or fname == "json":
+                base = inner
+                last = fname
+        case _:
+            pass
+    m = sc.mode
+    mode = 0
+    if m == 0 or m == 7:
+        mode = 1 if last == "raw" else 0
+        if last == "json":
+            base = expr
+    elif m == 5 or (m == 2 and is_script_attr(sc.attr)):
+        if last == "raw":
+            mode = 1
+        elif last == "json":
+            mode = 2 if m == 5 else 4
+        else:
+            if m == 5:
+                return Err(problem(sc.name, line, "`{{ " + src + " }}` is inside `<" + sc.tag + ">`, where HTML escaping is not enough: write `{{ " + src + " | json }}` (or `| raw` for a value that is already safe)"))
+            return Err(problem(sc.name, line, "`{{ " + src + " }}` is in the `" + sc.attr + "` attribute, where HTML escaping is not enough: write `{{ " + src + " | json }}` (or `| raw` for a value that is already safe)"))
+    elif m == 2:
+        if last == "raw":
+            mode = 1
+        else:
+            if last == "json":
+                base = expr
+            mode = 3 if is_url_attr(sc.attr) else 0
+    elif m == 3 or m == 12:
+        return Err(problem(sc.name, line, "`{{ " + src + " }}` is in the attribute `" + sc.attr + "` without quotes: put the value in quotes"))
+    else:
+        return Err(problem(sc.name, line, "`{{ " + src + " }}` is " + where(sc) + ", where a value cannot be made safe"))
+    return Ok(Node.Out(base, mode, src, line))
+
+def analyse(sc: Scan, nodes: tuple[Node, ...]) -> Result[list[Node], TemplateError]:
+    out: list[Node] = []
+    for node in nodes:
+        match node:
+            case Node.Text(text):
+                scan_text(sc, text, out)
+            case Node.Out(expr, _, src, line):
+                out.append(output_mode(sc, expr, src, line)?)
+            case Node.If(branches, other, line):
+                start = sc.mode
+                tag = sc.tag
+                attr = sc.attr
+                quote = sc.quote
+                ends: list[int] = []
+                done: list[Branch] = []
+                for branch in branches:
+                    sc.mode = start
+                    sc.tag = tag
+                    sc.attr = attr
+                    sc.quote = quote
+                    branch_nodes = analyse(sc, branch.body)?
+                    ends.append(sc.mode)
+                    done.append(Branch(branch.cond, branch.src, branch.line, tuple(branch_nodes)))
+                sc.mode = start
+                sc.tag = tag
+                sc.attr = attr
+                sc.quote = quote
+                rest = analyse(sc, other)?
+                ends.append(sc.mode)
+                for end in ends:
+                    if end != ends[0]:
+                        return Err(problem(sc.name, line, "the branches of this `{% if %}` leave the HTML in different states (one ends inside a tag or a script, another does not)"))
+                out.append(Node.If(tuple(done), tuple(rest), line))
+            case Node.For(var, key, iter, loop_body, loop_empty, src, line):
+                start = sc.mode
+                tag = sc.tag
+                attr = sc.attr
+                quote = sc.quote
+                inner = analyse(sc, loop_body)?
+                if sc.mode != start:
+                    return Err(problem(sc.name, line, "the body of this `{% for %}` ends in a different place in the HTML than it starts"))
+                sc.mode = start
+                sc.tag = tag
+                sc.attr = attr
+                sc.quote = quote
+                none = analyse(sc, loop_empty)?
+                if sc.mode != start:
+                    return Err(problem(sc.name, line, "the `{% empty %}` part of this `{% for %}` ends in a different place in the HTML than it starts"))
+                out.append(Node.For(var, key, iter, tuple(inner), tuple(none), src, line))
+            case Node.Include(name, line):
+                if sc.mode != 0:
+                    return Err(problem(sc.name, line, "`{% include %}` is " + where(sc) + ": it can only go in HTML text"))
+                out.append(node)
+            case Node.Block(name, block_body, block_line):
+                if sc.mode != 0:
+                    return Err(problem(sc.name, block_line, "the block `" + name + "` is " + where(sc) + ": a block can only go in HTML text (put the whole `<script>` in the block)"))
+                fresh = Scan(sc.name)
+                parts = analyse(fresh, block_body)?
+                if fresh.mode != 0:
+                    return Err(problem(sc.name, block_line, "the block `" + name + "` ends " + where(fresh) + ": a block must end in HTML text"))
+                out.append(Node.Block(name, tuple(parts), block_line))
+            case _:
+                out.append(node)
+    return Ok(out)
+
+def collect_blocks(nodes: tuple[Node, ...], into: dict[str, tuple[Node, ...]]):
+    for node in nodes:
+        match node:
+            case Node.Block(name, body, _):
+                into[name] = body
+                collect_blocks(body, into)
+            case Node.If(branches, other, _):
+                for branch in branches:
+                    collect_blocks(branch.body, into)
+                collect_blocks(other, into)
+            case Node.For(_, _, _, body, empty, _, _):
+                collect_blocks(body, into)
+                collect_blocks(empty, into)
+            case _:
+                pass
+
+pub def parse_template(name: str, src: str) -> Result[Template, TemplateError]:
+    chunks = lex(name, src)?
+    parser = Parser(name, chunks, 0, [], "", 0, [], [])
+    nodes = parser.parse_nodes([], "", 0)?
+    if parser.parent != "":
+        # A child template is its blocks; anything else would be silently ignored.
+        for node in nodes:
+            match node:
+                case Node.Block(_, _, _):
+                    pass
+                case Node.Text(text):
+                    if text.strip() != "":
+                        return Err(problem(name, 0, "a template that extends another can only hold blocks, but it has text outside them"))
+                case _:
+                    return Err(problem(name, 0, "a template that extends another can only hold blocks, but it has something else outside them"))
+    sc = Scan(name)
+    done = analyse(sc, tuple(nodes))?
+    if sc.mode != 0 and parser.parent == "":
+        # An included template or a block is analysed from the text state, so a template has to
+        # end there.
+        return Err(problem(name, 0, "the template ends " + where(sc) + ", not in HTML text"))
+    tree = tuple(done)
+    blocks: dict[str, tuple[Node, ...]] = {}
+    collect_blocks(tree, blocks)
+    return Ok(Template(name, parser.parent, parser.parent_line, tree, frozendict(blocks), tuple(parser.includes), tuple(parser.include_lines)))
+
+# ---- rendering ----------------------------------------------------------------------------
+
+struct Render:
+    templates: frozendict[str, Template]
+    name: str
+    chain: list[Template]
+    vars: dict[str, jsonlib.Value]
+    out: list[str]
+    loop_i: int = -1
+    loop_n: int = -1
+    url_mark: int = 0
+    url_dirty: bool = False
+
+def missing(r: Render, line: int, reason: str) -> TemplateError:
+    return TemplateError(reason, r.name, line, True)
+
+def broken(r: Render, line: int, reason: str) -> TemplateError:
+    return TemplateError(reason, r.name, line, False)
+
+def escape(text: str) -> str:
+    if "&" in text or "<" in text or ">" in text or '"' in text or "'" in text:
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
+    return text
+
+def json_safe(text: str) -> str:
+    # JSON that can go in a `<script>`: nothing in it can close the element or start a comment.
+    if "<" in text or ">" in text or "&" in text:
+        return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return text
+
+def kind_of(v: jsonlib.Value) -> str:
+    match v:
+        case jsonlib.Value.Null:
+            return "none"
+        case jsonlib.Value.Bool(_):
+            return "a boolean"
+        case jsonlib.Value.Int(_):
+            return "an integer"
+        case jsonlib.Value.Float(_):
+            return "a number"
+        case jsonlib.Value.Str(_):
+            return "a string"
+        case jsonlib.Value.Array(_):
+            return "a list"
+        case jsonlib.Value.Object(_):
+            return "an object"
+
+def truthy(v: jsonlib.Value) -> bool:
+    match v:
+        case jsonlib.Value.Null:
+            return False
+        case jsonlib.Value.Bool(b):
+            return b
+        case jsonlib.Value.Int(i):
+            return i != 0
+        case jsonlib.Value.Float(f):
+            return f != 0.0
+        case jsonlib.Value.Str(s):
+            return s != ""
+        case jsonlib.Value.Array(items):
+            return len(items) > 0
+        case jsonlib.Value.Object(fields):
+            return len(fields) > 0
+
+def text_of(r: Render, v: jsonlib.Value, line: int, src: str) -> Result[str, TemplateError]:
+    match v:
+        case jsonlib.Value.Str(s):
+            return Ok(s)
+        case jsonlib.Value.Int(i):
+            return Ok(str(i))
+        case jsonlib.Value.Float(_):
+            return Ok(jsonlib.encode(v))
+        case jsonlib.Value.Bool(b):
+            return Ok("true" if b else "false")
+        case jsonlib.Value.Null:
+            return Err(broken(r, line, "`" + src + "` is none, which cannot be printed: use `| default(...)` for a value that may be missing"))
+        case _:
+            return Err(broken(r, line, "`" + src + "` is " + kind_of(v) + ", which cannot be printed: use `| join(...)` or `| json`"))
+
+def number(v: jsonlib.Value) -> float?:
+    match v:
+        case jsonlib.Value.Int(i):
+            return float(i)
+        case jsonlib.Value.Float(f):
+            return f
+        case _:
+            return None
+
+def equal(a: jsonlib.Value, b: jsonlib.Value) -> bool:
+    x = number(a)
+    y = number(b)
+    match x:
+        case Some(p):
+            match y:
+                case Some(q):
+                    return p == q
+                case None:
+                    return False
+        case None:
+            pass
+    return a == b
+
+def percent_encode(text: str) -> str:
+    data = text.encode()
+    parts: list[str] = []
+    digits = "0123456789ABCDEF"
+    for i in range(len(data)):
+        b = data[i]
+        if (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 45 or b == 46 or b == 95 or b == 126:
+            parts.append(data.slice(i, i + 1).decode().unwrap_or(""))
+        else:
+            parts.append("%" + digits[b // 16:b // 16 + 1] + digits[b % 16:b % 16 + 1])
+    return "".join(parts)
+
+def title_case(text: str) -> str:
+    words: list[str] = []
+    for word in text.split(" "):
+        if len(word) == 0:
+            words.append(word)
+        else:
+            words.append(word[0:1].upper() + word[1:len(word)].lower())
+    return " ".join(words)
+
+def apply_filter(r: Render, fname: str, v: jsonlib.Value, args: list[jsonlib.Value], line: int, src: str) -> Result[jsonlib.Value, TemplateError]:
+    if fname == "raw":
+        return Ok(v)
+    if fname == "json":
+        return Ok(jsonlib.Value.Str(jsonlib.encode(v)))
+    if fname == "length":
+        match v:
+            case jsonlib.Value.Str(s):
+                return Ok(jsonlib.Value.Int(len(s)))
+            case jsonlib.Value.Array(items):
+                return Ok(jsonlib.Value.Int(len(items)))
+            case jsonlib.Value.Object(fields):
+                return Ok(jsonlib.Value.Int(len(fields)))
+            case _:
+                return Err(broken(r, line, "`" + src + "`: `length` needs a string, a list or an object, not " + kind_of(v)))
+    if fname == "join":
+        sep = ""
+        if len(args) > 0:
+            sep = text_of(r, args[0], line, src)?
+        match v:
+            case jsonlib.Value.Array(items):
+                parts: list[str] = []
+                for item in items:
+                    parts.append(text_of(r, item, line, src)?)
+                return Ok(jsonlib.Value.Str(sep.join(parts)))
+            case _:
+                return Err(broken(r, line, "`" + src + "`: `join` needs a list, not " + kind_of(v)))
+    if fname == "date":
+        if len(args) != 1:
+            return Err(broken(r, line, "`" + src + "`: `date` needs a format, such as `date(\"%Y-%m-%d\")`"))
+        pattern = text_of(r, args[0], line, src)?
+        text = text_of(r, v, line, src)?
+        match datetime.parse(text):
+            case Ok(moment):
+                return Ok(jsonlib.Value.Str(moment.format(pattern)))
+            case Err(_):
+                pass
+        match datetime.parse_date(text):
+            case Ok(day):
+                return Ok(jsonlib.Value.Str(day.format(pattern)))
+            case Err(_):
+                return Err(broken(r, line, "`" + src + "`: `date` needs a date or a date and time such as 2026-11-21 or 2026-11-21T09:30:00Z, not `" + text + "`"))
+    text = text_of(r, v, line, src)?
+    if fname == "upper":
+        return Ok(jsonlib.Value.Str(text.upper()))
+    if fname == "lower":
+        return Ok(jsonlib.Value.Str(text.lower()))
+    if fname == "title":
+        return Ok(jsonlib.Value.Str(title_case(text)))
+    if fname == "trim":
+        return Ok(jsonlib.Value.Str(text.strip()))
+    if fname == "url":
+        return Ok(jsonlib.Value.Str(percent_encode(text)))
+    return Err(broken(r, line, "`" + src + "`: there is no filter `" + fname + "` (the filters are upper, lower, title, trim, length, default, join, date, json, url and raw)"))
+
+def compare(r: Render, op: str, a: jsonlib.Value, b: jsonlib.Value, line: int, src: str) -> Result[bool, TemplateError]:
+    x = number(a)
+    y = number(b)
+    less = False
+    same = False
+    match x:
+        case Some(p):
+            match y:
+                case Some(q):
+                    less = p < q
+                    same = p == q
+                case None:
+                    return Err(broken(r, line, "`" + src + "`: cannot compare " + kind_of(a) + " with " + kind_of(b)))
+        case None:
+            match a:
+                case jsonlib.Value.Str(s):
+                    match b:
+                        case jsonlib.Value.Str(t):
+                            less = s < t
+                            same = s == t
+                        case _:
+                            return Err(broken(r, line, "`" + src + "`: cannot compare " + kind_of(a) + " with " + kind_of(b)))
+                case _:
+                    return Err(broken(r, line, "`" + src + "`: cannot compare " + kind_of(a) + " with " + kind_of(b)))
+    if op == "<":
+        return Ok(less)
+    if op == "<=":
+        return Ok(less or same)
+    if op == ">":
+        return Ok(not less and not same)
+    return Ok(not less)
+
+def contains(r: Render, needle: jsonlib.Value, haystack: jsonlib.Value, line: int, src: str) -> Result[bool, TemplateError]:
+    match haystack:
+        case jsonlib.Value.Str(s):
+            match needle:
+                case jsonlib.Value.Str(t):
+                    return Ok(t in s)
+                case _:
+                    return Err(broken(r, line, "`" + src + "`: only a string can be in a string, not " + kind_of(needle)))
+        case jsonlib.Value.Array(items):
+            for item in items:
+                if equal(item, needle):
+                    return Ok(True)
+            return Ok(False)
+        case jsonlib.Value.Object(fields):
+            match needle:
+                case jsonlib.Value.Str(key):
+                    return Ok(key in fields)
+                case _:
+                    return Err(broken(r, line, "`" + src + "`: only a string can be a key of an object, not " + kind_of(needle)))
+        case _:
+            return Err(broken(r, line, "`" + src + "`: `in` needs a string, a list or an object on its right, not " + kind_of(haystack)))
+
+def eval_field(r: Render, base: Expr, name: str, line: int, src: str) -> Result[jsonlib.Value, TemplateError]:
+    match base:
+        case Expr.Var(vname):
+            if vname == "loop" and r.loop_n >= 0:
+                if name == "index":
+                    return Ok(jsonlib.Value.Int(r.loop_i + 1))
+                if name == "index0":
+                    return Ok(jsonlib.Value.Int(r.loop_i))
+                if name == "first":
+                    return Ok(jsonlib.Value.Bool(r.loop_i == 0))
+                if name == "last":
+                    return Ok(jsonlib.Value.Bool(r.loop_i == r.loop_n - 1))
+                if name == "length":
+                    return Ok(jsonlib.Value.Int(r.loop_n))
+                return Err(broken(r, line, "`" + src + "`: `loop` has index, index0, first, last and length, not `" + name + "`"))
+        case _:
+            pass
+    v = eval(r, base, line, src)?
+    match v:
+        case jsonlib.Value.Object(fields):
+            match fields.get(name):
+                case Some(found):
+                    return Ok(found)
+                case None:
+                    names = ", ".join([k for k in fields.keys()])
+                    return Err(missing(r, line, "`" + src + "`: there is no field `" + name + "` (it has: " + names + ")"))
+        case _:
+            return Err(broken(r, line, "`" + src + "`: cannot read `." + name + "` of " + kind_of(v)))
+
+def eval_index(r: Render, base: Expr, key: Expr, line: int, src: str) -> Result[jsonlib.Value, TemplateError]:
+    v = eval(r, base, line, src)?
+    k = eval(r, key, line, src)?
+    match v:
+        case jsonlib.Value.Array(items):
+            match k:
+                case jsonlib.Value.Int(i):
+                    at = i + len(items) if i < 0 else i
+                    if at < 0 or at >= len(items):
+                        return Err(missing(r, line, "`" + src + "`: the index " + str(i) + " is outside the list, which has " + str(len(items)) + " items"))
+                    return Ok(items[at])
+                case _:
+                    return Err(broken(r, line, "`" + src + "`: a list is indexed by an integer, not " + kind_of(k)))
+        case jsonlib.Value.Object(fields):
+            match k:
+                case jsonlib.Value.Str(name):
+                    match fields.get(name):
+                        case Some(found):
+                            return Ok(found)
+                        case None:
+                            return Err(missing(r, line, "`" + src + "`: there is no field `" + name + "`"))
+                case _:
+                    return Err(broken(r, line, "`" + src + "`: an object is indexed by a string, not " + kind_of(k)))
+        case _:
+            return Err(broken(r, line, "`" + src + "`: cannot index " + kind_of(v)))
+
+def add_values(r: Render, op: str, a: jsonlib.Value, b: jsonlib.Value, line: int, src: str) -> Result[jsonlib.Value, TemplateError]:
+    match a:
+        case jsonlib.Value.Str(s):
+            if op == "+":
+                match b:
+                    case jsonlib.Value.Str(t):
+                        return Ok(jsonlib.Value.Str(s + t))
+                    case _:
+                        pass
+        case jsonlib.Value.Int(i):
+            match b:
+                case jsonlib.Value.Int(j):
+                    return Ok(jsonlib.Value.Int(i + j if op == "+" else i - j))
+                case _:
+                    pass
+        case _:
+            pass
+    x = number(a)
+    y = number(b)
+    match x:
+        case Some(p):
+            match y:
+                case Some(q):
+                    return Ok(jsonlib.Value.Float(p + q if op == "+" else p - q))
+                case None:
+                    pass
+        case None:
+            pass
+    return Err(broken(r, line, "`" + src + "`: cannot use `" + op + "` on " + kind_of(a) + " and " + kind_of(b)))
+
+def eval_bin(r: Render, op: str, left: Expr, right: Expr, line: int, src: str) -> Result[jsonlib.Value, TemplateError]:
+    if op == "and":
+        first = eval(r, left, line, src)?
+        if not truthy(first):
+            return Ok(jsonlib.Value.Bool(False))
+        second = eval(r, right, line, src)?
+        return Ok(jsonlib.Value.Bool(truthy(second)))
+    if op == "or":
+        first = eval(r, left, line, src)?
+        if truthy(first):
+            return Ok(jsonlib.Value.Bool(True))
+        second = eval(r, right, line, src)?
+        return Ok(jsonlib.Value.Bool(truthy(second)))
+    a = eval(r, left, line, src)?
+    b = eval(r, right, line, src)?
+    if op == "==":
+        return Ok(jsonlib.Value.Bool(equal(a, b)))
+    if op == "!=":
+        return Ok(jsonlib.Value.Bool(not equal(a, b)))
+    if op == "in":
+        return Ok(jsonlib.Value.Bool(contains(r, a, b, line, src)?))
+    if op == "not in":
+        return Ok(jsonlib.Value.Bool(not contains(r, a, b, line, src)?))
+    if op == "+" or op == "-":
+        return add_values(r, op, a, b, line, src)
+    return Ok(jsonlib.Value.Bool(compare(r, op, a, b, line, src)?))
+
+def eval_filter(r: Render, base: Expr, fname: str, args: tuple[Expr, ...], line: int, src: str) -> Result[jsonlib.Value, TemplateError]:
+    if fname == "default":
+        if len(args) != 1:
+            return Err(broken(r, line, "`" + src + "`: `default` takes the value to use instead, such as `default(\"-\")`"))
+        found = eval(r, base, line, src)
+        match found:
+            case Ok(v):
+                if not v.is_null():
+                    return Ok(v)
+            case Err(failure):
+                if not failure.missing:
+                    return Err(failure)
+        return eval(r, args[0], line, src)
+    v = eval(r, base, line, src)?
+    values: list[jsonlib.Value] = []
+    for arg in args:
+        values.append(eval(r, arg, line, src)?)
+    return apply_filter(r, fname, v, values, line, src)
+
+def eval(r: Render, e: Expr, line: int, src: str) -> Result[jsonlib.Value, TemplateError]:
+    match e:
+        case Expr.Null:
+            return Ok(jsonlib.Value.Null)
+        case Expr.Bool(flag):
+            return Ok(jsonlib.Value.Bool(flag))
+        case Expr.Int(number_value):
+            return Ok(jsonlib.Value.Int(number_value))
+        case Expr.Float(real):
+            return Ok(jsonlib.Value.Float(real))
+        case Expr.Str(text):
+            return Ok(jsonlib.Value.Str(text))
+        case Expr.Var(name):
+            match r.vars.get(name):
+                case Some(v):
+                    return Ok(v)
+                case None:
+                    return Err(missing(r, line, "`" + src + "`: `" + name + "` is not defined"))
+        case Expr.Field(base, name):
+            return eval_field(r, base, name, line, src)
+        case Expr.Index(base, key):
+            return eval_index(r, base, key, line, src)
+        case Expr.Not(inner):
+            v = eval(r, inner, line, src)?
+            return Ok(jsonlib.Value.Bool(not truthy(v)))
+        case Expr.List(elements):
+            values: list[jsonlib.Value] = []
+            for element in elements:
+                values.append(eval(r, element, line, src)?)
+            return Ok(jsonlib.Value.Array(values))
+        case Expr.Bin(op, left, right):
+            return eval_bin(r, op, left, right, line, src)
+        case Expr.Filter(base, fname, args):
+            return eval_filter(r, base, fname, args, line, src)
+
+def bad_scheme(value: str) -> bool:
+    # A URL whose scheme is not http, https or mailto. Browsers ignore white space and control
+    # characters before the scheme and inside it.
+    cleaned = value.lstrip().replace("\t", "").replace("\n", "").replace("\r", "").lower()
+    colon = cleaned.find(":")
+    if colon < 0:
+        return False
+    scheme = cleaned[0:colon]
+    if "/" in scheme or "?" in scheme or "#" in scheme:
+        return False
+    return not (scheme == "http" or scheme == "https" or scheme == "mailto")
+
+def iterate(r: Render, v: jsonlib.Value, line: int, src: str, pairs: bool) -> Result[list[jsonlib.Value], TemplateError]:
+    match v:
+        case jsonlib.Value.Array(items):
+            return Ok(items)
+        case jsonlib.Value.Object(fields):
+            keys: list[jsonlib.Value] = []
+            for key in fields.keys():
+                keys.append(jsonlib.Value.Str(key))
+            return Ok(keys)
+        case _:
+            return Err(broken(r, line, "`" + src + "`: `{% for %}` needs a list or an object, not " + kind_of(v)))
+
+def run(r: Render, nodes: tuple[Node, ...]) -> Result[None, TemplateError]:
+    for node in nodes:
+        match node:
+            case Node.Text(text):
+                r.out.append(text)
+            case Node.Out(expr, mode, src, line):
+                value = eval(r, expr, line, src)?
+                if mode == 2 or mode == 4:
+                    text = json_safe(jsonlib.encode(value))
+                    r.out.append(text if mode == 2 else escape(text))
+                else:
+                    text = text_of(r, value, line, src)?
+                    if mode == 1:
+                        r.out.append(text)
+                    else:
+                        r.out.append(escape(text))
+                        if mode == 3:
+                            r.url_dirty = True
+            case Node.If(branches, other, _):
+                chosen = False
+                for branch in branches:
+                    test = eval(r, branch.cond, branch.line, branch.src)?
+                    if truthy(test):
+                        run(r, branch.body)?
+                        chosen = True
+                        break
+                if not chosen:
+                    run(r, other)?
+            case Node.For(name, key, iter, body, empty, src, line):
+                sequence = eval(r, iter, line, src)?
+                items = iterate(r, sequence, line, src, key != "")?
+                if len(items) == 0:
+                    run(r, empty)?
+                else:
+                    saved_i = r.loop_i
+                    saved_n = r.loop_n
+                    old = r.vars.get(name)
+                    old_key: jsonlib.Value? = None
+                    if key != "":
+                        old_key = r.vars.get(key)
+                    pairs: dict[str, jsonlib.Value] = {}
+                    match sequence:
+                        case jsonlib.Value.Object(fields):
+                            pairs = fields
+                        case _:
+                            pass
+                    r.loop_n = len(items)
+                    i = 0
+                    for item in items:
+                        r.loop_i = i
+                        if key != "":
+                            r.vars[key] = item
+                            r.vars[name] = pairs.get(item.as_str().unwrap_or("")).unwrap_or(jsonlib.Value.Null)
+                        else:
+                            r.vars[name] = item
+                        run(r, body)?
+                        i += 1
+                    r.loop_i = saved_i
+                    r.loop_n = saved_n
+                    match old:
+                        case Some(previous):
+                            r.vars[name] = previous
+                        case None:
+                            r.vars.pop(name)
+                    if key != "":
+                        match old_key:
+                            case Some(previous_key):
+                                r.vars[key] = previous_key
+                            case None:
+                                r.vars.pop(key)
+            case Node.Set(name, expr, src, line):
+                r.vars[name] = eval(r, expr, line, src)?
+            case Node.Include(name, line):
+                match r.templates.get(name):
+                    case Some(_):
+                        saved = r.chain
+                        saved_name = r.name
+                        r.chain = chain_of(r.templates, name)
+                        r.name = name
+                        run(r, r.chain[len(r.chain) - 1].nodes)?
+                        r.chain = saved
+                        r.name = saved_name
+                    case None:
+                        return Err(broken(r, line, "there is no template `" + name + "` to include"))
+            case Node.Block(name, body, _):
+                found = False
+                for t in r.chain:
+                    match t.blocks.get(name):
+                        case Some(content):
+                            saved_name = r.name
+                            r.name = t.name
+                            run(r, content)?
+                            r.name = saved_name
+                            found = True
+                            break
+                        case None:
+                            pass
+                if not found:
+                    run(r, body)?
+            case Node.UrlStart:
+                r.url_mark = len(r.out)
+                r.url_dirty = False
+            case Node.UrlEnd:
+                if r.url_dirty:
+                    r.url_dirty = False
+                    if bad_scheme("".join(r.out[r.url_mark:len(r.out)])):
+                        while len(r.out) > r.url_mark:
+                            r.out.pop()
+                        r.out.append("#unsafe")
+    return Ok(None)
+
+def chain_of(templates: frozendict[str, Template], name: str) -> list[Template]:
+    chain: list[Template] = []
+    current = name
+    while current != "":
+        match templates.get(current):
+            case Some(t):
+                chain.append(t)
+                current = t.parent
+            case None:
+                break
+    return chain
+
+def render_value(templates: frozendict[str, Template], name: str, ctx: jsonlib.Value) -> Result[str, TemplateError]:
+    if name not in templates:
+        return Err(TemplateError("there is no template `" + name + "`"))
+    fields: dict[str, jsonlib.Value] = {}
+    match ctx:
+        case jsonlib.Value.Object(given):
+            fields = given
+        case jsonlib.Value.Null:
+            pass
+        case _:
+            return Err(TemplateError("the context of `" + name + "` must be an object (a struct or a dict), not " + kind_of(ctx)))
+    chain = chain_of(templates, name)
+    r = Render(templates, name, chain, fields, [])
+    run(r, chain[len(chain) - 1].nodes)?
+    return Ok("".join(r.out))
+
+# ---- loading ------------------------------------------------------------------------------
+
+def link(templates: dict[str, Template]) -> Result[None, TemplateError]:
+    for name, t in templates.items():
+        if t.parent != "" and t.parent not in templates:
+            return Err(problem(name, t.parent_line, "it extends `" + t.parent + "`, which does not exist"))
+        for i in range(len(t.includes)):
+            if t.includes[i] not in templates:
+                return Err(problem(name, t.include_lines[i], "it includes `" + t.includes[i] + "`, which does not exist"))
+    # A template that extends or includes itself, however indirectly, would never finish.
+    for name in templates.keys():
+        path: list[str] = [name]
+        found = cycle_from(templates, name, path)
+        if found != "":
+            return Err(problem(name, 0, found))
+    return Ok(None)
+
+def cycle_from(templates: dict[str, Template], name: str, path: list[str]) -> str:
+    t = templates[name]
+    targets: list[str] = list(t.includes)
+    if t.parent != "":
+        targets.append(t.parent)
+    for target in targets:
+        if target == path[0]:
+            return "the templates " + " -> ".join(path) + " -> " + target + " include or extend each other in a cycle"
+        if target in path:
+            continue
+        path.append(target)
+        found = cycle_from(templates, target, path)
+        if found != "":
+            return found
+        path.pop()
+    return ""
+
+@frozen
+pub struct Snapshot:
+    """What `Templates` has loaded: the templates, and when each file was last changed."""
+    templates: frozendict[str, Template]
+    stamps: frozendict[str, int]
+
+pub def build(sources: dict[str, str], stamps: dict[str, int]) -> Result[Snapshot, TemplateError]:
+    templates: dict[str, Template] = {}
+    for name, src in sources.items():
+        templates[name] = parse_template(name, src)?
+    link(templates)?
+    return Ok(Snapshot(frozendict(templates), frozendict(stamps)))
+
+def scan_dir(root: str, prefix: str, into: dict[str, int]) -> Result[None, TemplateError]:
+    path = root if prefix == "" else root + "/" + prefix
+    names: list[str] = []
+    match io.list_dir(path):
+        case Ok(found):
+            names = found
+        case Err(failure):
+            return Err(TemplateError("cannot read the directory " + path + ": " + failure.message()))
+    for entry in names:
+        if entry.starts_with("."):
+            continue
+        relative = entry if prefix == "" else prefix + "/" + entry
+        full = root + "/" + relative
+        if io.is_dir(full):
+            scan_dir(root, relative, into)?
+        else:
+            into[relative] = io.modified_ns(full)
+    return Ok(None)
+
+def load_snapshot(root: str) -> Result[Snapshot, TemplateError]:
+    stamps: dict[str, int] = {}
+    scan_dir(root, "", stamps)?
+    sources: dict[str, str] = {}
+    for name in stamps.keys():
+        match io.read_file(root + "/" + name):
+            case Ok(text):
+                sources[name] = text
+            case Err(failure):
+                return Err(TemplateError("cannot read " + name + ": " + failure.message()))
+    return build(sources, stamps)
+
+@frozen
+pub struct Templates:
+    """
+    The templates of a program, loaded and checked: any syntax error, unknown `extends` or
+    `include`, include cycle, or `{{ }}` in a place HTML escaping does not cover is an error from
+    `load_dir` or `from_strings`, not from the first request. Shared freely between tasks.
+    """
+    priv root: str
+    priv reload: bool
+    priv current: Mutex[dict[str, Snapshot]]
+
+impl Templates:
+    def render[T: ToJson](self, name: str, context: T) -> Result[str, TemplateError]:
+        """Render a template with a context: a struct or dict that can become JSON, whose
+        fields the template reads by name."""
+        snapshot = self.snapshot()?
+        match jsonlib.parse(jsonlib.encode(context)):
+            case Ok(value):
+                return render_value(snapshot.templates, name, value)
+            case Err(failure):
+                return Err(TemplateError("the context of `" + name + "` is not valid: " + failure.message()))
+
+    def names(self) -> list[str]:
+        """The names of the templates, sorted."""
+        found: list[str] = []
+        match self.snapshot():
+            case Ok(snapshot):
+                found = sorted(snapshot.templates.keys())
+            case Err(_):
+                pass
+        return found
+
+    priv def snapshot(self) -> Result[Snapshot, TemplateError]:
+        current: Snapshot? = None
+        with self.current.lock() as slots:
+            current = slots.get("")
+        shot = current.unwrap()
+        if not self.reload:
+            return Ok(shot)
+        stamps: dict[str, int] = {}
+        scan_dir(self.root, "", stamps)?
+        same = len(stamps) == len(shot.stamps)
+        if same:
+            for name, stamp in stamps.items():
+                if shot.stamps.get(name).unwrap_or(-2) != stamp:
+                    same = False
+                    break
+        if same:
+            return Ok(shot)
+        fresh = load_snapshot(self.root)?
+        with self.current.lock() as slots:
+            slots[""] = fresh
+        return Ok(fresh)
+
+pub def load_dir(path: str, reload: bool = False) -> Result[Templates, TemplateError]:
+    """Load every file under a directory as a template, named by its path below the directory
+    (`partials/row.html`). Files and directories whose names start with `.` are skipped. With
+    `reload=True`, each render first checks the files' modification times and loads again
+    what changed, so a template can be edited while the server runs; an error in an edited
+    template is reported by the render that finds it. Use it in development only."""
+    snapshot = load_snapshot(path)?
+    return Ok(Templates(path, reload, Mutex({"": snapshot})))
+
+pub def from_strings(sources: dict[str, str]) -> Result[Templates, TemplateError]:
+    """Templates from text instead of files, for tests and small programs."""
+    snapshot = build(sources, {})?
+    return Ok(Templates("", False, Mutex({"": snapshot})))

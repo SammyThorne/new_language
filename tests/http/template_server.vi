@@ -1,0 +1,29 @@
+# Renders the templates in the directory named by TEMPLATES, reloading them when they change, for
+# crates/lang_cli/tests/template.rs.
+
+import http
+import io
+import os
+import template
+
+@derive(Json)
+struct Item:
+    name: str
+    price: float
+
+@derive(Json)
+struct Shop:
+    title: str
+    items: list[Item]
+
+def shop() -> Shop:
+    return Shop("Corner <shop>", [Item("tea", 3.5), Item("jam & toast", 4.25)])
+
+def main():
+    pages = template.load_dir(os.getenv("TEMPLATES").unwrap(), reload=True).unwrap()
+    server = http.Server()
+    server.get("/", lambda req: http.render(pages, "shop.html", shop()))
+    server.get("/names", lambda req: Ok(http.text(", ".join(pages.names()))))
+    port = server.bind("127.0.0.1:0").unwrap()
+    io.eprint(f"listening on {port}")
+    server.serve()

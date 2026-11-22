@@ -12,6 +12,7 @@ The standard library is what makes Viper a backend language and not a general-pu
 | `datetime` | Instants, dates, durations, time zones, RFC 3339 | docs/14, milestone 5 | Viper, over runtime parsing, formatting and TZif reading |
 | `uuid` | Random and time-ordered UUIDs, parsing | docs/14, milestone 6 | Viper, over runtime generation and parsing |
 | `config` | Typed settings from environment variables and `.env` files; secrets that never print | docs/14, milestone 7 | Viper, over a runtime `.env` parser and a lenient mode of the JSON decoder |
+| `template` | HTML templates: `{{ }}` escaped by where it sits, inheritance, includes, filters, reload | docs/14, milestone 16 | Viper, over runtime file times |
 | `sync` | `Channel`, `Mutex`, `Atomic`, `spawn` support | M6 | Runtime |
 | `json` | Dynamic values, typed encode and decode | M7 | Runtime scanner and writer; compiler-derived per-type code |
 | `net` | TCP listener and stream | M8 | Runtime |
@@ -45,7 +46,7 @@ def main():
 
 | Module | Functions and types |
 |---|---|
-| `io` | `read_file(path) -> Result[str, IoError]`, `read_lines`, `write_file(path, text)`, `append_file`, `exists`, `remove`, `list_dir`, `read_line() -> str?` (standard input), `eprint(text)` (standard error), `open(path, mode="r") -> Result[File, IoError]`; `File` has `read`, `read_line`, `lines`, `write`, `close`, and closes itself at the end of a `with` block; `IoError` implements `Error` |
+| `io` | `read_file(path) -> Result[str, IoError]`, `read_lines`, `write_file(path, text)`, `append_file`, `exists`, `is_dir`, `modified_ns(path)` (last modified, nanoseconds since 1970, -1 if unreadable), `remove`, `list_dir`, `read_line() -> str?` (standard input), `eprint(text)` (standard error), `open(path, mode="r") -> Result[File, IoError]`; `File` has `read`, `read_line`, `lines`, `write`, `close`, and closes itself at the end of a `with` block; `IoError` implements `Error` |
 | `os` | `args() -> list[str]`, `getenv(name) -> str?`, `environ() -> dict[str, str]` (every variable whose name and value are UTF-8), `setenv(name, value)` (at startup, before starting tasks: the environment is not safe to change while other threads read it), `exit(code)`, `cwd()` |
 
 `input(prompt)` is also built in, returning `str?` (`None` at the end of input).
@@ -356,7 +357,7 @@ def remove(self, id: int): ...
 | `server.max_files`, `server.max_fields`, `server.max_part_headers`, `server.upload_dir` | Limits on a form: 10 files and 1000 text fields (else 413), 8 KiB of headers in one multipart part (else 400); the directory where files over 1 MiB wait while the request is handled (`""`, the default, for the system's temporary directory). See "Forms and uploads" |
 | `http.Handler` | `def(http.Request) -> Result[http.Response]` |
 | `http.Request` | `method`, `path`, `param(name) -> str`, `param_int(name) -> Result[int]` (fails with a 400 `http.Error`), `query(name) -> str?`, `query_string() -> str` (as sent, without `?`), `header(name) -> str?`, `cookie(name) -> str?` (`%XX` decoded), `body() -> bytes` (any bytes, for binary uploads), `text() -> Result[str]`, `json[T]() -> Result[T]`, `remote_addr() -> str` (the connection's other end, `host:port`), `client_ip() -> str` (the client's address without a port: through `server.trusted_proxies`, the rightmost address in `X-Forwarded-For` that is not one of them, so a client cannot choose it; otherwise the connection's; `""` for a test request); `form() -> Result[http.FormData]` (see "Forms and uploads"); `deadline() -> datetime.DateTime?` and `cancelled() -> bool` (see "Timeouts and cancellation"); `set_local(name, value)` and `local(name) -> str?` keep values with the request for the handlers after a middleware (docs/13); `route() -> str` is the pattern of the route that took the request (`/todos/{id}`), `""` before routing or when none did |
-| `http.Response` | `status`, `headers`, `body`; built with `http.text`, `http.json`, `http.binary(data, content_type="application/octet-stream", status=200)` (a body of any bytes), `http.error`, `http.redirect`, `http.no_content`; `body_bytes()` is the body as sent, for tests. `with_header(name, value)` sets a header; `add_header(name, value)` adds another value, sent as its own line (in `headers`, the values are joined by newlines) |
+| `http.Response` | `status`, `headers`, `body`; built with `http.text`, `http.json`, `http.binary(data, content_type="application/octet-stream", status=200)` (a body of any bytes), `http.error`, `http.redirect`, `http.no_content`; `body_bytes()` is the body as sent, for tests. `http.render(pages, name, context, status=200)` makes an HTML response from a template (see "Templates"); `http.stream` and `http.sse` send a body as it is written `with_header(name, value)` sets a header; `add_header(name, value)` adds another value, sent as its own line (in `headers`, the values are joined by newlines) |
 | `response.set_cookie(name, value, max_age=-1, path="/", http_only=True, secure=False, same_site="Lax")` | Adds a `Set-Cookie` header; any number per response. Characters a cookie cannot hold, and `%`, are sent as `%XX`, which `req.cookie` decodes. `__Host-` and `__Secure-` cookies, and `same_site="None"`, are always `Secure`. An invalid name, path or `same_site` is a bug and panics (a 500). `delete_cookie(name, path="/")` expires one; `response.cookie(name) -> str?` reads one back, for tests |
 | `http.url_encode(text)`, `http.url_decode(text, plus_is_space=True) -> str?`, `http.form_encode([(name, value), ...])` | Percent-encoding: everything but ASCII letters, digits and `-._~` as `%XX` of its UTF-8 bytes. `form_encode` makes a query string or an `application/x-www-form-urlencoded` body |
 | `http.test_request(method, path, body="", headers={}, form={}, files={})` | A request without a connection, for `server.handle(...)` in tests. A query string on `path` is what `query` reads; `headers` are what `header` and `cookie` read. `form` (`dict[str, str]`) sends text fields as an urlencoded body; with `files` (`dict[str, http.Upload]`, each made by `http.test_file(filename, content, content_type="application/octet-stream")`), a multipart form |
@@ -1069,6 +1070,53 @@ Spans go to an OpenTelemetry collector (Jaeger, Tempo, Honeycomb and others take
 - **Cost.** With tracing off, a request, a fetch and a query each pay one load of a flag.
 - For tests, `TRACE_INTERVAL_MS` with the language's prefix shortens the 5 s interval (to at least 10 ms).
 
+## Templates (docs/14, milestone 16)
+
+```python
+import template
+
+pages = template.load_dir("templates", reload=os.getenv("DEV").is_some())?
+server.get("/", lambda req: http.render(pages, "home.html", {"user": current(req), "photos": photos(req)}))
+```
+
+A small Jinja-like language for HTML pages. `template.load_dir(path, reload=False)` reads every file under a directory (names starting with `.` are skipped) as a template named by its path below it (`partials/row.html`), parses and checks all of them, and returns `template.Templates`; `template.from_strings({"name": "source"})` does the same for text, for tests. A mistake is an error from the loader, as a `template.TemplateError`, not from the first request.
+
+| Call | Meaning |
+|---|---|
+| `pages.render(name, context)` | The page as text. `context` is anything that can become JSON: a `@derive(Json)` struct, or `json.object({...})`; its top level must be an object, and its fields are the template's variables. The template sees the JSON tree, so `None` is none and a `datetime` is its text |
+| `http.render(pages, name, context, status=200)` | An HTML response (`text/html; charset=utf-8`). A template that fails is a 500 `internal server error`; the details are logged |
+| `pages.names()` | The template names, sorted |
+| `template.TemplateError` | `message()` is `name:line: reason`; `status()` is 500 |
+
+**Syntax.**
+
+- `{{ expression }}` prints a value. `{% if %}`, `{% elif %}`, `{% else %}`, `{% endif %}`; `{% for x in items %}`, `{% empty %}`, `{% endfor %}` (`{% for key, value in object %}` for the fields of an object); `{% set name = expression %}`; `{% include "partials/row.html" %}`; `{% extends "base.html" %}` with `{% block name %}`...`{% endblock %}`; `{# comments #}`. `{%-`, `-%}`, `{{-` and `-}}` remove the white space beside a tag.
+- Expressions: names, `a.b` and `a["b"]` and `a[0]` (a negative index counts from the end), strings, integers, floats, `true`, `false`, `none`, lists `[1, 2]`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `and`, `or`, `not`, `in`, `not in`, `+` and `-` (numbers; `+` joins strings), and parentheses.
+- Inside a `for`, `loop.index` (from 1), `loop.index0`, `loop.first`, `loop.last` and `loop.length`.
+- A variable set by `for` or `set` is visible to what is included.
+- Filters, written `value | filter` or `value | filter(argument)`: `upper`, `lower`, `title`, `trim`, `length` (a string, list or object), `default(x)` (for none or a missing field), `join(separator)`, `date(format)` (a date or date and time in RFC 3339 or ISO form, formatted as `datetime` does), `json`, `url` (percent-encoding), `raw`.
+
+**Inheritance.** A template that begins with `{% extends "base.html" %}` can hold only blocks. Rendering it renders the base, with each block replaced by the most derived template's version that defines it, however many levels there are. A block holds a default in the base. Names are resolved when the templates are loaded: an unknown parent or include, and a cycle of `extends` and `include` (however indirect), are load errors.
+
+**Escaping.** Every `{{ }}` is HTML-escaped (`& < > " '`) unless it ends in `| raw`. Where the `{{ }}` sits is found when the template is loaded, by a light tokenizer over its text (not a full HTML parser), and decides what else is needed:
+
+| Where | Rule |
+|---|---|
+| HTML text, a comment, a quoted attribute value | Escaped |
+| Inside `<script>` or `<style>`, or in an `on...=` or `style=` attribute | Load error unless the value ends in `| json` (written as JSON with `<`, `>` and `&` as `\u` escapes, so it cannot close the element; in an attribute, escaped as well) or `| raw` |
+| `href`, `src`, `action`, `formaction`, `poster`, `cite`, `background`, `data`, `ping`, `xlink:href` | Escaped; and if what the attribute's value comes to has a scheme other than `http`, `https` or `mailto` (`javascript:`, `data:`, `vbscript:`, in any case, with tabs and line breaks hidden in it as browsers allow), the whole value is replaced by `#unsafe`. This covers values built from several `{{ }}` |
+| An unquoted attribute value, a place inside a tag between attributes, a tag name | Load error: a value cannot be made safe there |
+
+`| raw` is the author's promise that a value is already safe; it works anywhere. `{% block %}` and `{% include %}` can only be in HTML text (put the whole `<script>` in the block, not the block in the `<script>`), the branches of an `{% if %}` must leave the HTML in the same state, and a template must end in HTML text.
+
+**Errors.** A field or variable that is not there is an error at render time, naming the template, the line and the expression, and listing the fields that are: `home.html:12: `user.nmae`: there is no field `nmae` (it has: name, born)`. A value that is none cannot be printed (use `default`), and nor can a list or an object (use `join` or `json`): nothing is silently blank. `default` is the way to allow a missing field. Errors inside an included or inherited template name that template.
+
+**Reload.** With `reload=True`, each render first lists the directory and compares file modification times, and loads everything again when one changed, was added or removed. An error in an edited template is reported by the render that finds it, and the render that follows a fix works. Do not use it in production: it costs a directory scan per render.
+
+**Cost.** Parsing and checking happen once. Rendering is a walk over the parsed tree: a table of 1000 rows with four cells each (148 KB of HTML) takes 1.2 ms in a release build. `render` turns the context into JSON and reads it back, so a very large context costs its encoding.
+
+**Not covered.** Macros, `super()`, autoescape switched off for a template, user-written filters, whitespace control by default, and HTML parsing beyond the tokenizer above (a template that breaks the tokenizer's assumptions, such as an attribute value containing `>` outside quotes, is not checked as well as it could be). `csrf_field()` arrives with milestone 20. `examples/recipes` is a small site with a base page, an include, escaped text, a script with JSON, and tests.
+
 ## Tasks and synchronisation
 
 API-level summary; semantics are in [04](04-runtime-and-memory.md#concurrency).
@@ -1121,6 +1169,7 @@ A request's deadline and cancellation are carried by the task, not passed around
 | `auth` | `on_login` and `protect` checked shareable | | everything |
 | PostgreSQL | | protocol, pool | `Db`, `Row`, `query_as` |
 | `log` | | formatting, the request context, buffering | API, `Logger` |
+| `template` | | file modification times | lexer, parser, escaping checks, renderer |
 | `time`, `io`, `os` | | system calls | API |
 
 The direction of travel is rightwards: as generics, byte buffers and the optimiser mature, implementations move from the runtime column to the Viper column, which makes them inlinable and lets the language test itself.

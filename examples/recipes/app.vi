@@ -1,0 +1,54 @@
+# A small recipe site rendered from templates: the routes are in `make_server`, which main.vi
+# serves and app_test.vi tests. The pages are in templates/; see README.md.
+
+import http
+import template
+
+@derive(Json)
+struct Ingredient:
+    name: str
+    amount: str
+
+@derive(Json)
+struct Recipe:
+    id: int
+    title: str
+    summary: str?
+    minutes: int
+    vegetarian: bool
+    ingredients: list[Ingredient]
+    source: str
+
+@derive(Json)
+struct Index:
+    recipes: list[Recipe]
+    query: str?
+
+def recipes() -> list[Recipe]:
+    return [
+        Recipe(1, "Tomato soup", Some("Warm & quick."), 25, True,
+               [Ingredient("Tomatoes", "1 kg"), Ingredient("ONION", "1")], "https://example.com/soup"),
+        Recipe(2, "Fish pie <deluxe>", None, 70, False,
+               [Ingredient("Cod", "500 g"), Ingredient("Potatoes", "800 g")], "javascript:alert('fish')"),
+    ]
+
+pub def make_server(reload: bool = False) -> http.Server:
+    # Loading checks every template: a mistake stops the program here, not on the first request.
+    pages = template.load_dir("templates", reload=reload).unwrap()
+    server = http.Server()
+    server.get("/", lambda req: http.render(pages, "index.html", Index(recipes(), None)))
+    server.get("/search", lambda req: search(pages, req))
+    server.get("/recipes/{id}", lambda req: show(pages, req))
+    return server
+
+def search(pages: template.Templates, req: http.Request) -> Result[http.Response]:
+    query = req.query("q").unwrap_or("")
+    found = [r for r in recipes() if query.lower() in r.title.lower()]
+    return http.render(pages, "index.html", Index(found, Some(query)))
+
+def show(pages: template.Templates, req: http.Request) -> Result[http.Response]:
+    id = int.parse(req.param("id")).unwrap_or(0)
+    for recipe in recipes():
+        if recipe.id == id:
+            return http.render(pages, "recipe.html", {"recipe": recipe})
+    return Err(http.HttpError(404, "no such recipe"))

@@ -22,6 +22,7 @@ import datetime
 import json as jsonlib
 import log
 import os
+import template
 import time
 import uuid
 
@@ -1043,6 +1044,19 @@ pub def binary(data: bytes, content_type: str = "application/octet-stream", stat
     response = Response(status, "", content_type)
     response.raw = RawBody.Data(data)
     return response
+
+pub def render[T: ToJson](pages: template.Templates, name: str, context: T, status: int = 200) -> Result[Response]:
+    """
+    An HTML response made from a template (see the `template` module):
+
+        pages = template.load_dir("templates")?
+        server.get("/", lambda req: http.render(pages, "home.html", {"user": current(req)}))
+
+    A template that fails to render is a 500: the details (the template, the line and the
+    expression) are logged and not sent to the client.
+    """
+    html = pages.render(name, context)?
+    return Ok(Response(status, html, "text/html; charset=utf-8"))
 
 pub def error(status: int, message: str) -> Response:
     """A JSON error response: `{"error": message}`."""

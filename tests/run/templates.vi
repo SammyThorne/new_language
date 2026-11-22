@@ -1,0 +1,184 @@
+# HTML templates (docs/14, milestone 16): output and statements, filters, inheritance three levels
+# deep, includes, escaping in each context (text, attributes, URLs, scripts, styles, event
+# handlers), the checks made when a template is loaded, include and extends cycles, and error
+# messages with template line numbers.
+# expect: basic: Hi ADA! 2 photos (admin)
+# expect: loop: 1/2 A Cat, 2/2 Two &lt;dogs&gt;
+# expect: tags: x, y;;
+# expect: default: no note x
+# expect: cmp: yes 3 ada! true
+# expect: set: 23
+# expect: json: <script>var p = [{"id":1,"title":"a cat","tags":["x","y"],"note":null},{"id":2,"title":"two \u003cdogs\u003e","tags":[],"note":"hi"}];</script><a onclick="go(&quot;ada&quot;)">x</a><i>&quot;ada&quot;</i>
+# expect: raw: &lt;b&gt; <b>
+# expect: url: <a href="/p/ada?q=a%20b%26c">l</a>
+# expect: evil: <a href="ada">l</a> <img src='ada'>
+# expect: base: <html><title>Base</title><body>base body</body></html>
+# expect: mid: <html><title>Mid</title><body>mid[mid inner]</body></html>
+# expect: leaf: <html><title>Leaf</title><body>mid[leaf ada]</body></html>
+# expect: inc: <ul><li>a cat</li><li>two &lt;dogs&gt;</li></ul>
+# expect: ws: abc  d
+# expect: obj: a=1;b=two;
+# expect: evil2: <a href="#unsafe">l</a> <img src='#unsafe'>
+# expect: evil3: <a href="mailto:a@b.c">l</a> <img src='mailto:a@b.c'>
+# expect: missing field: RENDER ERROR t.html:2: `user.nmae`: there is no field `nmae` (it has: name, born, day)
+# expect: missing var: RENDER ERROR t.html:1: `nobody`: `nobody` is not defined
+# expect: null: RENDER ERROR t.html:3: `none` is none, which cannot be printed: use `| default(...)` for a value that may be missing
+# expect: list print: RENDER ERROR t.html:1: `user` is an object, which cannot be printed: use `| join(...)` or `| json`
+# expect: date: 2026-11-21 09:30 10 December 1815
+# expect: bad date: RENDER ERROR t.html:1: `user.name | date("%Y")`: `date` needs a date or a date and time such as 2026-11-21 or 2026-11-21T09:30:00Z, not `ada`
+# expect: filter: RENDER ERROR t.html:1: `user.name | frobnicate`: there is no filter `frobnicate` (the filters are upper, lower, title, trim, length, default, join, date, json, url and raw)
+# expect: index: RENDER ERROR t.html:1: `n[0]`: cannot index an integer
+# expect: not an object: RENDER ERROR t.html:1: `n`: `{% for %}` needs a list or an object, not an integer
+# expect: unclosed if: LOAD ERROR a.html:2: `{% if %}` is never closed
+# expect: stray end: LOAD ERROR a.html:1: unexpected `{% endif %}`
+# expect: bad stmt: LOAD ERROR a.html:1: unexpected `{% frob %}`
+# expect: unterminated: LOAD ERROR a.html:2: `{{` is never closed
+# expect: bad expr: LOAD ERROR a.html:2: `x.`: a field name must follow `.`
+# expect: script: LOAD ERROR a.html:1: `{{ n }}` is inside `<script>`, where HTML escaping is not enough: write `{{ n | json }}` (or `| raw` for a value that is already safe)
+# expect: script json ok: loaded
+# expect: style: LOAD ERROR a.html:1: `{{ c }}` is inside `<style>`, where HTML escaping is not enough: write `{{ c | json }}` (or `| raw` for a value that is already safe)
+# expect: onclick: LOAD ERROR a.html:1: `{{ n }}` is in the `onclick` attribute, where HTML escaping is not enough: write `{{ n | json }}` (or `| raw` for a value that is already safe)
+# expect: style attr: LOAD ERROR a.html:1: `{{ c }}` is in the `style` attribute, where HTML escaping is not enough: write `{{ c | json }}` (or `| raw` for a value that is already safe)
+# expect: unquoted: LOAD ERROR a.html:1: `{{ n }}` is in the attribute `title` without quotes: put the value in quotes
+# expect: in tag: LOAD ERROR a.html:1: `{{ attrs }}` is inside the tag `<a>`, outside an attribute value, where a value cannot be made safe
+# expect: tag name: LOAD ERROR a.html:1: `{{ tag }}` is in a tag name, where a value cannot be made safe
+# expect: comment ok: loaded
+# expect: script closed: loaded
+# expect: block in script: LOAD ERROR a.html:1: the block `b` is inside `<script>`: a block can only go in HTML text (put the whole `<script>` in the block)
+# expect: if branches differ: LOAD ERROR a.html:1: the branches of this `{% if %}` leave the HTML in different states (one ends inside a tag or a script, another does not)
+# expect: missing parent: LOAD ERROR a.html:1: it extends `nope.html`, which does not exist
+# expect: missing include: LOAD ERROR a.html:2: it includes `nope.html`, which does not exist
+# expect: include cycle: LOAD ERROR a.html: the templates a.html -> b.html -> a.html include or extend each other in a cycle
+# expect: extends cycle: LOAD ERROR a.html: the templates a.html -> b.html -> a.html include or extend each other in a cycle
+# expect: self include: LOAD ERROR a.html: the templates a.html -> a.html include or extend each other in a cycle
+# expect: content outside blocks: LOAD ERROR a.html: a template that extends another can only hold blocks, but it has text outside them
+# expect: dup block: LOAD ERROR a.html:1: the block `x` is defined twice in this template
+# expect: extends not first: LOAD ERROR a.html:1: `{% extends %}` must come first in the template
+# expect: url https://example.com/a?b=1&c=2: <a href="https://example.com/a?b=1&amp;c=2">x</a><a href="/go?to=https://example.com/a?b=1&amp;c=2">y</a><a href="#unsafe">z</a>
+# expect: url /relative: <a href="/relative">x</a><a href="/go?to=/relative">y</a><a href="#unsafe">z</a>
+# expect: url JavaScript:alert(1): <a href="#unsafe">x</a><a href="/go?to=JavaScript:alert(1)">y</a><a href="#unsafe">z</a>
+# expect: url   javascript:alert(1): <a href="#unsafe">x</a><a href="/go?to=  javascript:alert(1)">y</a><a href="#unsafe">z</a>
+# expect: url java<TAB>script:alert(1): <a href="#unsafe">x</a><a href="/go?to=java	script:alert(1)">y</a><a href="#unsafe">z</a>
+# expect: url data:text/html,hi: <a href="#unsafe">x</a><a href="/go?to=data:text/html,hi">y</a><a href="#unsafe">z</a>
+# expect: url vbscript:x: <a href="#unsafe">x</a><a href="/go?to=vbscript:x">y</a><a href="#unsafe">z</a>
+# expect: url HTTP://EXAMPLE.COM: <a href="HTTP://EXAMPLE.COM">x</a><a href="/go?to=HTTP://EXAMPLE.COM">y</a><a href="#unsafe">z</a>
+# expect: url mailto:a@b.c: <a href="mailto:a@b.c">x</a><a href="/go?to=mailto:a@b.c">y</a><a href="#unsafe">z</a>
+# expect: url //evil.example/x: <a href="//evil.example/x">x</a><a href="/go?to=//evil.example/x">y</a><a href="#unsafe">z</a>
+# expect: url a:b: <a href="#unsafe">x</a><a href="/go?to=a:b">y</a><a href="#unsafe">z</a>
+
+import template
+import json
+
+@derive(Json)
+struct Photo:
+    id: int
+    title: str
+    tags: list[str]
+    note: str?
+
+@derive(Json)
+struct Page:
+    user: str
+    photos: list[Photo]
+    admin: bool
+
+def show(label: str, r: Result[str, template.TemplateError]):
+    match r:
+        case Ok(text):
+            print(label + ":", text.replace("\n", "|"))
+        case Err(e):
+            print(label + ": ERROR", e.message())
+
+def load(label: str, sources: dict[str, str]):
+    match template.from_strings(sources):
+        case Ok(_):
+            print(label + ": loaded")
+        case Err(e):
+            print(label + ": LOAD ERROR", e.message())
+
+def render(label: str, source: str, ctx: json.Value):
+    match template.from_strings({"t.html": source}):
+        case Ok(t):
+            match t.render("t.html", ctx):
+                case Ok(text):
+                    print(label + ":", text)
+                case Err(e):
+                    print(label + ": RENDER ERROR", e.message())
+        case Err(e):
+            print(label + ": LOAD ERROR", e.message())
+
+def contexts():
+    t = template.from_strings({
+        "basic.html": "Hi {{ user | upper }}! {{ photos | length }} photos{% if admin %} (admin){% endif %}",
+        "loop.html": "{% for p in photos %}{{ loop.index }}/{{ loop.length }} {{ p.title | title }}{% if not loop.last %}, {% endif %}{% empty %}none{% endfor %}",
+        "tags.html": "{% for p in photos %}{{ p.tags | join(\", \") }};{% endfor %}",
+        "default.html": "{{ photos[0].note | default(\"no note\") }} {{ photos[0].nope | default(\"x\") }}",
+        "cmp.html": "{% if photos[0].id == 1 and 'a' in photos[0].title %}yes{% elif photos[0].id > 5 %}big{% else %}no{% endif %} {{ 1 + 2 }} {{ user + \"!\" }} {{ 'x' not in 'abc' }}",
+        "set.html": "{% set n = photos | length %}{{ n }}{% set n = n + 1 %}{{ n }}",
+        "json.html": "<script>var p = {{ photos | json }};</script><a onclick=\"go({{ user | json }})\">x</a><i>{{ user | json }}</i>",
+        "raw.html": "{{ '<b>' }} {{ '<b>' | raw }}",
+        "url.html": "<a href=\"/p/{{ user | url }}?q={{ 'a b&c' | url }}\">l</a>",
+        "evil.html": "<a href=\"{{ user }}\">l</a> <img src='{{ user }}'>",
+        "obj.html": "{% for k, v in cfg %}{{ k }}={{ v }};{% endfor %}",
+        "base.html": "<html>{% block head %}<title>{% block title %}Base{% endblock %}</title>{% endblock %}<body>{% block body %}base body{% endblock %}</body></html>",
+        "mid.html": "{% extends \"base.html\" %}{% block title %}Mid{% endblock %}{% block body %}mid[{% block inner %}mid inner{% endblock %}]{% endblock %}",
+        "leaf.html": "{% extends \"mid.html\" %}{% block inner %}leaf {{ user }}{% endblock %}{% block title %}Leaf{% endblock %}",
+        "part.html": "<li>{{ p.title }}</li>",
+        "inc.html": "<ul>{% for p in photos %}{% include \"part.html\" %}{% endfor %}</ul>",
+        "ws.html": "a  {%- if admin -%}  b  {%- endif -%}  c {# note #} d",
+    }).unwrap()
+    page = Page("ada", [Photo(1, "a cat", ["x", "y"], None), Photo(2, "two <dogs>", [], Some("hi"))], True)
+    for name in ["basic", "loop", "tags", "default", "cmp", "set", "json", "raw", "url", "evil", "base", "mid", "leaf", "inc", "ws"]:
+        show(name, t.render(name + ".html", page))
+    show("obj", t.render("obj.html", json.object({"cfg": json.object({"a": 1, "b": "two"})})))
+    page.user = "javascript:alert(1)"
+    show("evil2", t.render("evil.html", page))
+    page.user = "mailto:a@b.c"
+    show("evil3", t.render("evil.html", page))
+
+def errors():
+    ctx = json.object({"user": json.object({"name": "ada", "born": "2026-11-21T09:30:00Z", "day": "1815-12-10"}), "n": 3, "none": None})
+    render("missing field", "line one\n<p>{{ user.nmae }}</p>", ctx)
+    render("missing var", "{{ nobody }}", ctx)
+    render("null", "x\n\n{{ none }}", ctx)
+    render("list print", "{{ user }}", ctx)
+    render("date", "{{ user.born | date(\"%Y-%m-%d %H:%M\") }} {{ user.day | date(\"%d %B %Y\") }}", ctx)
+    render("bad date", "{{ user.name | date(\"%Y\") }}", ctx)
+    render("filter", "{{ user.name | frobnicate }}", ctx)
+    render("index", "{{ n[0] }}", ctx)
+    render("not an object", "{% for x in n %}{% endfor %}", ctx)
+    load("unclosed if", {"a.html": "x\n{% if a %}\nb"})
+    load("stray end", {"a.html": "{% endif %}"})
+    load("bad stmt", {"a.html": "{% frob %}"})
+    load("unterminated", {"a.html": "a\nb {{ x "})
+    load("bad expr", {"a.html": "a\n{{ x. }}"})
+    load("script", {"a.html": "<script>var x = {{ n }};</script>"})
+    load("script json ok", {"a.html": "<script>var x = {{ n | json }};</script>"})
+    load("style", {"a.html": "<style>a { color: {{ c }} }</style>"})
+    load("onclick", {"a.html": "<a onclick=\"f({{ n }})\">x</a>"})
+    load("style attr", {"a.html": "<a style=\"color: {{ c }}\">x</a>"})
+    load("unquoted", {"a.html": "<a title={{ n }}>x</a>"})
+    load("in tag", {"a.html": "<a {{ attrs }}>x</a>"})
+    load("tag name", {"a.html": "<{{ tag }}>x"})
+    load("comment ok", {"a.html": "<!-- {{ n }} --><p title='{{ n }}'>{{ n }}</p>"})
+    load("script closed", {"a.html": "<script>1</script><p>{{ n }}</p>"})
+    load("block in script", {"a.html": "<script>{% block b %}{% endblock %}</script>"})
+    load("if branches differ", {"a.html": "{% if a %}<script>{% else %}<p>{% endif %}"})
+    load("missing parent", {"a.html": "{% extends \"nope.html\" %}"})
+    load("missing include", {"a.html": "x\n{% include \"nope.html\" %}"})
+    load("include cycle", {"a.html": "{% include \"b.html\" %}", "b.html": "{% include \"a.html\" %}"})
+    load("extends cycle", {"a.html": "{% extends \"b.html\" %}", "b.html": "{% extends \"a.html\" %}"})
+    load("self include", {"a.html": "{% include \"a.html\" %}"})
+    load("content outside blocks", {"a.html": "{% extends \"b.html\" %}stray", "b.html": ""})
+    load("dup block", {"a.html": "{% block x %}{% endblock %}{% block x %}{% endblock %}"})
+    load("extends not first", {"a.html": "x{% extends \"b.html\" %}", "b.html": ""})
+
+def urls():
+    t = template.from_strings({"link.html": "<a href=\"{{ u }}\">x</a><a href=\"/go?to={{ u }}\">y</a><a href=\"{{ scheme }}:{{ rest }}\">z</a>"}).unwrap()
+    for u in ["https://example.com/a?b=1&c=2", "/relative", "JavaScript:alert(1)", "  javascript:alert(1)", "java\tscript:alert(1)", "data:text/html,hi", "vbscript:x", "HTTP://EXAMPLE.COM", "mailto:a@b.c", "//evil.example/x", "a:b"]:
+        show("url " + u.replace("\t", "<TAB>"), t.render("link.html", json.object({"u": u, "scheme": "java", "rest": "script:alert(1)"})))
+
+def main():
+    contexts()
+    errors()
+    urls()

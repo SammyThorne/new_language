@@ -100,6 +100,28 @@ pub unsafe extern "C-unwind" fn lrt_io_exists(path: *const u8, path_len: i64) ->
     i64::from(std::path::Path::new(unsafe { text(path, path_len) }).exists())
 }
 
+/// Whether the path is a directory: 1 or 0.
+///
+/// # Safety
+/// The arguments must describe a UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_io_is_dir(path: *const u8, path_len: i64) -> i64 {
+    i64::from(std::path::Path::new(unsafe { text(path, path_len) }).is_dir())
+}
+
+/// When a file was last modified, in nanoseconds since the Unix epoch; -1 if it cannot be read.
+///
+/// # Safety
+/// The arguments must describe a UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_io_mtime(path: *const u8, path_len: i64) -> i64 {
+    std::fs::metadata(unsafe { text(path, path_len) })
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(-1, |d| d.as_nanos() as i64)
+}
+
 /// Remove a file. Returns 1 on success.
 ///
 /// # Safety

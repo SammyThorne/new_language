@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Recipes</h1>
+  <ul>
+  {% for recipe in recipes %}
+    <li><a href="/recipes/{{ recipe.id }}">{{ recipe.title }}</a>
+      ({{ recipe.minutes }} min{% if recipe.vegetarian %}, vegetarian{% endif %})</li>
+  {% empty %}
+    <li>No recipes yet.</li>
+  {% endfor %}
+  </ul>
+  <form action="/search" method="get">
+    <input name="q" value="{{ query | default("") }}" placeholder="Search">
+  </form>
+{% endblock %}

@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 15 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 16 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1210,6 +1210,18 @@ Done (D120):
   - Error messages with template line numbers.
   - Rendering speed: a 1000-row table in under 5 ms, recorded.
 - **Docs:** docs/05, a site section, and an example page in `examples/`.
+
+Done (D121):
+
+- `template.load_dir(path, reload=False)` and `template.from_strings(sources)` give `template.Templates`; `render(name, context)` takes anything `ToJson`. `http.render(pages, name, context, status=200)` makes the HTML response; a failing template is a logged 500.
+- The syntax of 4.14 (output, `if`/`elif`/`else`, `for`/`empty` with `loop`, `set`, `include`, `extends`/`block`, comments, white-space trimming) and its filters (`upper`, `lower`, `title`, `trim`, `length`, `default`, `join`, `date`, `json`, `url`, `raw`), with `==`, `!=`, `<`, `<=`, `>`, `>=`, `and`, `or`, `not`, `in`, `not in`, and `+`, `-`.
+- Contextual escaping checked at load time: a `{{ }}` in `<script>`, `<style>`, or an `on...=` or `style=` attribute needs `| json` (or `| raw`); one in an unquoted value, between attributes or in a tag name is refused. URL attributes have their whole value replaced by `#unsafe` when a scheme other than `http`, `https` or `mailto` comes out, including one assembled from several `{{ }}`.
+- Load errors for unknown `extends` and `include`, cycles of either, a block or include in a script, branches that end in different places, duplicate blocks, text outside the blocks of a child. Render errors name the template, line and expression.
+- `reload=True` rescans and loads again what changed.
+- Runtime: `io.is_dir` and `io.modified_ns`. Nothing else in Rust.
+- Speed: a 1000-row table (148 KB) renders in 1.2 ms in a release build (best of 20, `time.monotonic`), 7.5 ms in a debug build; the limit was 5 ms in a release build.
+- Tests: `tests/run/templates.vi` (52 outputs and errors: every statement and filter, three levels of inheritance, includes, each escaping context, the URL schemes in their spellings, and every load error with its line); `tests/run/template_speed.vi` (the 1000-row table, in the stress modes); `crates/lang_cli/tests/template.rs` over the wire (nested directories, an edit, a new file, a broken edit as a 500 whose details are only in the log, a fix) and `examples/recipes`' five tests.
+- Docs: docs/05 ("Templates"), `examples/recipes`, and a site section.
 
 ### Track F: data and background work
 
