@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 16 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 17 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1234,6 +1234,13 @@ Done (D121):
   - `DateTime`, `Uuid` and `bytes` columns.
   - A program that doesn't import `sqlite` does not link it (checked with `ldd`).
 - **Docs:** docs/05, docs/building.md (the system library), and the install scripts.
+
+Done (D122):
+
+- `crates/lang_rt/src/sqlite.rs`: FFI to `libsqlite3` through `dlopen` (D122 explains why not `-lsqlite3`), a thread per database, a transaction that owns the connection, typed parameters and cells, named error codes. `stdlib/sqlite.lang`: `open`, `Db` (`query`, `query_row`, `execute`, `insert`, `script`, `transaction`, `commit`, `rollback`, `close`), `Row`, `query_as`, `query_one_as`, `blob`.
+- WAL, `busy_timeout=5000` and `foreign_keys=ON` on every file database; `INTEGER`, `REAL`, `TEXT`, `BLOB` and `NULL` map as planned, `BOOLEAN` columns read as bool in `query_as`, and `DateTime` and `Uuid` are text.
+- Install: `libsqlite3-0` in `scripts/install.sh`, an optional line in `scripts/check-deps.sh`, and docs/building.md.
+- Tests: three unit tests (error names, rows as JSON, a real in-memory database); `tests/run/sqlite_database.vi` (CRUD, `query_as`, each type, `DateTime` and `Uuid`, commit, abandoned, failed and nested transactions, every error code, parameter checks, eight tasks on one database, a transaction that holds the connection, closing); `crates/lang_cli/tests/sqlite.rs` (two processes with two connections each writing 600 rows to one WAL file; the pragmas; no `libsqlite3` in the executable's `NEEDED` list).
 
 #### Milestone 18: migrations (about 2 days; after 17)
 

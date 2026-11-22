@@ -116,6 +116,8 @@ A compiled program is a single executable that links `libgc.so.1` and the C libr
 sudo apt install libgc1
 ```
 
+A program that imports `sqlite` also needs the system's SQLite library, `libsqlite3.so.0` (`sudo apt install libsqlite3-0`; Homebrew's `sqlite` on macOS). It is not linked: the program loads it with `dlopen` when it opens its first database, so other programs run without it, and a missing library is an error from `sqlite.open`: `SQLite is not installed`. The install script installs it, and `scripts/check-deps.sh` lists it as optional. The tests that open a database (`tests/run/sqlite_database.vi`, `crates/lang_cli/tests/sqlite.rs`) need it.
+
 To see exactly what an executable loads, run `ldd ./app`.
 
 ## Building

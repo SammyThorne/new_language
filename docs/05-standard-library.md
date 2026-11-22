@@ -21,6 +21,7 @@ The standard library is what makes Viper a backend language and not a general-pu
 | `testing` | Assertions and the `@test` runner | post-prototype | Viper |
 | `re` | Regular expressions | M12 | Viper API over the `regex-lite` crate |
 | `postgres` | PostgreSQL client with a connection pool | M12 | Runtime protocol code; Viper API layer |
+| `sqlite` | SQLite databases in files or memory, with the shape of `postgres` | docs/14, milestone 17 | Viper API over `libsqlite3`, loaded with `dlopen`; a thread per database in the runtime |
 | `crypto` | Secure random values, SHA-256, HMAC, constant-time comparison, base64, RS256 checks | post-prototype (D101) | Viper API over the `ring` crate |
 | `auth` | Sign-in with Google: login, callback and logout routes, a signed session cookie, route protection | post-prototype (D102) | Viper, on `http` and `crypto` |
 
@@ -761,6 +762,42 @@ Parameters are `$1`, `$2` in the SQL and a `list[str?]` beside it. They are sent
 
 The driver is runtime code over the same non-blocking socket as the HTTP server, so a query parks its task (D80). Authentication: SCRAM-SHA-256, MD5, cleartext and trust. `sslmode` is `disable`, `prefer` (the default: TLS when the server offers it, without checking the certificate, as libpq does), `require`, or `verify-full` (the certificate is checked against the trusted roots and the host name). A pool opens at most `pool_max` connections (10 by default); a task that finds them all busy waits up to 30 seconds. Not supported yet: `COPY`, `LISTEN`/`NOTIFY`, binary results, cancelling a running query, and statement caching (every query is parsed by the server each time).
 
+## SQLite (docs/14, milestone 17)
+
+```python
+import sqlite
+
+db = sqlite.open("app.db")?                      # or ":memory:"
+db.script("create table if not exists users (id integer primary key, name text not null unique, admin boolean default 0)")?
+id = db.insert("insert into users (name) values (?)", ["ann"])?
+users = sqlite.query_as[User](db, "select id, name, admin from users where id >= ?", [1])?
+for row in db.query("select id, name from users")?:
+    print(row.int("id")?, row.text("name")?)
+```
+
+An embedded SQL database in a file, with the shape of `postgres`: the same `Db`, `Row`, `query`, `query_row`, `execute`, `script`, `transaction`, `commit`, `rollback`, `close`, `query_as` and `query_one_as`, and the same `DbError` with `code` and `message()`. The differences are SQLite's own.
+
+| Call | Meaning |
+|---|---|
+| `sqlite.open(path)` | Opens a file (created if it does not exist) or `":memory:"`. WAL mode, `busy_timeout=5000` and `foreign_keys=ON` are set. A missing library, a path that cannot be opened and a file that is not a database are `DbError`s |
+| `db.query(sql, args=[])` | The rows. Parameters are `?` in the statement and a `list[json.Value]` beside it: `[1, "ann", 2.5, None, True]` (a bool is 0 or 1); `sqlite.blob(data)` is a `bytes` parameter. The number of values must equal the number of `?`; anything else (a list, an object) is an error. A `DateTime` or `Uuid` goes in as `str(value)` |
+| `db.query_row(sql, args=[])` | The first row, or `None` |
+| `db.execute(sql, args=[])` | How many rows the statement changed (or returned) |
+| `db.insert(sql, args=[])` | The new row's `rowid`, which is an `integer primary key` column |
+| `db.script(sql)` | Several statements, no parameters: a schema |
+| `db.transaction()` | `BEGIN IMMEDIATE` on the database, for `with ... as tx`; it rolls back unless `tx.commit()` was called |
+| `sqlite.query_as[T](db, sql, args=[])`, `query_one_as[T]` | Rows as a `@derive(Json)` struct whose fields are named like the columns |
+| `row.get(column)` | The cell as a `sqlite.Value`: `Null`, `Int`, `Float`, `Text` or `Blob` |
+| `row.int`, `float`, `text`, `bool`, `bytes` | The cell as that type, or a `DbError` (`SQLITE_MISMATCH`) if it holds another: SQLite does not check a column's declared type. `float` also reads an integer; `bool` reads an integer, 0 being false |
+
+**Types.** INTEGER is `int`, REAL `float`, TEXT `str`, BLOB `bytes`, NULL `None`. In `query_as`, a column declared `BOOLEAN` (or any type with `BOOL` in its name) fills a `bool` field, NULL fills an optional field, `DateTime` and `Uuid` fields read their text, and a blob reads as a `str` of its base64. A `bool` field over a column that is not declared boolean is an error, as is an integer in a `str` field.
+
+**Errors.** `DbError.code` is SQLite's name for the error: `SQLITE_CONSTRAINT_UNIQUE`, `SQLITE_CONSTRAINT_PRIMARYKEY`, `SQLITE_CONSTRAINT_FOREIGNKEY`, `SQLITE_CONSTRAINT_NOTNULL`, `SQLITE_CONSTRAINT_CHECK`, `SQLITE_BUSY`, `SQLITE_CANTOPEN`, `SQLITE_RANGE` (the wrong number of parameters), `SQLITE_MISMATCH`, and `SQLITE_ERROR` for a mistake in the SQL.
+
+**Concurrency.** Each `Db` has a thread of its own that owns the connection, so a task waiting for the disk, or for another process's lock, parks and does not block a worker thread. The statements of one `Db` run one after another, in the order they were given; eight tasks sharing a `Db` and updating a counter lose nothing. A transaction holds the connection until it ends: other tasks' statements on that `Db` wait, and then run in order. A task that keeps a transaction open for a long time holds the rest up, and a transaction that was never finished (its task died) holds them up until the `Db` is closed. For parallel readers and writers, open the same file more than once: WAL lets readers run beside a writer, and a writer waits for another's lock up to the busy timeout (5 seconds) before failing with `SQLITE_BUSY`; this works across processes too (the test starts two processes writing to one file). `BEGIN IMMEDIATE` takes the write lock when a transaction starts, so a transaction that reads and then writes cannot fail halfway.
+
+**The library.** The system's `libsqlite3` is loaded with `dlopen` when the first database is opened (`libsqlite3.so.0`, then `libsqlite3.so`, then the macOS names), so a program that never opens one links and needs nothing, and a missing library is an error from `sqlite.open` (`SQLite is not installed`). See docs/building.md. Not supported: loading extensions, user-defined functions, backups and incremental blob I/O; each `open(":memory:")` is a database of its own. Queries are not traced yet (`trace` spans cover `postgres` only).
+
 ## JSON
 
 Two ways to work with JSON, both first-class.
@@ -1170,6 +1207,7 @@ A request's deadline and cancellation are carried by the task, not passed around
 | PostgreSQL | | protocol, pool | `Db`, `Row`, `query_as` |
 | `log` | | formatting, the request context, buffering | API, `Logger` |
 | `template` | | file modification times | lexer, parser, escaping checks, renderer |
+| `sqlite` | | FFI to `libsqlite3`, a thread per database | `Db`, `Row`, `query_as` |
 | `time`, `io`, `os` | | system calls | API |
 
 The direction of travel is rightwards: as generics, byte buffers and the optimiser mature, implementations move from the runtime column to the Viper column, which makes them inlinable and lets the language test itself.

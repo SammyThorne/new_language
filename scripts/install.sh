@@ -64,8 +64,8 @@ if [ "$system_packages" -eq 1 ]; then
     fi
 
     # Build tools, git, the Boehm collector (programs link libgc.so.1), and what LLVM's shared
-    # library needs to be linked against.
-    packages="build-essential make curl ca-certificates git gnupg binutils libgc1 zlib1g-dev libzstd-dev"
+    # library needs to be linked against. libsqlite3 is what programs that import `sqlite` load.
+    packages="build-essential make curl ca-certificates git gnupg binutils libgc1 libsqlite3-0 zlib1g-dev libzstd-dev"
 
     say "This will install system packages with apt: $packages, and LLVM 19 (llvm-19-dev, libpolly-19-dev)."
     if [ "$assume_yes" -ne 1 ] && [ "$dry_run" -ne 1 ]; then

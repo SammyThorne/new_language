@@ -1,0 +1,181 @@
+# SQLite (docs/14, milestone 17): inserts, updates and typed reads, `query_as`, every column type,
+# `DateTime` and `Uuid` as text, transactions (commit, abandoned, failed halfway, nested),
+# named errors, parameter checks, eight tasks updating one database, a transaction that holds
+# the connection, and a closed database. Needs the system's libsqlite3.
+# expect: insert ann: 1
+# expect: insert bob: 2
+# expect: update: 1
+# expect: delete none: 0
+# expect: user 1 ann 3.5 True
+# expect: user 2 bob None False
+# expect: no such user
+# expect: ['id', 'name', 'score', 'admin', 'data']
+# expect: ann 3.5 True True
+# expect: wrong types: True True True
+# expect: blob: 4 True
+# expect: text: ünï "q" 'x'
+# expect: int: True
+# expect: null: True
+# expect: event: True True None
+# expect: time: 2026-11-21 09:30
+# expect: after commit and an abandoned transaction: 1
+# expect: failed in a transaction: True 1
+# expect: nested: True
+# expect: finished twice: True
+# expect: unique: ERROR SQLITE_CONSTRAINT_UNIQUE | UNIQUE constraint failed: users.name
+# expect: not null: ERROR SQLITE_CONSTRAINT_NOTNULL | NOT NULL constraint failed: users.name
+# expect: foreign key: ERROR SQLITE_CONSTRAINT_FOREIGNKEY | FOREIGN KEY constraint failed
+# expect: no table: ERROR SQLITE_ERROR | no such table: missing_table
+# expect: syntax: ERROR SQLITE_ERROR | near "selec": syntax error
+# expect: too few values: ERROR SQLITE_RANGE | the statement has 2 parameters (`?`) but 1 value was given
+# expect: too many values: ERROR SQLITE_RANGE | the statement has 0 parameters (`?`) but 1 value was given
+# expect: list parameter: ERROR SQLITE_MISMATCH | a parameter cannot be a list
+# expect: open: SQLITE_CANTOPEN
+# expect: counter: 400
+# expect: during: 400
+# expect: after close: ERROR SQLITE_ERROR | not an open database
+
+import datetime
+import sqlite
+import time
+import uuid
+
+@derive(Json)
+struct User:
+    id: int
+    name: str
+    score: float?
+    admin: bool
+
+@derive(Json)
+struct Event:
+    id: uuid.Uuid
+    at: datetime.DateTime
+    note: str?
+
+def show(label: str, r: Result[int, sqlite.DbError]):
+    match r:
+        case Ok(n):
+            print(label + ":", n)
+        case Err(e):
+            print(label + ": ERROR", e.code, "|", e.message())
+
+def schema(db: sqlite.Db):
+    db.script("""
+        create table users (id integer primary key, name text not null unique, score real, admin boolean default 0, data blob);
+        create table notes (id integer primary key, user_id integer not null references users(id), body text);
+        create table events (id text primary key, at text not null, note text);
+        create table counter (n integer not null);
+        insert into counter values (0);
+    """).unwrap()
+
+def crud(db: sqlite.Db):
+    show("insert ann", db.insert("insert into users (name, score, admin) values (?, ?, ?)", ["ann", 2.5, True]))
+    show("insert bob", db.insert("insert into users (name) values (?)", ["bob"]))
+    show("update", db.execute("update users set score = score + 1 where score is not null"))
+    show("delete none", db.execute("delete from users where id = ?", [99]))
+    for u in sqlite.query_as[User](db, "select id, name, score, admin from users order by id").unwrap():
+        print("user", u.id, u.name, u.score, u.admin)
+    match sqlite.query_one_as[User](db, "select id, name, score, admin from users where name = ?", ["nobody"]).unwrap():
+        case Some(_):
+            print("found?")
+        case None:
+            print("no such user")
+    row = db.query_row("select * from users where id = 1").unwrap().unwrap()
+    print(row.columns())
+    print(row.text("name").unwrap(), row.float("score").unwrap(), row.bool("admin").unwrap(), row.get("data").unwrap() == sqlite.Value.Null)
+    print("wrong types:", row.int("name").is_err(), row.text("id").is_err(), row.int("nope").is_err())
+
+def types(db: sqlite.Db):
+    data = "abc".encode() + "é".encode().slice(0, 1)
+    db.execute("update users set data = ? where id = 1", [sqlite.blob(data)]).unwrap()
+    got = db.query_row("select data from users where id = 1").unwrap().unwrap().bytes("data").unwrap()
+    print("blob:", len(got), got == data)
+    db.execute("update users set name = ? where id = 2", ["ünï \"q\" 'x'"]).unwrap()
+    print("text:", db.query_row("select name from users where id = 2").unwrap().unwrap().text("name").unwrap())
+    big = 9007199254740993
+    print("int:", db.query_row("select ? as n", [big]).unwrap().unwrap().int("n").unwrap() == big)
+    print("null:", db.query_row("select ? as n", [None]).unwrap().unwrap().get("n").unwrap() == sqlite.Value.Null)
+    moment = datetime.parse("2026-11-21T09:30:00Z").unwrap()
+    id = uuid.v4()
+    db.execute("insert into events (id, at, note) values (?, ?, ?)", [str(id), str(moment), None]).unwrap()
+    event = sqlite.query_one_as[Event](db, "select id, at, note from events").unwrap().unwrap()
+    print("event:", event.id == id, event.at == moment, event.note)
+    print("time:", event.at.format("%Y-%m-%d %H:%M"))
+
+def bump(db: sqlite.Db, times: int):
+    for _ in range(times):
+        db.execute("update counter set n = n + 1").unwrap()
+
+def transactions(db: sqlite.Db):
+    with db.transaction().unwrap() as tx:
+        tx.execute("insert into notes (user_id, body) values (1, 'kept')").unwrap()
+        tx.commit().unwrap()
+    with db.transaction().unwrap() as tx:
+        tx.execute("insert into notes (user_id, body) values (1, 'dropped')").unwrap()
+    print("after commit and an abandoned transaction:", len(db.query("select body from notes").unwrap()))
+    print("failed in a transaction:", fails(db).is_err(), len(db.query("select body from notes").unwrap()))
+    with db.transaction().unwrap() as tx:
+        print("nested:", tx.transaction().is_err())
+        tx.rollback().unwrap()
+        print("finished twice:", tx.commit().is_err())
+
+def fails(db: sqlite.Db) -> Result[None, sqlite.DbError]:
+    with db.transaction()? as tx:
+        tx.execute("insert into notes (user_id, body) values (1, 'half')")?
+        tx.execute("insert into notes (user_id, body) values (99, 'orphan')")?
+        tx.commit()?
+    return Ok(None)
+
+def errors(db: sqlite.Db):
+    show("unique", db.execute("insert into users (name) values ('ann')"))
+    show("not null", db.execute("insert into users (name) values (null)"))
+    show("foreign key", db.execute("insert into notes (user_id, body) values (42, 'x')"))
+    show("no table", db.execute("select * from missing_table"))
+    show("syntax", db.execute("selec 1"))
+    show("too few values", db.execute("select ?, ?", [1]))
+    show("too many values", db.execute("select 1", [1]))
+    show("list parameter", db.execute("select ?", [[1]]))
+    match sqlite.open("/nonexistent/directory/x.db"):
+        case Ok(_):
+            print("opened?")
+        case Err(e):
+            print("open:", e.code)
+
+def holder(db: sqlite.Db, done: Channel[int]):
+    with db.transaction().unwrap() as tx:
+        tx.execute("update counter set n = 1000").unwrap()
+        time.sleep(0.2)
+        tx.rollback().unwrap()
+    done.send(1)
+
+def concurrency(db: sqlite.Db):
+    done = Channel[int](0)
+    # Eight tasks bump one counter 50 times each: every update happens.
+    tasks: list[Task[None]] = []
+    for _ in range(8):
+        tasks.append(spawn bump(db, 50))
+    for task in tasks:
+        task.join()
+    print("counter:", db.query_row("select n from counter").unwrap().unwrap().int("n").unwrap())
+    # A statement given while a transaction is open waits for it to end: it never sees the
+    # transaction's 1000, which is rolled back.
+    spawn holder(db, done)
+    time.sleep(0.05)
+    print("during:", db.query_row("select n from counter").unwrap().unwrap().int("n").unwrap())
+    done.recv()
+
+def closing():
+    db = sqlite.open(":memory:").unwrap()
+    db.close()
+    show("after close", db.execute("select 1"))
+
+def main():
+    db = sqlite.open(":memory:").unwrap()
+    schema(db)
+    crud(db)
+    types(db)
+    transactions(db)
+    errors(db)
+    concurrency(db)
+    closing()

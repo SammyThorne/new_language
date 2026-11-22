@@ -1,0 +1,397 @@
+"""
+SQLite: an embedded SQL database in a file (or in memory), with the shape of `postgres`.
+
+    import sqlite
+
+    @derive(Json)
+    struct User:
+        id: int
+        name: str
+        admin: bool         # a column declared BOOLEAN reads as a bool
+
+    def main():
+        db = sqlite.open("app.db").unwrap()
+        db.script("create table if not exists users (id integer primary key, name text not null, admin boolean default 0)").unwrap()
+        id = db.insert("insert into users (name) values (?)", ["ann"]).unwrap()
+        users = sqlite.query_as[User](db, "select id, name, admin from users where id >= ?", [1]).unwrap()
+        for row in db.query("select id, name from users").unwrap():
+            print(row.int("id").unwrap(), row.text("name").unwrap())
+
+Parameters are `?` in the statement and a `list[json.Value]` beside it: write plain values
+(`[1, "ann", 2.5, None, True]`); `sqlite.blob(data)` is a `bytes` parameter. A `DateTime` or
+`Uuid` is stored as text, as `str(value)` gives it. Values are never spliced into the SQL, so
+they cannot inject any. The number of `?` and of values must match.
+
+Types: INTEGER is `int`, REAL `float`, TEXT `str`, BLOB `bytes` and NULL is `None`. SQLite does
+not check a column's type, so a `Row` has whatever a cell holds (`row.get(column)`), and
+`row.int` and the others fail for a cell of another type.
+
+A database is opened with `journal_mode=WAL`, `busy_timeout=5000` (another process's lock is
+waited for up to 5 seconds) and `foreign_keys=ON`. Each database has a thread of its own for the
+connection, so a task waiting for the disk does not block the others; statements of one
+`Db` run one after another, and a transaction holds the connection until it ends. Open the same
+file twice for two connections.
+
+The library is the system's `libsqlite3`, loaded when the first database is opened: a program
+that never opens one needs nothing installed.
+"""
+
+import crypto
+import json as jsonlib
+
+@extern("lrt_sqlite_open")
+def open_raw(path: str) -> int
+
+@extern("lrt_sqlite_arg")
+def arg_raw(kind: int, n: int, x: float, data: str)
+
+@extern("lrt_sqlite_query")
+def query_raw(db: int, tx: int, sql: str) -> int
+
+@extern("lrt_sqlite_script")
+def script_raw(db: int, tx: int, sql: str) -> int
+
+@extern("lrt_sqlite_begin")
+def begin_raw(db: int) -> int
+
+@extern("lrt_sqlite_finish")
+def finish_raw(db: int, tx: int, commit: int) -> int
+
+@extern("lrt_sqlite_rows")
+def rows_raw(handle: int) -> int
+
+@extern("lrt_sqlite_columns")
+def columns_raw(handle: int) -> int
+
+@extern("lrt_sqlite_column")
+def column_raw(handle: int, column: int) -> str
+
+@extern("lrt_sqlite_kind")
+def kind_raw(handle: int, row: int, column: int) -> int
+
+@extern("lrt_sqlite_int")
+def int_raw(handle: int, row: int, column: int) -> int
+
+@extern("lrt_sqlite_float")
+def float_raw(handle: int, row: int, column: int) -> float
+
+@extern("lrt_sqlite_bytes")
+def bytes_raw(handle: int, row: int, column: int) -> str
+
+@extern("lrt_sqlite_affected")
+def affected_raw(handle: int) -> int
+
+@extern("lrt_sqlite_last_id")
+def last_id_raw(handle: int) -> int
+
+@extern("lrt_sqlite_json")
+def json_raw(handle: int) -> str
+
+@extern("lrt_sqlite_free")
+def free_raw(handle: int)
+
+@extern("lrt_sqlite_error_code")
+def error_code() -> str
+
+@extern("lrt_sqlite_close")
+def close_raw(db: int)
+
+@extern("lrt_io_error")
+def last_error() -> str
+
+pub struct DbError:
+    """A failed database call. `code` is SQLite's name for the error: `SQLITE_CONSTRAINT_UNIQUE`
+    (also `SQLITE_CONSTRAINT_PRIMARYKEY`, `_FOREIGNKEY`, `_NOTNULL` and `_CHECK`), `SQLITE_BUSY`
+    when another connection's lock outlasted `busy_timeout`, `SQLITE_CANTOPEN` for a file that
+    cannot be opened, `SQLITE_ERROR` for a mistake in the SQL, and so on."""
+    code: str
+    reason: str
+
+impl Error for DbError:
+    def message(self) -> str:
+        return self.reason
+
+def failed() -> DbError:
+    reason = last_error()
+    return DbError(error_code(), reason)
+
+@derive(Eq)
+pub enum Value:
+    """What a cell holds."""
+    Null
+    Int(value: int)
+    Float(value: float)
+    Text(value: str)
+    Blob(value: bytes)
+
+pub struct Row:
+    """One row of a result. Values are read by column name."""
+    priv names: list[str]
+    priv cells: list[Value]
+
+impl Row:
+    def columns(self) -> list[str]:
+        return self.names
+
+    def get(self, column: str) -> Value?:
+        """The cell, whatever it holds; `None` for a column that is not in the result."""
+        for i in range(len(self.names)):
+            if self.names[i] == column:
+                return self.cells[i]
+        return None
+
+    def text(self, column: str) -> Result[str, DbError]:
+        match self.cell(column)?:
+            case Value.Text(text):
+                return Ok(text)
+            case other:
+                return Err(wrong_type(column, "text", other))
+
+    def int(self, column: str) -> Result[int, DbError]:
+        match self.cell(column)?:
+            case Value.Int(value):
+                return Ok(value)
+            case other:
+                return Err(wrong_type(column, "an integer", other))
+
+    def float(self, column: str) -> Result[float, DbError]:
+        """A REAL cell, or an INTEGER one as a float."""
+        match self.cell(column)?:
+            case Value.Float(real):
+                return Ok(real)
+            case Value.Int(whole):
+                return Ok(float(whole))
+            case other:
+                return Err(wrong_type(column, "a number", other))
+
+    def bool(self, column: str) -> Result[bool, DbError]:
+        """An INTEGER cell: 0 is false, anything else true."""
+        match self.cell(column)?:
+            case Value.Int(value):
+                return Ok(value != 0)
+            case other:
+                return Err(wrong_type(column, "an integer (0 or 1)", other))
+
+    def bytes(self, column: str) -> Result[bytes, DbError]:
+        match self.cell(column)?:
+            case Value.Blob(value):
+                return Ok(value)
+            case other:
+                return Err(wrong_type(column, "a blob", other))
+
+    priv def cell(self, column: str) -> Result[Value, DbError]:
+        for i in range(len(self.names)):
+            if self.names[i] == column:
+                return Ok(self.cells[i])
+        return Err(DbError("SQLITE_RANGE", f"no column `{column}` in the result"))
+
+def describe(cell: Value) -> str:
+    match cell:
+        case Value.Null:
+            return "NULL"
+        case Value.Int(_):
+            return "an integer"
+        case Value.Float(_):
+            return "a real number"
+        case Value.Text(_):
+            return "text"
+        case Value.Blob(_):
+            return "a blob"
+
+def wrong_type(column: str, wanted: str, found: Value) -> DbError:
+    return DbError("SQLITE_MISMATCH", f"column `{column}` holds {describe(found)}, not {wanted}")
+
+@frozen
+pub struct Db:
+    """An open database, or, from `transaction`, the same one inside a transaction."""
+    priv id: int
+    priv tx: int = -1
+
+pub def open(path: str) -> Result[Db, DbError]:
+    """Open a database file, creating it if it does not exist. `":memory:"` is a database that
+    lives as long as this `Db`."""
+    id = open_raw(path)
+    if id < 0:
+        return Err(failed())
+    return Ok(Db(id))
+
+pub def blob(data: bytes) -> jsonlib.Value:
+    """A `bytes` value as a parameter."""
+    return jsonlib.Value.Object({"$blob": jsonlib.Value.Str(crypto.base64_encode(data))})
+
+# The parameters go to the runtime one at a time; a value SQLite has no type for is an error,
+# found before any of them is sent.
+def send_args(args: list[jsonlib.Value]) -> DbError?:
+    for arg in args:
+        match arg:
+            case jsonlib.Value.Null:
+                pass
+            case jsonlib.Value.Bool(_):
+                pass
+            case jsonlib.Value.Int(_):
+                pass
+            case jsonlib.Value.Float(_):
+                pass
+            case jsonlib.Value.Str(_):
+                pass
+            case jsonlib.Value.Object(fields):
+                if "$blob" not in fields:
+                    return Some(DbError("SQLITE_MISMATCH", "a parameter cannot be an object (a blob is `sqlite.blob(data)`)"))
+            case jsonlib.Value.Array(_):
+                return Some(DbError("SQLITE_MISMATCH", "a parameter cannot be a list"))
+    for arg in args:
+        match arg:
+            case jsonlib.Value.Null:
+                arg_raw(0, 0, 0.0, "")
+            case jsonlib.Value.Bool(flag):
+                arg_raw(1, 1 if flag else 0, 0.0, "")
+            case jsonlib.Value.Int(whole):
+                arg_raw(1, whole, 0.0, "")
+            case jsonlib.Value.Float(real):
+                arg_raw(2, 0, real, "")
+            case jsonlib.Value.Str(text):
+                arg_raw(3, 0, 0.0, text)
+            case jsonlib.Value.Object(fields):
+                match fields["$blob"].as_str():
+                    case Some(text):
+                        match crypto.base64_decode(text):
+                            case Some(data):
+                                arg_raw(4, 0, 0.0, __bytes_data(data))
+                            case None:
+                                arg_raw(0, 0, 0.0, "")
+                    case None:
+                        arg_raw(0, 0, 0.0, "")
+            case jsonlib.Value.Array(_):
+                pass
+    return None
+
+impl Db:
+    def run(self, sql: str, args: list[jsonlib.Value]) -> Result[int, DbError]:
+        match send_args(args):
+            case Some(problem):
+                return Err(problem)
+            case None:
+                pass
+        handle = query_raw(self.id, self.tx, sql)
+        if handle < 0:
+            return Err(failed())
+        return Ok(handle)
+
+    def query(self, sql: str, args: list[jsonlib.Value] = []) -> Result[list[Row], DbError]:
+        """Run a statement and return its rows."""
+        handle = self.run(sql, args)?
+        names: list[str] = [column_raw(handle, c) for c in range(columns_raw(handle))]
+        rows: list[Row] = []
+        for r in range(rows_raw(handle)):
+            cells: list[Value] = []
+            for c in range(len(names)):
+                cells.append(read_cell(handle, r, c))
+            rows.append(Row(names, cells))
+        free_raw(handle)
+        return Ok(rows)
+
+    def query_row(self, sql: str, args: list[jsonlib.Value] = []) -> Result[Row?, DbError]:
+        """The first row, or `None` if there are none."""
+        rows = self.query(sql, args)?
+        if len(rows) == 0:
+            return Ok(None)
+        return Ok(Some(rows[0]))
+
+    def execute(self, sql: str, args: list[jsonlib.Value] = []) -> Result[int, DbError]:
+        """Run a statement; returns how many rows it inserted, updated, deleted or returned."""
+        handle = self.run(sql, args)?
+        count = affected_raw(handle)
+        free_raw(handle)
+        return Ok(count)
+
+    def insert(self, sql: str, args: list[jsonlib.Value] = []) -> Result[int, DbError]:
+        """Run an `insert` and return the new row's `rowid`: the `integer primary key`."""
+        handle = self.run(sql, args)?
+        id = last_id_raw(handle)
+        free_raw(handle)
+        return Ok(id)
+
+    def script(self, sql: str) -> Result[None, DbError]:
+        """Run several statements separated by `;`, without parameters: a schema, a migration."""
+        if script_raw(self.id, self.tx, sql) < 0:
+            return Err(failed())
+        return Ok(None)
+
+    def transaction(self) -> Result[Db, DbError]:
+        """Start a transaction (`BEGIN IMMEDIATE`, so its writes cannot fail for another writer
+        halfway). The database does other tasks' statements only after it ends. Use it with
+        `with`, which rolls it back unless `commit` was called:
+
+            with db.transaction()? as tx:
+                tx.execute("update accounts set balance = balance - 10 where id = ?", [a])?
+                tx.execute("update accounts set balance = balance + 10 where id = ?", [b])?
+                tx.commit()?
+        """
+        if self.tx >= 0:
+            return Err(DbError("SQLITE_MISUSE", "a transaction is already in progress"))
+        tx = begin_raw(self.id)
+        if tx < 0:
+            return Err(failed())
+        return Ok(Db(self.id, tx))
+
+    def commit(self) -> Result[None, DbError]:
+        """Commit the transaction; it is over either way."""
+        if self.tx < 0:
+            return Err(DbError("SQLITE_MISUSE", "not in a transaction"))
+        if finish_raw(self.id, self.tx, 1) < 0:
+            return Err(failed())
+        return Ok(None)
+
+    def rollback(self) -> Result[None, DbError]:
+        """Roll the transaction back."""
+        if self.tx < 0:
+            return Err(DbError("SQLITE_MISUSE", "not in a transaction"))
+        if finish_raw(self.id, self.tx, 0) < 0:
+            return Err(failed())
+        return Ok(None)
+
+    def exit(self):
+        """At the end of a `with` block: roll back a transaction that was not committed."""
+        if self.tx >= 0:
+            _ = finish_raw(self.id, self.tx, 0)
+
+    def close(self):
+        """Close the database once the statements already given to it have run."""
+        close_raw(self.id)
+
+def read_cell(handle: int, row: int, column: int) -> Value:
+    kind = kind_raw(handle, row, column)
+    if kind == 1 or kind == 5:
+        return Value.Int(int_raw(handle, row, column))
+    if kind == 2:
+        return Value.Float(float_raw(handle, row, column))
+    if kind == 3:
+        match bytes_raw(handle, row, column).encode().decode():
+            case Some(text):
+                return Value.Text(text)
+            case None:
+                return Value.Blob(__bytes(bytes_raw(handle, row, column)))
+    if kind == 4:
+        return Value.Blob(__bytes(bytes_raw(handle, row, column)))
+    return Value.Null
+
+pub def query_as[T: FromJson](db: Db, sql: str, args: list[jsonlib.Value] = []) -> Result[list[T], DbError]:
+    """Run a statement and read each row into a `T` (a `@derive(Json)` struct whose fields are
+    named like the columns). Integers and reals convert to fields of those types, NULL to
+    `None`, a column declared BOOLEAN to a `bool`, text to `str` (a `DateTime` or `Uuid` field
+    reads its text), and a blob to a `str` of its base64."""
+    handle = db.run(sql, args)?
+    text = json_raw(handle)
+    free_raw(handle)
+    match jsonlib.decode[list[T]](text):
+        case Ok(values):
+            return Ok(values)
+        case Err(error):
+            return Err(DbError("SQLITE_MISMATCH", f"a row does not fit the type: {error.message()}"))
+
+pub def query_one_as[T: FromJson](db: Db, sql: str, args: list[jsonlib.Value] = []) -> Result[T?, DbError]:
+    """The first row as a `T`, or `None` if there are none."""
+    values = query_as[T](db, sql, args)?
+    if len(values) == 0:
+        return Ok(None)
+    return Ok(Some(values[0]))

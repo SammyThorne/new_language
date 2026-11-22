@@ -1,0 +1,34 @@
+# For crates/lang_cli/tests/sqlite.rs: `setup <file>` makes the table, `write <file> <id>` inserts
+# 300 rows from four tasks on two connections of its own to the same file (the test starts two
+# of these at once), and `count <file>` prints how many rows there are.
+
+import os
+import sqlite
+
+def insert_rows(db: sqlite.Db, who: str, count: int):
+    for i in range(count):
+        db.execute("insert into rows (who, n) values (?, ?)", [who, i]).unwrap()
+
+def main():
+    args = os.args()
+    mode = args[1]
+    path = args[2]
+    if mode == "setup":
+        db = sqlite.open(path).unwrap()
+        db.script("create table if not exists rows (id integer primary key, who text, n integer)").unwrap()
+        print(db.query_row("pragma journal_mode").unwrap().unwrap().text("journal_mode").unwrap())
+        print(db.query_row("pragma foreign_keys").unwrap().unwrap().int("foreign_keys").unwrap())
+        print(db.query_row("pragma busy_timeout").unwrap().unwrap().int("timeout").unwrap())
+    elif mode == "write":
+        who = args[3]
+        a = sqlite.open(path).unwrap()
+        b = sqlite.open(path).unwrap()
+        tasks: list[Task[None]] = []
+        for i in range(4):
+            tasks.append(spawn insert_rows(a if i % 2 == 0 else b, f"{who}-{i}", 75))
+        for task in tasks:
+            task.join()
+        print("written")
+    else:
+        db = sqlite.open(path).unwrap()
+        print(db.query_row("select count(*) as c from rows").unwrap().unwrap().int("c").unwrap())

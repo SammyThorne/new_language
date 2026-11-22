@@ -1288,6 +1288,19 @@ Section 4.14 of docs/14:
 - **`http` imports `template`** for `http.render`. That does not change the benchmark counts: a program that does not render a template runs no template code.
 - **Not done:** macros, `super()`, user-defined filters, `{% raw %}`, and autoescape control. `csrf_field()` waits for milestone 20.
 
+### D122. SQLite (production web plan, milestone 17)
+
+Section 4.15 of docs/14, and its decision 4:
+
+- **The library is loaded with `dlopen`, not linked with `-lsqlite3`.** Decision 4 chose the system's `libsqlite3` over bundling it, and said "linked only when used" with a driver flag. Loading it when the first database opens does the same without a flag: no program links it, so a program that does not use SQLite is unchanged in size, link line and needs, and the one that does fails with a clear message at `sqlite.open` instead of at startup. It also avoids needing the `-dev` package (`libsqlite3.so` is only a symlink it provides; the runtime library `libsqlite3.so.0` is installed with everything that uses SQLite). The cost is declaring the 29 functions used by hand and checking each exists. The driver already links `-ldl`. Windows has no loader here yet, so `sqlite.open` reports that SQLite is not supported there. The install script adds `libsqlite3-0` and `check-deps.sh` lists the library as optional.
+- **One thread per database, as in 4.15,** owning the connection; tasks send a job and park on an `Arc` shared with the thread, which wakes them with the fiber `Waker` when the answer is in (the same way a task waits for a channel). A task that is cancelled while waiting stops waiting; its job still runs. Opening is the one call that blocks the calling thread (briefly, to open a file, so that a bad path is an error from `open`).
+- **A transaction owns the connection.** There is one connection, so a task's statements would otherwise run inside another task's transaction. The thread keeps the id of the transaction that has the connection, holds back every job that does not belong to it (and every other `BEGIN`), and runs those, in the order they came, when it ends. `BEGIN IMMEDIATE` means a transaction that reads then writes cannot fail with `SQLITE_BUSY` halfway. A pool of connections, as `postgres` has, would let readers run in parallel inside one `Db`; open the file again for that, or build the pool later if it is wanted.
+- **Parameters are typed values,** unlike `postgres`, where everything travels as text: `list[json.Value]` takes plain literals as the language's compiler converts them, and a blob is `sqlite.blob(data)`, which is an object with a `$blob` key (`json.Value` has no `bytes`). A `DateTime` or `Uuid` is text, as the plan said, written with `str(...)`.
+- **Rows come back as cells with their own types,** since SQLite's column types are advisory. `Row` has `get` and typed readers that name the column and what they found, and `query_as` goes through JSON like `postgres`'s does, with a column declared `BOOLEAN` written as a boolean.
+- **Errors carry SQLite's own names** (`SQLITE_CONSTRAINT_UNIQUE`, from the extended result code) in `DbError.code`, where `postgres` has the SQLSTATE.
+- **Tests:** unit tests in `sqlite.rs` against the real library (skipped if it is absent); `tests/run/sqlite_database.vi`; `crates/lang_cli/tests/sqlite.rs`, which runs two processes writing to one file at once, checks the pragmas, and checks with `readelf` that the executable does not link SQLite.
+- **Not done:** query traces, a connection pool, `ATTACH`, extensions and user-defined functions.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

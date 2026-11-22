@@ -90,6 +90,11 @@ if command -v psql >/dev/null 2>&1 || command -v pg_ctl >/dev/null 2>&1 || ls /u
 else
     optional "PostgreSQL" "not found; needed only for the database test"
 fi
+if /sbin/ldconfig -p 2>/dev/null | grep -q 'libsqlite3\.so'; then
+    found "SQLite" "libsqlite3, for programs that import sqlite"
+else
+    optional "SQLite" "no libsqlite3; needed only by programs that import sqlite and by its tests (libsqlite3-0)"
+fi
 
 echo
 if [ "$missing" -ne 0 ]; then

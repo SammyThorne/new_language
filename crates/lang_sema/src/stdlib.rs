@@ -23,6 +23,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("crypto", include_str!("../../../stdlib/crypto.lang")),
     ("auth", include_str!("../../../stdlib/auth.lang")),
     ("postgres", include_str!("../../../stdlib/postgres.lang")),
+    ("sqlite", include_str!("../../../stdlib/sqlite.lang")),
 ];
 
 /// The source of a standard library module.
