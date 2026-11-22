@@ -1,0 +1,105 @@
+# expect: get: 200
+# expect: fetch site same-origin: 200
+# expect: fetch site none: 200
+# expect: fetch site same-site: 403
+# expect: fetch site cross-site: 403
+# expect: fetch site SAME-ORIGIN: 200
+# expect: fetch site weird: 403
+# expect: trusted origin beats a cross-site fetch: 200
+# expect: other origin does not: 403
+# expect: no origin: 200
+# expect: same origin: 200
+# expect: same host, other port: 403
+# expect: cross origin: 403
+# expect: trusted: 200
+# expect: null origin: 403
+# expect: no host: 403
+# expect: fetch metadata wins over origin: 200
+# expect: put, delete: 403 403
+# expect: authorization: 200
+# expect: message: {"error":"cross-site request refused (Sec-Fetch-Site: cross-site)"}
+# expect: form: 200 <form method=post><input type="hidden" name="csrf_token" value="TOKEN"><h1>Notes &amp; &lt;more&gt;</h1></form>
+# expect: cookie: csrf True True True
+# expect: same token again: True True
+# expect: missing: 403 {"error":"the CSRF token is missing: send it as the `csrf_token` form field or the `X-CSRF-Token` header"}
+# expect: cookie only: 403
+# expect: header: 200
+# expect: form field: 200
+# expect: wrong: 403
+# expect: no cookie: 403
+# expect: forged cookie: 403
+# expect: unsigned cookie: 403
+# expect: another server's cookie: 403
+# expect: authorization: 200
+# expect: origin still checked: 403
+# CSRF protection (docs/14, milestone 20): the browser's own headers (Sec-Fetch-Site, Origin),
+# trusted origins, requests that carry Authorization, and signed double-submit tokens in a form
+# field or a header, with `{{ csrf_field() }}` in a template.
+
+import http
+import template
+
+def status(server: http.Server, method: str, headers: dict[str, str] = {}, form: dict[str, str] = {}) -> int:
+    return server.handle(http.test_request(method, "/do", headers=headers, form=form)).status
+
+def page(req: http.Request, pages: template.Templates) -> Result[http.Response]:
+    return http.render(pages, "form.html", {"title": "Notes & <more>"}, req=req)
+
+def origins():
+    server = http.Server()
+    server.use(http.csrf(trusted_origins=["https://admin.example.com"]))
+    server.get("/do", lambda req: Ok(http.text("read")))
+    server.post("/do", lambda req: Ok(http.text("done")))
+    server.put("/do", lambda req: Ok(http.text("done")))
+    server.delete("/do", lambda req: Ok(http.text("done")))
+    host = {"Host": "app.example.com"}
+    print("get:", status(server, "GET", {"Sec-Fetch-Site": "cross-site"}))
+    for site in ["same-origin", "none", "same-site", "cross-site", "SAME-ORIGIN", "weird"]:
+        print(f"fetch site {site}:", status(server, "POST", {"Sec-Fetch-Site": site}))
+    print("trusted origin beats a cross-site fetch:", status(server, "POST", {"Sec-Fetch-Site": "cross-site", "Origin": "https://admin.example.com"}))
+    print("other origin does not:", status(server, "POST", {"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"}))
+    print("no origin:", status(server, "POST", host))
+    print("same origin:", status(server, "POST", {"Host": "app.example.com", "Origin": "https://app.example.com"}))
+    print("same host, other port:", status(server, "POST", {"Host": "app.example.com", "Origin": "https://app.example.com:8443"}))
+    print("cross origin:", status(server, "POST", {"Host": "app.example.com", "Origin": "https://evil.example"}))
+    print("trusted:", status(server, "POST", {"Host": "app.example.com", "Origin": "https://admin.example.com"}))
+    print("null origin:", status(server, "POST", {"Host": "app.example.com", "Origin": "null"}))
+    print("no host:", status(server, "POST", {"Origin": "https://app.example.com"}))
+    print("fetch metadata wins over origin:", status(server, "POST", {"Sec-Fetch-Site": "same-origin", "Origin": "https://evil.example"}))
+    print("put, delete:", status(server, "PUT", {"Sec-Fetch-Site": "cross-site"}), status(server, "DELETE", {"Sec-Fetch-Site": "cross-site"}))
+    print("authorization:", status(server, "POST", {"Sec-Fetch-Site": "cross-site", "Authorization": "Bearer abc"}))
+    refused = server.handle(http.test_request("POST", "/do", headers={"Sec-Fetch-Site": "cross-site"}))
+    print("message:", refused.body)
+
+def tokens():
+    pages = template.from_strings({"form.html": "<form method=post>{{ csrf_field() }}<h1>{{ title }}</h1></form>"}).unwrap()
+    server = http.Server()
+    server.use(http.csrf(tokens=True, secret="0123456789abcdef0123456789abcdef"))
+    server.get("/form", lambda req: page(req, pages))
+    server.get("/token", lambda req: Ok(http.text(http.csrf_token(req))))
+    server.post("/do", lambda req: Ok(http.text("done")))
+    first = server.handle(http.test_request("GET", "/form"))
+    cookie = first.headers["Set-Cookie"].partition(";")[0]
+    token = first.body.partition("value=\"")[2].partition("\"")[0]
+    print("form:", first.status, first.body.replace(token, "TOKEN"))
+    print("cookie:", cookie.partition("=")[0], cookie.partition("=")[2] == token + "." + cookie.partition(".")[2], "HttpOnly" in first.headers["Set-Cookie"], "SameSite=Lax" in first.headers["Set-Cookie"])
+    again = server.handle(http.test_request("GET", "/token", headers={"Cookie": cookie}))
+    print("same token again:", again.body == token, again.headers.get("Set-Cookie").is_none())
+    print("missing:", status(server, "POST"), server.handle(http.test_request("POST", "/do")).body)
+    print("cookie only:", status(server, "POST", {"Cookie": cookie}))
+    print("header:", status(server, "POST", {"Cookie": cookie, "X-CSRF-Token": token}))
+    print("form field:", status(server, "POST", {"Cookie": cookie}, {"csrf_token": token}))
+    print("wrong:", status(server, "POST", {"Cookie": cookie, "X-CSRF-Token": "x" + token}))
+    print("no cookie:", status(server, "POST", {"X-CSRF-Token": token}))
+    print("forged cookie:", status(server, "POST", {"Cookie": "csrf=" + token + ".AAAA", "X-CSRF-Token": token}))
+    print("unsigned cookie:", status(server, "POST", {"Cookie": "csrf=" + token, "X-CSRF-Token": token}))
+    other = http.Server()
+    other.use(http.csrf(tokens=True, secret="ffffffffffffffffffffffffffffffff"))
+    other.post("/do", lambda req: Ok(http.text("done")))
+    print("another server's cookie:", status(other, "POST", {"Cookie": cookie, "X-CSRF-Token": token}))
+    print("authorization:", status(server, "POST", {"Authorization": "Bearer abc"}))
+    print("origin still checked:", status(server, "POST", {"Cookie": cookie, "X-CSRF-Token": token, "Sec-Fetch-Site": "cross-site"}))
+
+def main():
+    origins()
+    tokens()

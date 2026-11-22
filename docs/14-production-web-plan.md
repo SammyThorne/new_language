@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 19 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 20 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1291,6 +1291,12 @@ Done (D124):
   - Tokens: valid, missing, wrong and forged.
   - The Google example still passes its tests.
 - **Docs:** docs/05, and the site's sign-in section.
+
+Done (D125):
+
+- `http.csrf(trusted_origins, tokens, secret, secure)` with the `Sec-Fetch-Site` and `Origin` checks, signed double-submit tokens, `http.csrf_token(req)`; `{{ csrf_field() }}` in templates with `http.render(..., req=req)`; `auth` providers' `install(server, csrf=True)` adds it.
+- `same-site` is refused as well as `cross-site` (D125 says why).
+- Tests: `tests/run/csrf_protection.vi`; the Google tests pass unchanged.
 
 #### Milestone 21: generic OIDC and presets (about 3 days)
 

@@ -668,7 +668,7 @@ def main():
 | Item | Shape |
 |---|---|
 | `auth.google(credentials="", secret=None, redirect_uri="", scopes=["openid", "email", "profile"], allowed_domains=[], allowed_emails=[], require_verified_email=True, session_days=7, login_path=..., logout_path=..., after_logout="/", on_login=None) -> Result[auth.Provider, auth.AuthError]` | `credentials=""` reads `GOOGLE_CLIENT_SECRETS` (a path), or `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`; `secret=None` reads `SESSION_SECRET` |
-| `provider.install(server)` | The routes and the middleware above |
+| `provider.install(server, csrf=True)` | The routes and the middleware above, and `http.csrf()` unless `csrf=False` |
 | `provider.login_url(next="/") -> str` | The login route's URL, for links |
 | `provider.logout_response(location="/") -> http.Response` | For an app's own logout route |
 | `provider.test_cookie(user, expires_in=None) -> str` | A `Cookie` header value signing a test request in |
@@ -962,6 +962,18 @@ viper migrate status --dir db/migrations --database postgres://app:secret@localh
 ```
 
 `migrate new` takes the number after the highest in the directory, which it creates if need be. `migrate status` compiles and runs a small program that calls the module, so it needs the same system libraries as any program, and it exits with 1 when the files and the database disagree. It does not apply anything: do that from the program, at startup, or from a release step. A path given to `--database` that does not exist is created, as `sqlite.open` would.
+
+## CSRF protection (docs/14, milestone 20)
+
+`server.use(http.csrf(trusted_origins=[], tokens=False, secret=None, secure=False))` stops a page on another site from making a visitor's browser change things on yours with the visitor's cookies. It looks only at requests that change things (every method but `GET`, `HEAD` and `OPTIONS`) and answers a 403 (made like any error, so `on_error` applies) when:
+- `Sec-Fetch-Site`, sent by every current browser, is not `same-origin` or `none`. `same-site` (a sibling subdomain) is refused with `cross-site`, as Go's `CrossOriginProtection` does, unless the request's `Origin` is in `trusted_origins`;
+- without `Sec-Fetch-Site`, an `Origin` header (`null` included) is neither one of `trusted_origins` nor this server's own `Host` (the scheme is not compared, so put the server behind a proxy that passes `Host` on).
+
+Requests with neither header, such as `curl`, tests, and other servers, and requests with an `Authorization` header pass: a browser adds neither on its own, so an ambient cookie cannot be used to forge them.
+
+**Tokens** (`tokens=True`) are for browsers that send neither header, and for those who want a second check. Every response gets a signed `csrf` cookie (`__Host-csrf` with `secure=True`: use it on https); an unsafe request must send the token in the cookie, as the `csrf_token` form field or the `X-CSRF-Token` header, or it is a 403 saying the token is missing or wrong. The cookie is the token and its HMAC with `secret`, `SESSION_SECRET` or a key made for this run, so a token that was not made by this server (or an older key) does not count. `http.csrf_token(req)` gives the value for a script or a hand-written field, and in a template `{{ csrf_field() }}` writes `<input type="hidden" name="csrf_token" value="...">` when the page is rendered with `http.render(pages, name, context, req=req)` (or `pages.render(name, context, csrf_token=...)`).
+
+`auth`'s `install` adds `http.csrf()` unless it is given `csrf=False`.
 
 ## Jobs and schedules (docs/14, milestone 19)
 

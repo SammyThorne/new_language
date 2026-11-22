@@ -18,6 +18,7 @@ A handler returns `Result[http.Response]`. An error becomes a response: an `http
 logged, with a generic message for the client. `server.on_error(...)` replaces that mapping.
 """
 
+import crypto
 import datetime
 import json as jsonlib
 import log
@@ -1045,7 +1046,7 @@ pub def binary(data: bytes, content_type: str = "application/octet-stream", stat
     response.raw = RawBody.Data(data)
     return response
 
-pub def render[T: ToJson](pages: template.Templates, name: str, context: T, status: int = 200) -> Result[Response]:
+pub def render[T: ToJson](pages: template.Templates, name: str, context: T, status: int = 200, req: Request? = None) -> Result[Response]:
     """
     An HTML response made from a template (see the `template` module):
 
@@ -1053,9 +1054,16 @@ pub def render[T: ToJson](pages: template.Templates, name: str, context: T, stat
         server.get("/", lambda req: http.render(pages, "home.html", {"user": current(req)}))
 
     A template that fails to render is a 500: the details (the template, the line and the
-    expression) are logged and not sent to the client.
+    expression) are logged and not sent to the client. Pass `req=req` to make
+    `{{ csrf_field() }}` work (see `http.csrf`).
     """
-    html = pages.render(name, context)?
+    token: str? = None
+    match req:
+        case Some(request):
+            token = request.local(csrf_local())
+        case None:
+            pass
+    html = pages.render(name, context, token)?
     return Ok(Response(status, html, "text/html; charset=utf-8"))
 
 pub def error(status: int, message: str) -> Response:
@@ -1067,6 +1075,174 @@ pub def redirect(location: str, status: int = 302) -> Response:
 
 pub def no_content() -> Response:
     return Response(204, "", "")
+
+# ---- CSRF ---------------------------------------------------------------------------------
+
+def csrf_local() -> str:
+    return "http.csrf.token"
+
+@frozen
+struct CsrfPolicy:
+    trusted: tuple[str, ...]
+    tokens: bool
+    key: bytes
+    secure: bool
+
+def csrf_safe(method: str) -> bool:
+    return method == "GET" or method == "HEAD" or method == "OPTIONS"
+
+def csrf_authority(origin: str) -> str:
+    # `https://example.com:8443` as `example.com:8443`.
+    return origin.partition("://")[2]
+
+impl CsrfPolicy:
+    def refusal(self, req: Request) -> str?:
+        """Why the browser's own headers say this request must not be allowed, or `None`."""
+        if csrf_safe(req.method.upper()) or req.header("Authorization").is_some():
+            return None
+        origin = req.header("Origin")
+        trusted = False
+        match origin:
+            case Some(value):
+                trusted = value in self.trusted
+            case None:
+                pass
+        match req.header("Sec-Fetch-Site"):
+            case Some(site):
+                lowered = site.lower()
+                if lowered == "same-origin" or lowered == "none" or trusted:
+                    return None
+                return f"cross-site request refused (Sec-Fetch-Site: {lowered})"
+            case None:
+                pass
+        match origin:
+            case Some(value):
+                if trusted:
+                    return None
+                match req.header("Host"):
+                    case Some(host):
+                        if csrf_authority(value) == host:
+                            return None
+                    case None:
+                        pass
+                return f"cross-origin request refused (Origin: {value})"
+            case None:
+                return None
+
+    def sign_token(self, token: str) -> str:
+        return crypto.base64url_encode(crypto.hmac_sha256(self.key, ("csrf." + token).encode()))
+
+    def cookie_token(self, req: Request) -> str?:
+        """The token in a valid `csrf` cookie, or `None` if it is missing, changed, or signed
+        with another key."""
+        match req.cookie(self.cookie_name()):
+            case Some(value):
+                token, dot, mac = value.partition(".")
+                if dot == "." and token != "" and crypto.equal(mac.encode(), self.sign_token(token).encode()):
+                    return Some(token)
+                return None
+            case None:
+                return None
+
+    def cookie_name(self) -> str:
+        if self.secure:
+            return "__Host-csrf"
+        return "csrf"
+
+    def submitted(self, req: Request) -> str?:
+        match req.header("X-CSRF-Token"):
+            case Some(value):
+                return Some(value)
+            case None:
+                pass
+        match req.header("Content-Type"):
+            case Some(kind):
+                lowered = kind.lower()
+                if lowered.starts_with("application/x-www-form-urlencoded") or lowered.starts_with("multipart/form-data"):
+                    match req.form():
+                        case Ok(form):
+                            return form.get("csrf_token")
+                        case Err(_):
+                            return None
+            case None:
+                pass
+        return None
+
+    def handle(self, req: Request, next: Handler) -> Result[Response]:
+        match self.refusal(req):
+            case Some(why):
+                return Err(HttpError(403, why))
+            case None:
+                pass
+        if not self.tokens:
+            return next(req)
+        existing = self.cookie_token(req)
+        token = existing.unwrap_or("")
+        if existing.is_none():
+            token = crypto.token(32)
+        req.set_local(csrf_local(), token)
+        if not csrf_safe(req.method.upper()) and req.header("Authorization").is_none():
+            match self.submitted(req):
+                case Some(sent):
+                    if existing.is_none() or not crypto.equal(sent.encode(), token.encode()):
+                        return Err(HttpError(403, "the CSRF token is wrong"))
+                case None:
+                    return Err(HttpError(403, "the CSRF token is missing: send it as the `csrf_token` form field or the `X-CSRF-Token` header"))
+        response = next(req)?
+        if existing.is_none():
+            response.set_cookie(self.cookie_name(), token + "." + self.sign_token(token), -1, "/", True, self.secure, "Lax")
+        return Ok(response)
+
+pub def csrf(trusted_origins: list[str] = [], tokens: bool = False, secret: str? = None, secure: bool = False) -> Middleware:
+    """
+    Middleware that refuses requests a browser makes on behalf of another site:
+
+        server.use(http.csrf(trusted_origins=["https://admin.example.com"]))
+
+    For a request that changes things (any method but `GET`, `HEAD` and `OPTIONS`):
+    - `Sec-Fetch-Site`, which every current browser sends, must say `same-origin` (or `none`,
+      for something the user typed); `cross-site` and `same-site` are refused, unless the
+      request's `Origin` is in `trusted_origins`;
+    - without `Sec-Fetch-Site`, a request with an `Origin` must name this server's own host (the
+      `Host` header) or a trusted origin (`https://host`, `https://host:port`);
+    - requests with neither header (curl, other servers) and requests with an `Authorization`
+      header are let through: a browser never adds either on its own, so cookies cannot be
+      used to forge them.
+    A refusal is a 403, made like any other error.
+
+    `tokens=True` also checks a token, for browsers that send neither header. A signed `csrf`
+    cookie holds it (`__Host-csrf` with `secure=True`, for an https site); a form sends it as
+    the `csrf_token` field, which a template writes with `{{ csrf_field() }}` and
+    `http.render(..., req=req)`, and a script as `X-CSRF-Token`. `http.csrf_token(req)` gives the
+    value. The cookie is signed with `secret`, or `SESSION_SECRET` (at least 32 bytes), or a key
+    made for this run.
+    """
+    for origin in trusted_origins:
+        if not origin.contains("://") or origin.partition("://")[2].contains("/"):
+            panic(f"`http.csrf` trusted origin {origin!r} is not an origin such as \"https://admin.example.com\" (a scheme and a host, with no path)")
+    key = crypto.random_bytes(32)
+    text = secret
+    if text is None:
+        text = os.getenv("SESSION_SECRET")
+    match text:
+        case Some(value):
+            if len(value.encode()) < 32:
+                panic("`http.csrf` needs a secret of at least 32 bytes (`SESSION_SECRET`, or `secret=`)")
+            key = value.encode()
+        case None:
+            if tokens:
+                log.warn("http.csrf: no SESSION_SECRET: using a key made for this run, so tokens in open forms stop working when the program restarts")
+    policy = CsrfPolicy(tuple(trusted_origins), tokens, key, secure)
+    return lambda req, next: policy.handle(req, next)
+
+pub def csrf_token(req: Request) -> str:
+    """The request's CSRF token, for a page that sends it with a script (`X-CSRF-Token`) or
+    writes its own form field. It needs `http.csrf(tokens=True)` on the server."""
+    match req.local(csrf_local()):
+        case Some(token):
+            return token
+        case None:
+            panic("`http.csrf_token` needs `server.use(http.csrf(tokens=True))`")
 
 # ---- encoding -----------------------------------------------------------------------------
 

@@ -442,11 +442,16 @@ def now() -> int:
 # ---- routes -------------------------------------------------------------------------------
 
 impl Provider:
-    def install(self, server: http.Server):
+    def install(self, server: http.Server, csrf: bool = True):
         """Add the login route, the callback route (the redirect URI's path), the logout route
         (`POST`), and the middleware that reads the session cookie on every request, which
-        `auth.user`, `auth.required` and `auth.protect` rely on."""
+        `auth.user`, `auth.required` and `auth.protect` rely on. Unless `csrf=False`, it also
+        adds `http.csrf()`: a page on another site cannot make the browser post to a route
+        that the session cookie signs in (a server that already has `http.csrf(tokens=True)`
+        can pass `csrf=False`)."""
         provider = self
+        if csrf:
+            server.use(http.csrf())
         server.security_scheme(SCHEME, http.api_key(self.session_cookie, cookie=True, description=f"The session cookie. Sign in at {self.login_path}."))
         server.use(lambda req, next: provider.middleware(req, next))
         server.get(self.login_path, lambda req: provider.login(req))

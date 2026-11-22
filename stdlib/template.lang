@@ -152,7 +152,15 @@ def lex(name: str, src: str) -> Result[list[Chunk], TemplateError]:
                 inner = inner[0:len(inner) - 1]
             if two != "{#":
                 kind = 1 if two == "{{" else 2
-                chunks.append(Chunk(kind, inner.strip(), tag_line, trim_left, trim_right))
+                if kind == 1 and inner.strip() == "csrf_field()":
+                    # The hidden input for the CSRF token, which `http.render(..., req=req)` puts
+                    # in the context as `csrf_token`: three chunks, so the value is escaped
+                    # like any other in an attribute.
+                    chunks.append(Chunk(0, "<input type=\"hidden\" name=\"csrf_token\" value=\"", tag_line, trim_left, False))
+                    chunks.append(Chunk(kind, "csrf_token", tag_line))
+                    chunks.append(Chunk(0, "\">", tag_line, False, trim_right))
+                else:
+                    chunks.append(Chunk(kind, inner.strip(), tag_line, trim_left, trim_right))
             elif len(chunks) > 0 or trim_left or trim_right:
                 # A comment can trim like any tag; it is not a chunk.
                 chunks.append(Chunk(3, "", tag_line, trim_left, trim_right))
@@ -1548,12 +1556,21 @@ pub struct Templates:
     priv current: Mutex[dict[str, Snapshot]]
 
 impl Templates:
-    def render[T: ToJson](self, name: str, context: T) -> Result[str, TemplateError]:
+    def render[T: ToJson](self, name: str, context: T, csrf_token: str? = None) -> Result[str, TemplateError]:
         """Render a template with a context: a struct or dict that can become JSON, whose
-        fields the template reads by name."""
+        fields the template reads by name. `csrf_token` is what `{{ csrf_field() }}` writes."""
         snapshot = self.snapshot()?
         match jsonlib.parse(jsonlib.encode(context)):
             case Ok(value):
+                match csrf_token:
+                    case Some(token):
+                        match value:
+                            case jsonlib.Value.Object(fields):
+                                fields["csrf_token"] = jsonlib.Value.Str(token)
+                            case _:
+                                pass
+                    case None:
+                        pass
                 return render_value(snapshot.templates, name, value)
             case Err(failure):
                 return Err(TemplateError("the context of `" + name + "` is not valid: " + failure.message()))

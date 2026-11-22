@@ -1328,6 +1328,18 @@ Section 4.16 of docs/14:
 - **Retries wait in the worker** (in slices of 0.2 s, so a stop is noticed), which keeps the queue simple and the order roughly as submitted; a retry does not go to the back of the queue. The backoff has no clock to fake: `backoff_delay` is a pure function, tested as a table, and the queue tests use a millisecond backoff.
 - **Not done:** durable queues in PostgreSQL, a clock for the sleeps, jobs that return values, cancelling a running job, and job IDs as a field of the lines the job's own code logs (the `jobs` module's lines carry them; a job can log with `log.with_fields`).
 
+### D125. CSRF protection (production web plan, milestone 20)
+
+Section 4.17 of docs/14, and its decision 13:
+
+- **`same-site` is refused like `cross-site`.** The plan lists `cross-site`; Go 1.25's `CrossOriginProtection`, which it follows, allows only `same-origin` and `none`, because a sibling subdomain (or a taken-over one) can set cookies for the site. A site that wants a sibling to post lists its origin in `trusted_origins`, which also overrides the fetch metadata.
+- **Own origin is the `Host` header.** The server does not know its public scheme or name, and `X-Forwarded-*` are honoured only for `trusted_proxies`; comparing the `Origin`'s authority with `Host` needs neither, and a proxy that rewrites `Host` has to pass the original. The scheme is not compared (an http origin posting to an https host is a downgrade the browser's `Sec-Fetch-Site` already describes).
+- **Tokens are a signed double-submit cookie,** as the plan says: `token.HMAC(key, "csrf." + token)`, with the token a random 32 bytes. The cookie is `HttpOnly` and `SameSite=Lax`; a script reads the token from `http.csrf_token(req)` in the page, not from the cookie. A request without a valid cookie gets a new token and cookie but cannot pass the check. `secure=True` renames the cookie `__Host-csrf`, which browsers accept only with `Secure`, path `/` and no domain. The cookie is not tied to the session, so a login does not rotate it; that is a known limit of double-submit and is why the origin checks come first.
+- **`{{ csrf_field() }}` is a rewrite in the template lexer** into text, `{{ csrf_token }}` and text, so the value is escaped by the same analysis as any other and the template language gets no function calls. `http.render(..., req=req)` puts the token in the context; without it the template fails with the missing `csrf_token`. A context that is not an object cannot carry it.
+- **`auth.install` adds `http.csrf()`** as the plan says, with `csrf=False` to leave it out (and for a server that already has `tokens=True`).
+- **Tests:** `tests/run/csrf_protection.vi` (each `Sec-Fetch-Site` value, `Origin` missing, same, other port, cross, trusted and null, methods, `Authorization`, tokens valid, missing, wrong, forged, unsigned, from another server, in a header and a form field, and the template field). The Google tests pass unchanged.
+- **Not done:** tying the token to the session, rotating it on login, and a per-route opt-out.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |
