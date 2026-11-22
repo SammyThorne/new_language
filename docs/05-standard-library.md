@@ -981,6 +981,15 @@ auth.install_all(server, [google, microsoft, okta])
 - **`User.id`** is the provider's `sub` for Google (as before) and `<name>:<sub>` for the others, so two providers cannot give one ID to two people. Key on `(provider, id)` or just `id`, never on the email.
 - The security scheme in the API documentation is `session`; `googleSession` is kept for one release as an alias.
 
+## Sign-in with GitHub (docs/14, milestone 22)
+
+```python
+github = auth.github().unwrap()           # GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_REDIRECT_URI
+github.install(server)                    # /auth/github/login and /auth/github/callback
+```
+
+GitHub's sign-in is OAuth 2 with no ID token, so after the code exchange the program reads the account from GitHub's API with the access token. `User.id` is `github:<number>` (the number does not change when the account is renamed), `name` is the profile's name or else the login, `picture` its avatar, and `email` the account's **primary** address when GitHub has verified it, otherwise `""`. `require_verified_email` (the default) refuses a sign-in without one and needs the `user:email` scope, which `scopes` has by default; pass `require_verified_email=False` to accept accounts with no email. There is no `allowed_domains`; `allowed_emails` works. `auth.github_for_tests(endpoints=auth.Endpoints(authorize=..., token=..., api=...))` points a test at a fake GitHub, and `test_cookie` works as for Google. Register `https://<site>/auth/github/callback` in the OAuth app (Settings > Developer settings > OAuth Apps). Use it with others through `auth.install_all`. See `examples/github_login`.
+
 ## CSRF protection (docs/14, milestone 20)
 
 `server.use(http.csrf(trusted_origins=[], tokens=False, secret=None, secure=False))` stops a page on another site from making a visitor's browser change things on yours with the visitor's cookies. It looks only at requests that change things (every method but `GET`, `HEAD` and `OPTIONS`) and answers a 403 (made like any error, so `on_error` applies) when:

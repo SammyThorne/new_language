@@ -1355,6 +1355,17 @@ Section 4.18 of docs/14 (decision 6 of docs/13, "endpoints are built in", now ha
 - **Tests:** `sign_in_with_discovered_providers` in `crates/lang_cli/tests/oidc.rs` (a fake provider with a discovery document and an ES256 key made at run time; `tests/oidc/providers.vi`): an issuer that the document contradicts is refused, a token for another issuer is refused with the reason logged, Microsoft's tenant template accepts a matching `tid` and refuses another, two providers share a server and either's session works. The RS256 tests and `examples/google_login` pass unchanged. ES256 verification has a unit test in `lang_rt`.
 - **Not done:** refreshing ID tokens, `nonce`-less providers, `private_key_jwt` client authentication, and PS256.
 
+### D127. GitHub sign-in (production web plan, milestone 22)
+
+Section 4.18 of docs/14:
+
+- **One `Provider`, a second flow.** GitHub has no ID token, so `Endpoints.api` (the API's base URL) marks a provider that reads the account after the code exchange, with `Authorization: Bearer`, from `GET /user` and `GET /user/emails`. Everything else (state, PKCE, flow cookie, sessions, `on_login`, `install_all`) is the OpenID Connect code. PKCE is sent; the nonce is sent and ignored.
+- **The email is the primary address, and only when GitHub says it is verified.** Otherwise `User.email` is `""` and `email_verified` false, which `require_verified_email` (on by default, and needing the `user:email` scope) refuses with the account's name. A failed `/user/emails` (the scope was not granted) is logged and treated as no email; a failed `/user`, or a token reply with no `access_token`, is a 502 page.
+- **`User.id` is `github:<number>`,** the account's numeric ID, which survives a rename; `name` falls back to the login. `domain` is `""`, so `allowed_domains` does not apply and `github` does not take it; `allowed_emails` does.
+- **`User-Agent`** is the one every request of the language's HTTP client sends (the program's name for the runtime), which GitHub requires; the fake API refuses a request without one and the test counts them. `Accept: application/vnd.github+json` and `X-GitHub-Api-Version` are sent.
+- **Tests:** `sign_in_with_github` in `crates/lang_cli/tests/oidc.rs` with `tests/oidc/github.vi` (verified primary email picked over a verified secondary one; an unverified primary refused, and accepted with `require_verified_email=False` and no email; no `user:email` scope; a token reply without a token; the API down; a profile without a name), and the example `examples/github_login`.
+- **Not done:** a manual check against a real GitHub OAuth app (it needs the owner's app and secret), GitHub Apps and Enterprise Server URLs (pass `endpoints=` to `github_for_tests`; a public way to set them is not offered), and organization membership checks.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

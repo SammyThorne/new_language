@@ -108,9 +108,31 @@ fn the_google_login_example_passes_its_tests() {
     );
 }
 
+/// The example app in `examples/github_login` builds, and its tests pass. Running it needs a
+/// GitHub OAuth app, so that is checked by hand.
+#[test]
+fn the_github_login_example_passes_its_tests() {
+    build_runtime();
+    let example = repo_root().join("examples/github_login");
+    let check = Command::new(compiler())
+        .arg("check")
+        .arg(format!("main.{SOURCE_EXTENSION}"))
+        .current_dir(&example)
+        .output()
+        .unwrap();
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
+    let test = Command::new(compiler()).arg("test").current_dir(&example).output().unwrap();
+    let stdout = String::from_utf8_lossy(&test.stdout);
+    assert!(
+        test.status.success() && stdout.contains("3 passed; 0 failed"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&test.stderr)
+    );
+}
+
 /// One request, answered by the fake of milestone 4, and the connection closed.
 fn serve(fake: &Fake, stream: TcpStream) {
-    serve_with(stream, |path, query, body| match path {
+    serve_with(stream, |path, query, body, _| match path {
         "/authorize" => authorize(&form(query)),
         "/token" => token(fake, &form(&String::from_utf8(body).unwrap())),
         "/keys" => {
@@ -127,14 +149,18 @@ fn serve(fake: &Fake, stream: TcpStream) {
     });
 }
 
-/// Reads one request, answers it with `handler(path, query, body)` as `(status, headers, body)`.
-fn serve_with(stream: TcpStream, handler: impl FnOnce(&str, &str, Vec<u8>) -> (u16, String, String)) {
+/// Reads one request, answers it with `handler(path, query, body, headers)` as `(status, headers, body)`.
+fn serve_with(
+    stream: TcpStream,
+    handler: impl FnOnce(&str, &str, Vec<u8>, &[(String, String)]) -> (u16, String, String),
+) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() {
         return;
     }
     let mut length = 0;
+    let mut headers: Vec<(String, String)> = Vec::new();
     loop {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
@@ -142,17 +168,18 @@ fn serve_with(stream: TcpStream, handler: impl FnOnce(&str, &str, Vec<u8>) -> (u
         if line.is_empty() {
             break;
         }
-        if let Some((name, value)) = line.split_once(':')
-            && name.eq_ignore_ascii_case("content-length")
-        {
-            length = value.trim().parse().unwrap();
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().unwrap();
+            }
+            headers.push((name.to_ascii_lowercase(), value.trim().to_string()));
         }
     }
     let mut body = vec![0; length];
     reader.read_exact(&mut body).unwrap();
     let target = request_line.split(' ').nth(1).unwrap_or("/");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    let (status, headers, body) = handler(path, query, body);
+    let (status, headers, body) = handler(path, query, body, &headers);
     let reason = if status == 302 { "Found" } else { "OK" };
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
@@ -325,7 +352,7 @@ fn sign_in_with_discovered_providers() {
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let fake = Arc::clone(&fake);
-            std::thread::spawn(move || serve_with(stream, |path, query, body| ec_route(&fake, path, query, body)));
+            std::thread::spawn(move || serve_with(stream, |path, query, body, _| ec_route(&fake, path, query, body)));
         }
     });
 
@@ -403,4 +430,116 @@ fn ec_token(fake: &EcFake, fields: &[(String, String)]) -> (u16, String, String)
     let signature = fake.key.sign(&SystemRandom::new(), message.as_bytes()).unwrap();
     let id_token = format!("{message}.{}", base64url(signature.as_ref()));
     (200, String::new(), format!(r#"{{"access_token":"at","expires_in":3599,"id_token":"{id_token}"}}"#))
+}
+
+// ---- GitHub: OAuth 2 without an ID token (docs/14, milestone 22) ---------------------------------
+
+/// `auth.github` reads the account from GitHub's API with the access token, trusts only a
+/// verified primary email, and sends a `User-Agent`, which the fake API insists on.
+#[test]
+fn sign_in_with_github() {
+    build_runtime();
+    let root = repo_root();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let missing_agents = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&missing_agents);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let counter = Arc::clone(&counter);
+            std::thread::spawn(move || {
+                serve_with(stream, |path, query, body, headers| github_route(&counter, path, query, body, headers))
+            });
+        }
+    });
+
+    let program = root.join(format!("tests/oidc/github.{SOURCE_EXTENSION}"));
+    let source = std::fs::read_to_string(&program).unwrap();
+    let expected: String =
+        source.lines().filter_map(|l| l.strip_prefix("# expect: ")).map(|l| format!("{l}\n")).collect();
+    let output = Command::new(compiler())
+        .arg("run")
+        .arg(&program)
+        .arg(format!("http://127.0.0.1:{port}"))
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout == expected,
+        "{}\n--- expected\n{expected}--- actual\n{stdout}--- stderr\n{stderr}",
+        output.status
+    );
+    assert_eq!(missing_agents.load(Ordering::SeqCst), 0, "a request had no User-Agent");
+}
+
+fn github_route(
+    missing_agents: &AtomicUsize,
+    path: &str,
+    query: &str,
+    body: Vec<u8>,
+    headers: &[(String, String)],
+) -> (u16, String, String) {
+    let header = |name: &str| headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str()).unwrap_or("");
+    let json = |status: u16, body: &str| (status, String::new(), body.to_string());
+    match path {
+        "/authorize" => authorize(&form(query)),
+        "/token" => {
+            let fields = form(&String::from_utf8(body).unwrap());
+            let get = |name: &str| fields.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str()).unwrap_or("");
+            let code: Vec<&str> = get("code").split('.').collect();
+            let challenge =
+                base64url(ring::digest::digest(&ring::digest::SHA256, get("code_verifier").as_bytes()).as_ref());
+            if code.len() != 3 || code[2] != challenge || get("client_secret") != "test-secret" {
+                return json(200, r#"{"error":"bad_verification_code"}"#);
+            }
+            if code[0] == "no_token" {
+                return json(200, "{}");
+            }
+            json(
+                200,
+                &format!(
+                    r#"{{"access_token":"gho_{}","token_type":"bearer","scope":"read:user,user:email"}}"#,
+                    code[0]
+                ),
+            )
+        }
+        "/api/user" | "/api/user/emails" => {
+            if header("user-agent").is_empty() {
+                missing_agents.fetch_add(1, Ordering::SeqCst);
+                return json(403, r#"{"message":"Request forbidden: no User-Agent"}"#);
+            }
+            let scenario = header("authorization").strip_prefix("Bearer gho_").unwrap_or("");
+            if scenario.is_empty() || header("accept") != "application/vnd.github+json" {
+                return json(401, r#"{"message":"Bad credentials"}"#);
+            }
+            if scenario == "api_down" {
+                return json(500, "{}");
+            }
+            if path == "/api/user" {
+                return match scenario {
+                    "nameless" => {
+                        json(200, r#"{"login":"octocat","id":7,"name":null,"avatar_url":"https://avatars.test/7"}"#)
+                    }
+                    _ => json(
+                        200,
+                        r#"{"login":"ann","id":583231,"name":"Ann Lee","avatar_url":"https://avatars.test/583231"}"#,
+                    ),
+                };
+            }
+            match scenario {
+                "no_scope" => json(404, r#"{"message":"Not Found"}"#),
+                "unverified" => json(
+                    200,
+                    r#"[{"email":"ann@example.com","primary":true,"verified":false},{"email":"old@example.com","primary":false,"verified":true}]"#,
+                ),
+                _ => json(
+                    200,
+                    r#"[{"email":"other@example.com","primary":false,"verified":true},{"email":"ann@example.com","primary":true,"verified":true}]"#,
+                ),
+            }
+        }
+        _ => json(404, "{}"),
+    }
 }

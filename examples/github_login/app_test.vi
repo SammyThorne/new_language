@@ -1,0 +1,29 @@
+# The app's tests: `viper test`. They sign requests in with `test_cookie`; nothing contacts GitHub.
+
+import http
+import auth
+import app
+
+def signed_in() -> tuple[http.Server, str]:
+    github = auth.github_for_tests()
+    ann = auth.User(id="github:583231", email="ann@example.com", email_verified=True, name="Ann <Lee>", provider="github")
+    return (app.make_server(github), github.test_cookie(ann))
+
+@test
+def the_home_page_offers_to_sign_in():
+    server, _cookie = signed_in()
+    r = server.handle(http.test_request("GET", "/"))
+    assert r.status == 200 and "Sign in with GitHub" in r.body
+
+@test
+def the_login_route_goes_to_github():
+    server, _cookie = signed_in()
+    r = server.handle(http.test_request("GET", "/auth/github/login"))
+    assert r.status == 302
+    assert r.headers["Location"].starts_with("https://github.test/authorize?"), r.headers["Location"]
+
+@test
+def a_signed_in_user_is_greeted_and_escaped():
+    server, cookie = signed_in()
+    r = server.handle(http.test_request("GET", "/", headers={"Cookie": cookie}))
+    assert "Hello, Ann &lt;Lee&gt; (ann@example.com). Your ID is github:583231." in r.body, r.body

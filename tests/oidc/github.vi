@@ -1,0 +1,68 @@
+# Sign-in with GitHub against a fake GitHub (docs/14, milestone 22): OAuth 2 with no ID token, so
+# the account comes from the API. crates/lang_cli/tests/oidc.rs runs the fake and passes its
+# address; the fake refuses API requests without a User-Agent, which the test counts.
+# expect: ann: 302 | me: Ann Lee github:583231 ann@example.com github
+# expect: nameless: 302 | me: octocat github:7 ann@example.com github
+# expect: unverified: 403 Sign-in refused
+# expect: no user:email scope: 403 Sign-in refused
+# expect: no token: 502 Sign-in failed
+# expect: API down: 502 Sign-in failed
+# expect: unverified, if allowed: 302 | me: Ann Lee github:583231  github
+
+import http
+import auth
+import os
+
+def me(req: http.Request) -> Result[http.Response]:
+    user = auth.user(req).unwrap()
+    return http.text(f"{user.name} {user.id} {user.email} {user.provider}")
+
+def app(github: str, strict: bool, ports: Channel[int]):
+    server = http.Server()
+    port = server.bind("127.0.0.1:0").unwrap()
+    endpoints = auth.Endpoints(authorize=github + "/authorize", token=github + "/token", api=github + "/api")
+    provider = auth.github_for_tests(endpoints=endpoints, redirect_uri=f"http://127.0.0.1:{port}/auth/github/callback", require_verified_email=strict)
+    provider.install(server)
+    server.get("/me", auth.protect(me))
+    ports.send(port)
+    server.serve()
+
+def cookie(response: http.ClientResponse, name: str) -> str:
+    for line in response.header("Set-Cookie").unwrap_or("").split("\n"):
+        if line.starts_with(name + "="):
+            return line.partition(";")[0]
+    return ""
+
+def sign_in(site: str, scenario: str) -> http.ClientResponse:
+    login = http.get(site + "/auth/github/login").unwrap()
+    there = http.get(login.header("Location").unwrap() + "&login_hint=" + scenario).unwrap()
+    return http.fetch("GET", there.header("Location").unwrap(), headers={"Cookie": cookie(login, "oauth-github")}).unwrap()
+
+def title(response: http.ClientResponse) -> str:
+    return response.text().unwrap().partition("<h1>")[2].partition("</h1>")[0]
+
+def me_of(site: str, response: http.ClientResponse) -> str:
+    return http.fetch("GET", site + "/me", headers={"Cookie": cookie(response, "session")}).unwrap().text().unwrap()
+
+def main():
+    github = os.args()[1]
+    strict_port: Channel[int] = Channel(1)
+    lax_port: Channel[int] = Channel(1)
+    spawn app(github, True, strict_port)
+    spawn app(github, False, lax_port)
+    strict = f"http://127.0.0.1:{strict_port.recv().unwrap()}"
+    lax = f"http://127.0.0.1:{lax_port.recv().unwrap()}"
+
+    r = sign_in(strict, "ann")
+    print("ann:", r.status, "| me:", me_of(strict, r))
+    r = sign_in(strict, "nameless")
+    print("nameless:", r.status, "| me:", me_of(strict, r))
+    for label, scenario in [("unverified", "unverified"), ("no user:email scope", "no_scope")]:
+        r = sign_in(strict, scenario)
+        print(f"{label}:", r.status, title(r))
+    r = sign_in(strict, "no_token")
+    print("no token:", r.status, title(r))
+    r = sign_in(strict, "api_down")
+    print("API down:", r.status, title(r))
+    r = sign_in(lax, "unverified")
+    print("unverified, if allowed:", r.status, "| me:", me_of(lax, r))

@@ -1,0 +1,25 @@
+# Sign in with GitHub: see README.md for the OAuth app's settings. Set GITHUB_CLIENT_ID and
+# GITHUB_CLIENT_SECRET (a `.env` file here works: copy `.env.example`), and
+# GITHUB_REDIRECT_URI=http://localhost:8080/auth/github/callback.
+
+import auth
+import config
+import io
+import os
+import app
+
+def main():
+    match config.load_env():
+        case Ok(_):
+            pass
+        case Err(bad_settings):
+            io.eprint(bad_settings.message())
+            os.exit(1)
+    match auth.github():
+        case Ok(github):
+            server = app.make_server(github)
+            print("open http://localhost:8080")
+            server.listen(":8080").unwrap()
+        case Err(problem):
+            io.eprint(f"cannot sign in with GitHub: {problem}")
+            os.exit(1)

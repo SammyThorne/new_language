@@ -75,6 +75,8 @@ Not yet in a numbered release; `viper --version` still says 1.1.0.
 
 **Generic OpenID Connect sign-in** (milestone 21, D126): `auth.oidc(issuer, name="...")` finds a provider's endpoints and keys from its discovery document and checks ID tokens signed with RS256 or ES256 (`crypto.verify_es256`) against the issuer. `auth.microsoft(tenant=...)` (with Microsoft's per-tenant issuers), `auth.okta(domain)` and `auth.auth0(domain)` are presets. `auth.install_all(server, [a, b])` serves several providers with one session; `User.provider` names the one that signed the user in, and IDs from providers other than Google are `<provider>:<sub>`. The security scheme the sign-in documents is now `session`; `googleSession` still works as an alias for one release.
 
+**GitHub sign-in** (milestone 22, D127): `auth.github()` signs users in with an OAuth app (`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_REDIRECT_URI`), reads the account from GitHub's API, and trusts only a verified primary email. `User.id` is `github:<number>`. `auth.github_for_tests()` is its test provider, and `examples/github_login` is an example.
+
 **Signing in with Google** ([plan](13-google-oauth-plan.md), D100 to D104). The new `auth` module signs users in with their Google accounts from the credentials file the Google Cloud console makes, as Passport, Authlib or NextAuth do in other languages:
 
 - `provider.install(server)` adds the login, callback and logout routes and a signed session cookie. It uses the authorization code flow with PKCE, `state` and `nonce`, and checks the ID token's RS256 signature against Google's keys, which are cached.

@@ -1,0 +1,20 @@
+# The app: a home page that says who is signed in, and the sign-in routes of `auth.github`.
+
+import http
+import auth
+
+def escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+
+def home(req: http.Request) -> Result[http.Response]:
+    match auth.user(req):
+        case Some(user):
+            return http.html(f"<p>Hello, {escape(user.name)} ({escape(user.email)}). Your ID is {escape(user.id)}.</p>")
+        case None:
+            return http.html("<p><a href=\"/auth/github/login\">Sign in with GitHub</a></p>")
+
+pub def make_server(github: auth.Provider) -> http.Server:
+    server = http.Server()
+    github.install(server)
+    server.get("/", home)
+    return server

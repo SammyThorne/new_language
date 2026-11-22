@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 21 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 22 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1324,6 +1324,12 @@ Done (D126):
   - The `User-Agent` sent.
   - A real-GitHub manual check, like docs/13's real-Google check, which needs the owner's OAuth app.
 - **Docs:** docs/05, and an example.
+
+Done (D127):
+
+- `auth.github` and `auth.github_for_tests`: OAuth 2 without an ID token, the account read from `/user` and `/user/emails`, the primary verified email, `User.id` as `github:<number>`.
+- Tests: `sign_in_with_github` and `tests/oidc/github.vi` against a fake GitHub API that requires a `User-Agent`; the example `examples/github_login`.
+- Not done: the manual check against a real GitHub OAuth app, which needs the owner's app.
 
 ### Track H: lower priority
 

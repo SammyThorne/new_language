@@ -113,6 +113,9 @@ pub struct Endpoints:
     issuer: str = ""
     # The signing algorithms accepted, separated by spaces: `RS256`, `ES256`.
     algorithms: str = "RS256"
+    # The base URL of an OAuth 2 provider's API with no ID token (GitHub's): the user is read
+    # from `<api>/user` and `<api>/user/emails` with the access token. "" for OpenID Connect.
+    api: str = ""
 
 # ---- the provider -------------------------------------------------------------------------
 
@@ -343,6 +346,92 @@ pub def oidc_for_tests(
         case Err(problem):
             panic(problem.message)
 
+pub def github(
+    client_id: str = "",
+    client_secret: str = "",
+    redirect_uri: str = "",
+    secret: str? = None,
+    scopes: list[str] = ["read:user", "user:email"],
+    allowed_emails: list[str] = [],
+    require_verified_email: bool = True,
+    session_days: int = 7,
+    on_login: LoginHook? = None,
+) -> Result[Provider, AuthError]:
+    """
+    Sign-in with GitHub, which is OAuth 2 without an ID token: after the code exchange the
+    server reads the account from GitHub's API with the access token. The user's email is
+    their primary address when GitHub has verified it, and `""` otherwise, which
+    `require_verified_email` refuses (it needs the `user:email` scope). `User.id` is
+    `github:<number>`, which stays the same when the user renames their account. The client
+    comes from `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` and `GITHUB_REDIRECT_URI`; register
+    `https://<your site>/auth/github/callback` in the OAuth app.
+    """
+    id = client_id
+    if id == "":
+        id = os.getenv("GITHUB_CLIENT_ID").unwrap_or("")
+    password = client_secret
+    if password == "":
+        password = os.getenv("GITHUB_CLIENT_SECRET").unwrap_or("")
+    if id == "" or password == "":
+        return Err(AuthError("no github client: give `client_id=` and `client_secret=`, or set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET (from an OAuth app in GitHub's developer settings)"))
+    redirect = redirect_uri
+    if redirect == "":
+        redirect = os.getenv("GITHUB_REDIRECT_URI").unwrap_or("")
+    if redirect == "":
+        return Err(AuthError("give `redirect_uri=` (or set GITHUB_REDIRECT_URI): the one registered for the OAuth app with GitHub"))
+    return make_provider(
+        id,
+        password,
+        redirect,
+        secret,
+        scopes,
+        [],
+        allowed_emails,
+        require_verified_email,
+        session_days,
+        "/auth/github/login",
+        "/auth/logout",
+        "/",
+        on_login,
+        Endpoints("https://github.com/login/oauth/authorize", "https://github.com/login/oauth/access_token", "", "", "", "https://api.github.com"),
+        "github",
+        "GitHub",
+    )
+
+pub def github_for_tests(
+    endpoints: Endpoints? = None,
+    secret: str = "a session secret for tests, never for a real program",
+    redirect_uri: str = "http://localhost:8080/auth/github/callback",
+    allowed_emails: list[str] = [],
+    require_verified_email: bool = True,
+    on_login: LoginHook? = None,
+) -> Provider:
+    """`github` for tests: no environment. Point `endpoints` (with `api=`) at a fake GitHub;
+    `test_cookie` signs test requests in."""
+    chosen = endpoints.unwrap_or(Endpoints("https://github.test/authorize", "https://github.test/token", "", "", "", "https://api.github.test"))
+    match make_provider(
+        "test-client-github",
+        "test-secret",
+        redirect_uri,
+        Some(secret),
+        ["read:user", "user:email"],
+        [],
+        allowed_emails,
+        require_verified_email,
+        7,
+        "/auth/github/login",
+        "/auth/logout",
+        "/",
+        on_login,
+        chosen,
+        "github",
+        "GitHub",
+    ):
+        case Ok(provider):
+            return provider
+        case Err(problem):
+            panic(problem.message)
+
 pub def microsoft(
     tenant: str = "common",
     client_id: str = "",
@@ -486,6 +575,20 @@ def discover(issuer: str) -> Result[Endpoints, AuthError]:
         case Err(problem):
             return Err(AuthError(f"cannot read {url}: {problem.message()}"))
 
+def api_get(url: str, headers: dict[str, str]) -> Result[json.Value, str]:
+    """A JSON answer from a provider's API, or why there is none."""
+    match http.fetch("GET", url, headers=headers):
+        case Ok(answer):
+            if not answer.ok():
+                return Err(f"{url} answered {answer.status}")
+            match answer.json():
+                case Ok(value):
+                    return Ok(value)
+                case Err(problem):
+                    return Err(f"{url} is not JSON: {problem.message()}")
+        case Err(problem):
+            return Err(f"{url}: {problem.message()}")
+
 def issuer_names(asked: str, named: str) -> bool:
     """Whether a discovery document's issuer is the one asked for; a `{tenantid}` template
     stands for the tenant named in the URL asked for."""
@@ -579,9 +682,12 @@ def make_provider(
     title: str = "Google",
 ) -> Result[Provider, AuthError]:
     secure, callback_path = split_redirect_uri(redirect_uri)?
-    if "openid" not in scopes:
+    plain = endpoints.api != ""
+    if plain and require_verified_email and "user:email" not in scopes:
+        return Err(AuthError("`require_verified_email` needs the \"user:email\" scope, which reads the account's addresses; add it, or pass `require_verified_email=False`"))
+    if not plain and "openid" not in scopes:
         return Err(AuthError(f"the scopes must include \"openid\", which asks {title} who the user is"))
-    if require_verified_email and "email" not in scopes:
+    if not plain and require_verified_email and "email" not in scopes:
         return Err(AuthError("`require_verified_email` needs the \"email\" scope; add it, or pass `require_verified_email=False`"))
     if session_days < 1:
         return Err(AuthError(f"`session_days` must be at least 1, not {session_days}"))
@@ -876,21 +982,32 @@ impl Provider:
             case Err(problem):
                 log.warn(f"sign-in: the token request failed: {problem.message()}")
                 return self.page(502, "Sign-in failed", f"{self.title} could not be reached. Try again later.", True)
-        id_token = reply["id_token"].as_str().unwrap_or("")
-        claims = json.Value.Null
-        match self.check_id_token(id_token, flow.nonce):
-            case Ok(checked):
-                claims = checked
-            case Err(reason):
-                log.warn(f"sign-in: the ID token was refused: {reason}")
-                return self.page(401, "Sign-in failed", "Could not verify the sign-in.", True)
-        user = user_of(claims, self.name)
+        id_token = ""
+        user = User("")
+        if self.endpoints.api != "":
+            match self.github_user(reply["access_token"].as_str().unwrap_or("")):
+                case Ok(found):
+                    user = found
+                case Err(reason):
+                    log.warn(f"sign-in: reading the {self.title} account failed: {reason}")
+                    return self.page(502, "Sign-in failed", f"{self.title} could not be reached. Try again later.", True)
+        else:
+            id_token = reply["id_token"].as_str().unwrap_or("")
+            claims = json.Value.Null
+            match self.check_id_token(id_token, flow.nonce):
+                case Ok(checked):
+                    claims = checked
+                case Err(reason):
+                    log.warn(f"sign-in: the ID token was refused: {reason}")
+                    return self.page(401, "Sign-in failed", "Could not verify the sign-in.", True)
+            user = user_of(claims, self.name)
+        who = user.email if user.email != "" else user.name
         if self.require_verified_email and not user.email_verified:
-            return self.page(403, "Sign-in refused", f"The {self.title} account {user.email} has no verified email address.", False)
+            return self.page(403, "Sign-in refused", f"The {self.title} account {who} has no verified email address.", False)
         if len(self.allowed_domains) > 0 and user.domain.lower() not in self.allowed_domains:
-            return self.page(403, "Sign-in refused", f"The {self.title} account {user.email} cannot sign in here.", False)
+            return self.page(403, "Sign-in refused", f"The {self.title} account {who} cannot sign in here.", False)
         if len(self.allowed_emails) > 0 and user.email.lower() not in self.allowed_emails:
-            return self.page(403, "Sign-in refused", f"The {self.title} account {user.email} cannot sign in here.", False)
+            return self.page(403, "Sign-in refused", f"The {self.title} account {who} cannot sign in here.", False)
         match self.on_login:
             case Some(hook):
                 expires_in = reply["expires_in"].as_float().unwrap_or(0.0)
@@ -911,6 +1028,44 @@ impl Provider:
         response = http.redirect(flow.next)
         response.set_cookie(self.session_cookie, self.session_value(user), max_age=self.session_seconds, secure=self.secure)
         return response
+
+    def github_user(self, token: str) -> Result[User, str]:
+        """The account an access token belongs to, from GitHub's API: its profile, and its
+        primary email address if that is verified."""
+        if token == "":
+            return Err("the token endpoint gave no access token")
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+        profile = api_get(self.endpoints.api + "/user", headers)?
+        id = profile["id"].as_int()
+        if id == None:
+            return Err("the profile has no id")
+        email = ""
+        # Without the `user:email` scope this fails, and the account has no email to trust.
+        match api_get(self.endpoints.api + "/user/emails", headers):
+            case Ok(addresses):
+                match addresses.as_list():
+                    case Some(items):
+                        for item in items:
+                            if item["primary"].as_bool() == Some(True) and item["verified"].as_bool() == Some(True):
+                                email = item["email"].as_str().unwrap_or("")
+                    case None:
+                        pass
+            case Err(reason):
+                log.info(f"sign-in: no email addresses from {self.title}: {reason}")
+        name = profile["name"].as_str().unwrap_or("")
+        if name == "":
+            name = profile["login"].as_str().unwrap_or("")
+        return User(
+            f"{self.name}:{id.unwrap()}",
+            email,
+            email != "",
+            name,
+            "",
+            "",
+            profile["avatar_url"].as_str().unwrap_or(""),
+            "",
+            self.name,
+        )
 
     def check_id_token(self, token: str, nonce: str) -> Result[json.Value, str]:
         """The ID token's claims, once its header and claims are checked; or why not."""
