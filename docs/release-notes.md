@@ -81,6 +81,8 @@ Not yet in a numbered release; `viper --version` still says 1.1.0.
 
 **The router** (milestone 24, D129) finds a route through a tree of path segments. With 200 parameterised routes ahead of the one a request wants, a request cost 23% more with the old scan; it now costs 0.3% more. Which route a path gets does not change: the first one added that fits and accepts the method.
 
+**Redis** (milestone 25, D130) is a module of its own: a pooled RESP3 client with pipelines, transactions, pub/sub and Lua, and two things built on it. `redis.rate_store` gives `http.rate_limit` one limit shared by every server, and `redis.queue` is a job queue that survives restarts, retries with backoff and hands a dead instance's items to another. Delivery is at least once.
+
 **Signing in with Google** ([plan](13-google-oauth-plan.md), D100 to D104). The new `auth` module signs users in with their Google accounts from the credentials file the Google Cloud console makes, as Passport, Authlib or NextAuth do in other languages:
 
 - `provider.install(server)` adds the login, callback and logout routes and a signed session cookie. It uses the authorization code flow with PKCE, `state` and `nonce`, and checks the ID token's RS256 signature against Google's keys, which are cached.

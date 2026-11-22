@@ -39,19 +39,25 @@ pub(crate) fn server_config(cert_file: &str, key_file: &str) -> Result<Arc<Serve
 pub(crate) enum Protocol {
     Http,
     Postgres,
+    Redis,
 }
 
 /// The client configurations, built once each: the built-in roots and those from `SSL_CERT_FILE`.
 fn client_config(protocol: Protocol) -> Result<Arc<ClientConfig>, String> {
     static HTTP: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::new();
     static POSTGRES: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::new();
+    static REDIS: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::new();
     let (cell, alpn): (_, &[u8]) = match protocol {
         Protocol::Http => (&HTTP, b"http/1.1"),
         Protocol::Postgres => (&POSTGRES, b"postgresql"),
+        // Redis speaks no ALPN protocol.
+        Protocol::Redis => (&REDIS, b""),
     };
     cell.get_or_init(|| {
         let mut config = ClientConfig::builder().with_root_certificates(roots()?).with_no_client_auth();
-        config.alpn_protocols = vec![alpn.to_vec()];
+        if !alpn.is_empty() {
+            config.alpn_protocols = vec![alpn.to_vec()];
+        }
         Ok(Arc::new(config))
     })
     .clone()

@@ -1,0 +1,38 @@
+# A Redis that speaks only RESP2 (docs/14, milestone 25): crates/lang_cli/tests/redis.rs runs a
+# fake one and passes its address. The client tries `HELLO 3`, is told the command is unknown,
+# and authenticates with `AUTH` and picks the database with `SELECT`; a wrong password is refused.
+# expect: ping: True
+# expect: get: v None
+# expect: set nx: True False
+# expect: incr: 3 8
+# expect: hash: {'a': '1', 'b': '2'}
+# expect: pipeline: [+OK, 4, nil, -ERR unknown command 'NOPE']
+# expect: error: ERR unknown command 'NOPE'
+# expect: wrong password: Redis refused the connection: WRONGPASS invalid password
+
+import redis
+import os
+
+def main():
+    good = os.args()[1]
+    bad = os.args()[2]
+    c = redis.connect(good).unwrap()
+    print("ping:", c.ping().is_ok())
+    c.set("k", "v").unwrap()
+    print("get:", c.get("k").unwrap(), c.get("nothing").unwrap())
+    print("set nx:", c.set("n", "1", only_if_missing=True).unwrap(), c.set("n", "2", only_if_missing=True).unwrap())
+    print("incr:", c.incr("count", 3).unwrap(), c.incr("count", 5).unwrap())
+    c.hset("h", {"a": "1", "b": "2"}).unwrap()
+    print("hash:", c.hgetall("h").unwrap())
+    replies = c.pipeline().add(["SET", "p", "1"]).add(["INCRBY", "p", "3"]).add(["GET", "missing"]).add(["NOPE"]).run().unwrap()
+    print("pipeline:", replies)
+    match c.command(["NOPE"]):
+        case Ok(_):
+            print("error: none")
+        case Err(problem):
+            print("error:", problem.message())
+    match redis.connect(bad):
+        case Ok(_):
+            print("wrong password: accepted")
+        case Err(problem):
+            print("wrong password:", problem.message())

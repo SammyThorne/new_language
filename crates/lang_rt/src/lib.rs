@@ -38,6 +38,7 @@ pub mod pg;
 pub mod poll;
 pub mod ratelimit;
 pub mod re;
+pub mod redis;
 pub mod sqlite;
 pub mod static_files;
 pub mod strings;

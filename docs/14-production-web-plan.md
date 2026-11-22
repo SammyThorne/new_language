@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 24 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 25 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1358,6 +1358,12 @@ Done (D129):
 
 - A RESP3 client with pooling; `GET`, `SET`, `INCR`, `EXPIRE`, pub/sub, and pipelines.
 - Redis-backed stores for `rate_limit` and `jobs.Queue`.
+
+Done (D130):
+
+- `redis` module: a pooled RESP3 client (RESP2 fallback, `rediss://`), typed helpers, pipelines and transactions, pub/sub, and `eval`.
+- `http.RateStore` and `http.rate_limit(store=...)`; `redis.rate_store` shares one limit across servers. `redis.queue` is a job queue with retries, a failed list and recovery of a dead instance's items.
+- Tests: a fake RESP2 server (always) and a real Redis (`TEST_REDIS_URL`); counts unchanged.
 
 ### What will be built, in total
 

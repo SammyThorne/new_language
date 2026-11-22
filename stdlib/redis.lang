@@ -1,0 +1,761 @@
+"""
+A Redis client with a connection pool. Calls wait without blocking other tasks, and a `Client`
+can be shared by every request handler.
+
+    import redis
+    import datetime
+
+    def main():
+        cache = redis.connect("redis://localhost:6379").unwrap()
+        cache.set("greeting", "hello", ttl=datetime.minutes(5)).unwrap()
+        print(cache.get("greeting").unwrap())            # Some("hello")
+        print(cache.incr("visits").unwrap())             # 1, 2, 3, ...
+
+The URL is `redis://[user:password@]host[:port][/database]`, or `rediss://` for TLS (the server's
+certificate is checked against the trusted roots, and `SSL_CERT_FILE`). Options after `?`:
+`pool_max` (default 10) and `timeout`, the milliseconds to wait for one reply (default 30000).
+
+Every command is also available as `command(["NAME", "arg", ...])`, which answers with a
+`Reply`. Values travel as text; Redis stores bytes, and what you `set` is what you `get`.
+`pipeline()` sends several commands in one write, `subscribe` listens to channels, and
+`redis.rate_store` and `redis.queue` make `http.rate_limit` and a job queue shared by every
+instance of a service that uses the same Redis.
+"""
+
+import datetime
+import http
+import crypto
+import json as jsonlib
+import log
+import time
+import jobs
+
+@extern("lrt_redis_open")
+def open_raw(url: str) -> int
+
+@extern("lrt_redis_arg")
+def arg_raw(value: str)
+
+@extern("lrt_redis_end_command")
+def end_command_raw()
+
+@extern("lrt_redis_run")
+def run_raw(pool: int, atomic: int, timeout_ms: int) -> int
+
+@extern("lrt_redis_kind")
+def kind_raw(handle: int, node: int) -> int
+
+@extern("lrt_redis_int")
+def int_raw(handle: int, node: int) -> int
+
+@extern("lrt_redis_text")
+def text_raw(handle: int, node: int) -> str
+
+@extern("lrt_redis_len")
+def len_raw(handle: int, node: int) -> int
+
+@extern("lrt_redis_child")
+def child_raw(handle: int, node: int, index: int) -> int
+
+@extern("lrt_redis_free")
+def free_raw(handle: int)
+
+@extern("lrt_redis_subscribe")
+def subscribe_raw(pool: int, pattern: int) -> int
+
+@extern("lrt_redis_next")
+def next_raw(sub: int, timeout_ms: int) -> int
+
+@extern("lrt_redis_unsubscribe")
+def unsubscribe_raw(sub: int)
+
+@extern("lrt_redis_close")
+def close_raw(pool: int)
+
+@extern("lrt_io_error")
+def last_error() -> str
+
+@extern("lrt_jobs_stopping")
+def stopping_raw() -> int
+
+@extern("lrt_jobs_running")
+def running_raw(delta: int) -> int
+
+pub struct RedisError:
+    """A failed Redis call: the connection broke or timed out, or Redis answered with an error,
+    whose text it begins with a word such as `WRONGTYPE`, `NOSCRIPT` or `ERR`."""
+    reason: str
+
+impl Error for RedisError:
+    def message(self) -> str:
+        return self.reason
+
+impl Display for RedisError:
+    def to_str(self) -> str:
+        return self.reason
+
+def failed() -> RedisError:
+    return RedisError(last_error())
+
+pub enum Reply:
+    """What Redis answered to a command. Most calls convert it for you; `command` and
+    `pipeline` give it as it is."""
+    Nil
+    Status(text: str)
+    Text(text: str)
+    Int(value: int)
+    Float(value: float)
+    Bool(value: bool)
+    List(items: list[Reply])
+    Map(pairs: list[tuple[Reply, Reply]])
+    # An error reply, such as `WRONGTYPE Operation against a key holding the wrong kind of value`.
+    Failure(message: str)
+
+impl Reply:
+    def is_nil(self) -> bool:
+        match self:
+            case Reply.Nil:
+                return True
+            case _:
+                return False
+
+    def is_failure(self) -> bool:
+        match self:
+            case Reply.Failure(_):
+                return True
+            case _:
+                return False
+
+    def as_str(self) -> str?:
+        """The text of a status or text reply, or an integer's digits; `None` for the others."""
+        match self:
+            case Reply.Status(text):
+                return Some(text)
+            case Reply.Text(text):
+                return Some(text)
+            case Reply.Int(value):
+                return Some(str(value))
+            case _:
+                return None
+
+    def as_int(self) -> int?:
+        match self:
+            case Reply.Int(number):
+                return Some(number)
+            case Reply.Bool(flag):
+                return Some(1 if flag else 0)
+            case Reply.Text(text):
+                match int.parse(text):
+                    case Ok(value):
+                        return Some(value)
+                    case Err(_):
+                        return None
+            case _:
+                return None
+
+    def as_list(self) -> list[Reply]?:
+        match self:
+            case Reply.List(items):
+                return Some(items)
+            case _:
+                return None
+
+impl Display for Reply:
+    def to_str(self) -> str:
+        match self:
+            case Reply.Nil:
+                return "nil"
+            case Reply.Status(text):
+                return f"+{text}"
+            case Reply.Text(text):
+                return f"{text!r}"
+            case Reply.Int(number):
+                return str(number)
+            case Reply.Float(real):
+                return str(real)
+            case Reply.Bool(flag):
+                return "true" if flag else "false"
+            case Reply.List(items):
+                return "[" + ", ".join([item.to_str() for item in items]) + "]"
+            case Reply.Map(pairs):
+                return "{" + ", ".join([pair[0].to_str() + ": " + pair[1].to_str() for pair in pairs]) + "}"
+            case Reply.Failure(message):
+                return f"-{message}"
+
+def reply_at(handle: int, node: int) -> Reply:
+    kind = kind_raw(handle, node)
+    if kind == 1:
+        return Reply.Status(text_raw(handle, node))
+    if kind == 2:
+        return Reply.Failure(text_raw(handle, node))
+    if kind == 3:
+        return Reply.Int(int_raw(handle, node))
+    if kind == 4:
+        return Reply.Text(text_raw(handle, node))
+    if kind == 5:
+        items: list[Reply] = []
+        for i in range(len_raw(handle, node)):
+            items.append(reply_at(handle, child_raw(handle, node, i)))
+        return Reply.List(items)
+    if kind == 6:
+        pairs: list[tuple[Reply, Reply]] = []
+        for i in range(len_raw(handle, node) // 2):
+            pairs.append((reply_at(handle, child_raw(handle, node, i * 2)), reply_at(handle, child_raw(handle, node, i * 2 + 1))))
+        return Reply.Map(pairs)
+    if kind == 7:
+        return Reply.Bool(int_raw(handle, node) != 0)
+    if kind == 8:
+        text = text_raw(handle, node)
+        match float.parse(text):
+            case Ok(value):
+                return Reply.Float(value)
+            case Err(_):
+                return Reply.Text(text)
+    return Reply.Nil
+
+def send(args: list[str]):
+    for arg in args:
+        arg_raw(arg)
+    end_command_raw()
+
+def milliseconds(length: datetime.Duration) -> int:
+    return int(length.seconds() * 1000.0)
+
+@frozen
+pub struct Client:
+    """A pool of connections to one Redis server."""
+    priv pool: int
+
+pub def connect(url: str) -> Result[Client, RedisError]:
+    """Open a pool and check the URL and credentials with one connection."""
+    pool = open_raw(url)
+    if pool < 0:
+        return Err(failed())
+    return Client(pool)
+
+impl Client:
+    def command(self, args: list[str], timeout: datetime.Duration? = None) -> Result[Reply, RedisError]:
+        """Run one command: `client.command(["LPUSH", "jobs", "a"])`. An error reply is an `Err`.
+        `timeout` replaces the pool's wait for the reply, for blocking commands such as `BLPOP`."""
+        if len(args) == 0:
+            return Err(RedisError("a command needs at least its name"))
+        send(args)
+        wait = 0
+        match timeout:
+            case Some(length):
+                wait = milliseconds(length)
+            case None:
+                pass
+        handle = run_raw(self.pool, 0, wait)
+        if handle < 0:
+            return Err(failed())
+        reply = reply_at(handle, child_raw(handle, 0, 0))
+        free_raw(handle)
+        match reply:
+            case Reply.Failure(message):
+                return Err(RedisError(message))
+            case _:
+                return Ok(reply)
+
+    def close(self):
+        """Close the idle connections; those in use close when their calls end."""
+        close_raw(self.pool)
+
+    def ping(self) -> Result[None, RedisError]:
+        self.command(["PING"])?
+        return Ok(None)
+
+    def get(self, key: str) -> Result[str?, RedisError]:
+        """The value, or `None` if the key does not exist."""
+        return Ok(self.command(["GET", key])?.as_str())
+
+    def set(self, key: str, value: str, ttl: datetime.Duration? = None, only_if_missing: bool = False, only_if_exists: bool = False) -> Result[bool, RedisError]:
+        """Set a key. `ttl` makes it expire, and `only_if_missing` (`NX`) or `only_if_exists` (`XX`)
+        sets it only then. Returns whether it was set."""
+        args = ["SET", key, value]
+        match ttl:
+            case Some(length):
+                args.append("PX")
+                args.append(str(max(1, milliseconds(length))))
+            case None:
+                pass
+        if only_if_missing:
+            args.append("NX")
+        if only_if_exists:
+            args.append("XX")
+        return Ok(not self.command(args)?.is_nil())
+
+    def delete(self, keys: list[str]) -> Result[int, RedisError]:
+        """Delete keys; returns how many existed."""
+        args = ["DEL"]
+        args.extend(keys)
+        return Ok(self.command(args)?.as_int().unwrap_or(0))
+
+    def exists(self, key: str) -> Result[bool, RedisError]:
+        return Ok(self.command(["EXISTS", key])?.as_int().unwrap_or(0) > 0)
+
+    def incr(self, key: str, by: int = 1) -> Result[int, RedisError]:
+        """Add to the integer a key holds (0 if it is missing); returns the new value."""
+        return Ok(self.command(["INCRBY", key, str(by)])?.as_int().unwrap_or(0))
+
+    def decr(self, key: str, by: int = 1) -> Result[int, RedisError]:
+        return Ok(self.command(["DECRBY", key, str(by)])?.as_int().unwrap_or(0))
+
+    def expire(self, key: str, ttl: datetime.Duration) -> Result[bool, RedisError]:
+        """Make a key expire after `ttl`; false if it does not exist."""
+        return Ok(self.command(["PEXPIRE", key, str(max(1, milliseconds(ttl)))])?.as_int().unwrap_or(0) == 1)
+
+    def ttl(self, key: str) -> Result[datetime.Duration?, RedisError]:
+        """The time a key has left, or `None` if it does not exist or does not expire."""
+        left = self.command(["PTTL", key])?.as_int().unwrap_or(-2)
+        if left < 0:
+            return Ok(None)
+        return Ok(Some(datetime.nanos(left * 1000000)))
+
+    def hset(self, key: str, fields: dict[str, str]) -> Result[int, RedisError]:
+        """Set fields of a hash; returns how many are new."""
+        args = ["HSET", key]
+        for name, value in fields.items():
+            args.append(name)
+            args.append(value)
+        return Ok(self.command(args)?.as_int().unwrap_or(0))
+
+    def hget(self, key: str, field: str) -> Result[str?, RedisError]:
+        return Ok(self.command(["HGET", key, field])?.as_str())
+
+    def hgetall(self, key: str) -> Result[dict[str, str], RedisError]:
+        fields: dict[str, str] = {}
+        match self.command(["HGETALL", key])?:
+            case Reply.Map(pairs):
+                for pair in pairs:
+                    fields[pair[0].as_str().unwrap_or("")] = pair[1].as_str().unwrap_or("")
+            case Reply.List(items):
+                # RESP2 answers with a flat list: name, value, name, value.
+                for i in range(len(items) // 2):
+                    fields[items[i * 2].as_str().unwrap_or("")] = items[i * 2 + 1].as_str().unwrap_or("")
+            case _:
+                pass
+        return Ok(fields)
+
+    def lpush(self, key: str, values: list[str]) -> Result[int, RedisError]:
+        """Push to the head of a list; returns its length."""
+        args = ["LPUSH", key]
+        args.extend(values)
+        return Ok(self.command(args)?.as_int().unwrap_or(0))
+
+    def rpush(self, key: str, values: list[str]) -> Result[int, RedisError]:
+        args = ["RPUSH", key]
+        args.extend(values)
+        return Ok(self.command(args)?.as_int().unwrap_or(0))
+
+    def lpop(self, key: str) -> Result[str?, RedisError]:
+        return Ok(self.command(["LPOP", key])?.as_str())
+
+    def rpop(self, key: str) -> Result[str?, RedisError]:
+        return Ok(self.command(["RPOP", key])?.as_str())
+
+    def llen(self, key: str) -> Result[int, RedisError]:
+        return Ok(self.command(["LLEN", key])?.as_int().unwrap_or(0))
+
+    def lrange(self, key: str, start: int = 0, stop: int = -1) -> Result[list[str], RedisError]:
+        return Ok(strings_of(self.command(["LRANGE", key, str(start), str(stop)])?))
+
+    def sadd(self, key: str, members: list[str]) -> Result[int, RedisError]:
+        args = ["SADD", key]
+        args.extend(members)
+        return Ok(self.command(args)?.as_int().unwrap_or(0))
+
+    def srem(self, key: str, members: list[str]) -> Result[int, RedisError]:
+        args = ["SREM", key]
+        args.extend(members)
+        return Ok(self.command(args)?.as_int().unwrap_or(0))
+
+    def smembers(self, key: str) -> Result[list[str], RedisError]:
+        return Ok(strings_of(self.command(["SMEMBERS", key])?))
+
+    def publish(self, channel: str, message: str) -> Result[int, RedisError]:
+        """Send a message to the channel's subscribers; returns how many received it."""
+        return Ok(self.command(["PUBLISH", channel, message])?.as_int().unwrap_or(0))
+
+    def eval(self, script: str, keys: list[str] = [], args: list[str] = []) -> Result[Reply, RedisError]:
+        """Run a Lua script. It sees `KEYS` and `ARGV`; Redis runs it as one step, so nothing
+        else happens in between."""
+        command = ["EVAL", script, str(len(keys))]
+        command.extend(keys)
+        command.extend(args)
+        return self.command(command)
+
+    def pipeline(self) -> Pipeline:
+        """Commands to send together in one write: fewer round trips."""
+        return Pipeline(self, [])
+
+    def subscribe(self, channels: list[str], patterns: bool = False) -> Result[Subscription, RedisError]:
+        """Listen to channels, or with `patterns=True` to glob patterns such as `"news.*"`, on a
+        connection of its own until the subscription is closed."""
+        for channel in channels:
+            arg_raw(channel)
+        sub = subscribe_raw(self.pool, 1 if patterns else 0)
+        if sub < 0:
+            return Err(failed())
+        return Subscription(sub)
+
+def strings_of(reply: Reply) -> list[str]:
+    found: list[str] = []
+    match reply:
+        case Reply.List(items):
+            for item in items:
+                match item.as_str():
+                    case Some(text):
+                        found.append(text)
+                    case None:
+                        pass
+        case _:
+            pass
+    return found
+
+pub struct Pipeline:
+    """Commands collected to send in one write, from `client.pipeline()`."""
+    priv client: Client
+    priv commands: list[list[str]]
+
+impl Pipeline:
+    def add(self, args: list[str]) -> Pipeline:
+        """Queue a command; returns the pipeline for chaining."""
+        self.commands.append(args)
+        return self
+
+    def run(self, atomic: bool = False) -> Result[list[Reply], RedisError]:
+        """Send the commands and read all the replies, in order. An error reply is a
+        `Reply.Failure` in the list, not an `Err`; the others still ran. With `atomic=True`, the
+        commands run as one `MULTI`/`EXEC` transaction and none runs if Redis refuses one."""
+        if len(self.commands) == 0:
+            return Ok([])
+        for command in self.commands:
+            if len(command) == 0:
+                return Err(RedisError("a command needs at least its name"))
+            send(command)
+        handle = run_raw(self.client.pool, 1 if atomic else 0, 0)
+        self.commands = []
+        if handle < 0:
+            return Err(failed())
+        replies: list[Reply] = []
+        for i in range(len_raw(handle, 0)):
+            replies.append(reply_at(handle, child_raw(handle, 0, i)))
+        free_raw(handle)
+        if atomic:
+            # One reply: `EXEC`'s list, one reply for each command, or an error.
+            match replies[0]:
+                case Reply.List(items):
+                    return Ok(items)
+                case Reply.Failure(message):
+                    return Err(RedisError(message))
+                case _:
+                    return Err(RedisError("the transaction was not carried out"))
+        return Ok(replies)
+
+pub struct Message:
+    """A message received by a subscription."""
+    channel: str
+    payload: str
+    # The pattern that matched, for a subscription to patterns; "" otherwise.
+    pattern: str = ""
+
+@frozen
+pub struct Subscription:
+    """Channels being listened to, from `client.subscribe`."""
+    priv id: int
+
+impl Subscription:
+    def next(self, timeout: datetime.Duration = datetime.seconds(1)) -> Result[Message?, RedisError]:
+        """The next message, waiting at most `timeout`: `None` if none came. Call it in a loop in a
+        task of its own; `close` from another task ends the wait with an error."""
+        handle = next_raw(self.id, milliseconds(timeout))
+        if handle == -2:
+            return Ok(None)
+        if handle < 0:
+            return Err(failed())
+        top = reply_at(handle, child_raw(handle, 0, 0))
+        free_raw(handle)
+        match top:
+            case Reply.List(items):
+                if len(items) == 4:
+                    return Ok(Some(Message(items[2].as_str().unwrap_or(""), items[3].as_str().unwrap_or(""), items[1].as_str().unwrap_or(""))))
+                if len(items) == 3:
+                    return Ok(Some(Message(items[1].as_str().unwrap_or(""), items[2].as_str().unwrap_or(""))))
+            case _:
+                pass
+        return Ok(None)
+
+    def close(self):
+        """Stop listening and close the connection."""
+        unsubscribe_raw(self.id)
+
+# ---- a rate limit shared by every instance ------------------------------------------------
+
+# A token bucket in one Redis key, with the arithmetic of the built-in limiter: `tokens` at time
+# `at` (nanoseconds, from Redis' clock, which every instance shares), refilled one every
+# `interval`. The reply is as `http.RateStore.take` says.
+const BUCKET = "local t = redis.call('TIME') local now = t[1] * 1000000000 + t[2] * 1000 local burst = tonumber(ARGV[1]) local interval = tonumber(ARGV[2]) local data = redis.call('HMGET', KEYS[1], 'tokens', 'at') local tokens = tonumber(data[1]) local at = tonumber(data[2]) if tokens == nil then tokens = burst at = now end tokens = math.min(burst, tokens + math.max(now - at, 0) / interval) if tokens < 1 then return -math.max(1, math.ceil((1 - tokens) * interval / 1e9)) end tokens = tokens - 1 redis.call('HSET', KEYS[1], 'tokens', tostring(tokens), 'at', tostring(now)) redis.call('PEXPIRE', KEYS[1], math.ceil(burst * interval / 1e6) + 1000) return math.floor(tokens) * 4294967296 + math.max(1, math.ceil((burst - tokens) * interval / 1e9))"
+
+@frozen
+pub struct RateStore:
+    """Rate limit counts kept in Redis, from `redis.rate_store`."""
+    priv client: Client
+    priv prefix: str
+
+pub def rate_store(client: Client, prefix: str = "rate") -> RateStore:
+    """Counts for `http.rate_limit(..., store=redis.rate_store(cache))`, shared by every
+    instance that uses the same Redis: a token bucket in a hash at `<prefix>:<policy>:<client>`,
+    updated by one script so that two instances never both take the last token. The keys expire
+    once a bucket would be full again."""
+    return RateStore(client, prefix)
+
+impl http.RateStore for RateStore:
+    def take(self, key: str, burst: int, interval_ns: int) -> Result[int]:
+        reply = self.client.eval(BUCKET, [f"{self.prefix}:{key}"], [str(burst), str(interval_ns)])?
+        match reply.as_int():
+            case Some(answer):
+                return Ok(answer)
+            case None:
+                return Err(RedisError("the rate limit script answered with something else than a number"))
+
+# ---- a job queue shared by every instance -------------------------------------------------
+
+# Push an item unless the queue already holds `ARGV[2]`: 1 if pushed, 0 if full.
+const PUSH = "if redis.call('LLEN', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end redis.call('LPUSH', KEYS[1], ARGV[1]) return 1"
+
+@frozen
+pub struct Queue:
+    """Work waiting in Redis for the workers of every instance, from `redis.queue`."""
+    priv client: Client
+    priv name: str
+    priv instance: str
+    priv capacity: int
+    priv retries: int
+    priv backoff_ns: int
+    priv active: Atomic
+    priv closed: Atomic
+    priv succeeded: Atomic
+    priv failed: Atomic
+
+def waiting_key(name: str) -> str:
+    return f"jobs:{name}:queue"
+
+def working_key(name: str, instance: str) -> str:
+    return f"jobs:{name}:working:{instance}"
+
+def alive_key(name: str, instance: str) -> str:
+    return f"jobs:{name}:alive:{instance}"
+
+def instances_key(name: str) -> str:
+    return f"jobs:{name}:instances"
+
+def failed_key(name: str) -> str:
+    return f"jobs:{name}:failed"
+
+pub def queue(
+    client: Client,
+    handler: def(str) -> Result[None],
+    name: str = "queue",
+    workers: int = 1,
+    capacity: int = 10000,
+    retries: int = 0,
+    backoff: datetime.Duration = datetime.seconds(1),
+) -> Queue:
+    """
+    A queue of text items in Redis, worked on by `workers` tasks of this instance and of every
+    other instance that uses the same Redis and `name`:
+
+        mails = redis.queue(cache, send_mail, name="mails", workers=4, retries=3)
+        mails.submit(json.encode(Mail(to="ann@example.com"))).unwrap()
+
+    `handler` gets one item at a time. An item that fails is tried again up to `retries` times
+    with `backoff` doubling between tries and some random extra; after that it goes to the list
+    `jobs:<name>:failed` (the newest 1000 are kept) and is counted by `failures()`. At most
+    `capacity` items wait: `submit` fails after that.
+
+    A claimed item sits in a list of its instance until it is done. An instance that stops
+    heartbeating (for 15 seconds) is taken for dead, and its unfinished items go back to the
+    queue; so does what an instance was working on when the program was told to stop. Every item
+    is therefore handled at least once, and an item may run twice if a worker was only slow, so a
+    handler must be safe to repeat. Items are handled roughly in the order submitted, per
+    instance. The workers and heartbeat stop when the program stops, as `jobs.queue`'s do.
+    """
+    if workers < 1 or capacity < 1 or retries < 0:
+        panic("redis.queue: workers and capacity must be at least 1, and retries at least 0")
+    q = Queue(client, name, crypto.token(8), capacity, retries, backoff.nanoseconds(), Atomic(0), Atomic(0), Atomic(0), Atomic(0))
+    match client.sadd(instances_key(name), [q.instance]):
+        case Ok(_):
+            pass
+        case Err(problem):
+            log.error(f"redis queue {name}: cannot register: {problem.message()}")
+    spawn heartbeat(q)
+    for _ in range(workers):
+        spawn queue_worker(q, handler)
+    return q
+
+impl Queue:
+    def submit(self, item: str) -> Result[None, RedisError]:
+        """Add work. `Err` when the queue is full or closed, or Redis cannot be reached."""
+        if self.closed.get() == 1 or stopping_raw() == 1:
+            return Err(RedisError(f"queue {self.name} is closed"))
+        pushed = self.client.eval(PUSH, [waiting_key(self.name)], [item, str(self.capacity)])?
+        if pushed.as_int().unwrap_or(0) == 0:
+            return Err(RedisError(f"queue {self.name} is full ({self.capacity} waiting)"))
+        return Ok(None)
+
+    def queued(self) -> Result[int, RedisError]:
+        """Items waiting for a worker, in every instance."""
+        return self.client.llen(waiting_key(self.name))
+
+    def running(self) -> int:
+        """Items this instance is working on now."""
+        return self.active.get()
+
+    def successes(self) -> int:
+        """Items this instance finished."""
+        return self.succeeded.get()
+
+    def failures(self) -> int:
+        """Items this instance gave up on after every attempt."""
+        return self.failed.get()
+
+    def failed_items(self) -> Result[list[str], RedisError]:
+        """The items that failed every attempt, in any instance, newest first."""
+        return self.client.lrange(failed_key(self.name), 0, 999)
+
+    def recover(self):
+        """Queue again the items of instances that stopped heartbeating, now. The heartbeat does it
+        every ten seconds."""
+        reclaim(self)
+
+    def close(self):
+        """Take no more work in this instance and stop its workers once they are idle."""
+        self.closed.set(1)
+
+    def wait(self, timeout: float = 10.0) -> bool:
+        """Wait until nothing is queued and this instance is working on nothing; false if `timeout`
+        seconds pass first."""
+        deadline = time.monotonic() + timeout
+        while True:
+            waiting = self.queued().unwrap_or(1)
+            claimed = self.client.llen(working_key(self.name, self.instance)).unwrap_or(1)
+            if waiting == 0 and claimed == 0 and self.active.get() == 0:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+
+def ignore[T](result: Result[T, RedisError]):
+    """Drop a result that does not matter: a cleanup that may fail."""
+    pass
+
+def pause(seconds: float, q: Queue):
+    """Sleep, but wake early when a stop comes."""
+    left = seconds
+    while left > 0.0 and stopping_raw() == 0 and q.closed.get() == 0:
+        step = min(left, 0.2)
+        time.sleep(step)
+        left -= step
+
+def heartbeat(q: Queue):
+    """Say every few seconds that this instance is alive, and take back what dead ones held."""
+    ticks = 0
+    while stopping_raw() == 0 and q.closed.get() == 0:
+        match q.client.set(alive_key(q.name, q.instance), "1", ttl=datetime.seconds(15)):
+            case Ok(_):
+                pass
+            case Err(problem):
+                log.warn(f"redis queue {q.name}: the heartbeat failed: {problem.message()}")
+        if ticks % 2 == 0:
+            reclaim(q)
+        ticks += 1
+        pause(5.0, q)
+    # A clean end leaves nothing behind; an unclean one is found by the others.
+    match q.client.llen(working_key(q.name, q.instance)):
+        case Ok(left):
+            if left == 0:
+                ignore(q.client.srem(instances_key(q.name), [q.instance]))
+                ignore(q.client.delete([alive_key(q.name, q.instance)]))
+        case Err(_):
+            pass
+
+def reclaim(q: Queue):
+    """Move the items of instances that stopped heartbeating back to the queue."""
+    match q.client.smembers(instances_key(q.name)):
+        case Ok(members):
+            for member in members:
+                if member == q.instance:
+                    continue
+                match q.client.exists(alive_key(q.name, member)):
+                    case Ok(alive):
+                        if alive:
+                            continue
+                    case Err(_):
+                        continue
+                moved = 0
+                while True:
+                    match q.client.command(["RPOPLPUSH", working_key(q.name, member), waiting_key(q.name)]):
+                        case Ok(reply):
+                            if reply.is_nil():
+                                break
+                            moved += 1
+                        case Err(_):
+                            break
+                if moved > 0:
+                    log.warn(f"redis queue {q.name}: {moved} item(s) of the stopped instance {member} are queued again")
+                ignore(q.client.srem(instances_key(q.name), [member]))
+        case Err(_):
+            pass
+
+def attempt(q: Queue, handler: def(str) -> Result[None], item: str, id: str) -> int:
+    """Try an item up to `retries + 1` times: 1 if it worked, 0 if it did not, -1 if the program
+    was told to stop first (the item stays claimed, and is taken back later)."""
+    tries = 0
+    while True:
+        tries += 1
+        match handler(item):
+            case Ok(_):
+                return 1
+            case Err(problem):
+                if stopping_raw() == 1:
+                    return -1
+                if tries > q.retries:
+                    log.error(f"redis queue {q.name}: item failed after {tries} attempt(s): {problem.message()}", {"job": id})
+                    return 0
+                wait = jobs.backoff_delay(datetime.nanos(q.backoff_ns), tries, float(crypto.random_bytes(1)[0]) / 255.0)
+                log.warn(f"redis queue {q.name}: attempt {tries} failed ({problem.message()}); trying again in {wait}", {"job": id})
+                pause(wait.seconds(), q)
+                if stopping_raw() == 1:
+                    return -1
+
+def queue_worker(q: Queue, handler: def(str) -> Result[None]):
+    idle = 0.005
+    mine = working_key(q.name, q.instance)
+    while stopping_raw() == 0:
+        claimed = q.client.command(["RPOPLPUSH", waiting_key(q.name), mine])
+        match claimed:
+            case Ok(reply):
+                match reply.as_str():
+                    case Some(item):
+                        idle = 0.005
+                        q.active.increment()
+                        running_raw(1)
+                        id = f"{q.name}#{crypto.token(4)}"
+                        outcome = attempt(q, handler, item, id)
+                        if outcome == 1:
+                            q.succeeded.increment()
+                            ignore(q.client.command(["LREM", mine, "1", item]))
+                        elif outcome == 0:
+                            q.failed.increment()
+                            ignore(q.client.pipeline().add(["LPUSH", failed_key(q.name), item]).add(["LTRIM", failed_key(q.name), "0", "999"]).add(["LREM", mine, "1", item]).run(atomic=True))
+                        q.active.decrement()
+                        running_raw(-1)
+                    case None:
+                        if q.closed.get() == 1:
+                            break
+                        time.sleep(idle)
+                        idle = min(idle * 2.0, 0.25)
+            case Err(problem):
+                log.warn(f"redis queue {q.name}: cannot reach Redis: {problem.message()}")
+                time.sleep(1.0)

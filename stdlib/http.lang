@@ -2430,6 +2430,14 @@ impl ResponseCache:
 
 # ---- rate limiting -------------------------------------------------------------------------
 
+pub trait RateStore:
+    """Where a rate limit keeps its counts, so that several instances of a service share them
+    (`redis.rate_store`). `take` takes a token from the bucket named `key`, which holds `burst`
+    tokens and gets one back every `interval_ns` nanoseconds, and answers as the built-in limiter
+    does: the tokens left times 2^32 plus the seconds until the bucket is full, or minus the
+    seconds until a token is there when none is."""
+    def take(self, key: str, burst: int, interval_ns: int) -> Result[int]
+
 @frozen
 struct RateLimiter:
     id: int
@@ -2437,6 +2445,9 @@ struct RateLimiter:
     # The policy's name, and its `RateLimit-Policy` value.
     name: str
     policy: str
+    store: RateStore?
+    burst: int
+    interval: int
 
 pub def rate_limit(
     rate: str = "",
@@ -2444,6 +2455,7 @@ pub def rate_limit(
     burst: int = 0,
     key: (def(Request) -> str)? = None,
     name: str = "default",
+    store: RateStore? = None,
 ) -> Middleware:
     """
     Middleware that limits how often each client may call, with a token bucket per client:
@@ -2464,9 +2476,11 @@ pub def rate_limit(
 
     The limits are kept in memory, per process: several instances of a service each count on
     their own. At most 100,000 clients are tracked; past that, those seen longest ago are
-    forgotten first, so a flood of addresses cannot use up memory.
+    forgotten first, so a flood of addresses cannot use up memory. With `store=` (such as
+    `redis.rate_store(client)`) the counts live there instead, shared by every instance; if the
+    store cannot be reached, requests are let through and the failure is logged.
     """
-    return new_rate_limit(rate, per_second, burst, key, name, "`http.rate_limit`")
+    return new_rate_limit(rate, per_second, burst, key, name, "`http.rate_limit`", store)
 
 def parse_rate(text: str, what: str) -> tuple[float, int, int]:
     # `"5/minute"` as the tokens a second, the burst and the period in seconds.
@@ -2485,7 +2499,7 @@ def parse_rate(text: str, what: str) -> tuple[float, int, int]:
                 pass
     panic(f"{what} has the rate {text!r}, which is not a number of requests and a period such as \"5/minute\" (the period is second, minute, hour or day)")
 
-def new_rate_limit(rate: str, per_second: float, burst: int, key: (def(Request) -> str)?, name: str, what: str) -> Middleware:
+def new_rate_limit(rate: str, per_second: float, burst: int, key: (def(Request) -> str)?, name: str, what: str, store: RateStore? = None) -> Middleware:
     window = 0
     if rate != "":
         if per_second > 0.0 or burst > 0:
@@ -2505,7 +2519,7 @@ def new_rate_limit(rate: str, per_second: float, burst: int, key: (def(Request) 
     if name == "" or not name[0:1].is_alpha() or not all([c.is_alnum() or c in "_-." for c in name]):
         panic(f"{what} has the name {name!r}; a policy name is a letter, then letters, digits, `_`, `-` or `.`")
     interval = max(1, int(1000000000.0 / per_second))
-    limiter = RateLimiter(rate_new_raw(interval, burst), key, name, f"{name};q={burst};w={window}")
+    limiter = RateLimiter(rate_new_raw(interval, burst), key, name, f"{name};q={burst};w={window}", store, burst, interval)
     return lambda req, next: limiter.handle(req, next)
 
 impl RateLimiter:
@@ -2516,7 +2530,17 @@ impl RateLimiter:
                 client = choose(req)
             case None:
                 pass
-        verdict = rate_take_raw(self.id, client)
+        verdict = 0
+        match self.store:
+            case Some(shared):
+                match shared.take(f"{self.name}:{client}", self.burst, self.interval):
+                    case Ok(answer):
+                        verdict = answer
+                    case Err(problem):
+                        log.warn(f"rate limit {self.name}: the shared store failed, letting the request through: {problem.message()}")
+                        verdict = self.burst * 4294967296
+            case None:
+                verdict = rate_take_raw(self.id, client)
         if verdict < 0:
             wait = str(0 - verdict)
             req.add_error_header("Retry-After", wait)

@@ -1,0 +1,149 @@
+# The `redis` module against a real Redis (docs/14, milestone 25), run by crates/lang_cli/tests/
+# redis.rs when <PREFIX>TEST_REDIS_URL names one. Keys are made unique, so runs do not meet.
+# expect: ping: True
+# expect: set/get: True hello None
+# expect: nx: False
+# expect: counters: 1 6 5
+# expect: expiry: True True False
+# expect: hash: {'a': '1', 'b': '2'} 1
+# expect: list: ['x', 'y', 'z'] 3 x z
+# expect: set: 2 ['a', 'b']
+# expect: delete: 1 False
+# expect: pipeline: [+OK, 2, nil, -WRONGTYPE Operation against a key holding the wrong kind of value]
+# expect: atomic: [1, 2]
+# expect: atomic refused: True
+# expect: wrong type: WRONGTYPE Operation against a key holding the wrong kind of value
+# expect: eval: ['k', 'v']
+# expect: blocking pop: x 0
+# expect: pool: 40 40
+# expect: news hello | a.b a.* hi | quiet True
+# expect: published to: 1 1
+# expect: bad url: a Redis URL starts with `redis://` or `rediss://`
+# expect: refused: True
+# expect: rate limit: 200 200 200 429 429 | shared True
+# expect: queue: True 10 10 1 ['bad']
+# expect: flaky: 2
+# expect: recovered: True 1
+
+import redis
+import http
+import datetime
+import jobs
+import crypto
+import os
+
+def sub_task(c: redis.Client, ready: Channel[bool], out: Channel[str]):
+    plain = c.subscribe(["news"]).unwrap()
+    patterned = c.subscribe(["a.*"], patterns=True).unwrap()
+    ready.send(True)
+    message = plain.next(datetime.seconds(5)).unwrap().unwrap()
+    pattern = patterned.next(datetime.seconds(5)).unwrap().unwrap()
+    quiet = plain.next(datetime.nanos(100000000)).unwrap()
+    out.send(f"{message.channel} {message.payload} | {pattern.channel} {pattern.pattern} {pattern.payload} | quiet {quiet == None}")
+    plain.close()
+    patterned.close()
+
+def work(done: Atomic[int], flaky: Atomic[int], item: str) -> Result[None]:
+    if item == "bad":
+        return Err(jobs.JobError("no good"))
+    if item == "flaky" and flaky.increment() == 1:
+        return Err(jobs.JobError("first try"))
+    done.increment()
+    return Ok(None)
+
+def k(run: str, name: str) -> str:
+    return f"test:{run}:{name}"
+
+def hit(c: redis.Client, key: str, out: Channel[int]):
+    out.send(c.incr(key).unwrap())
+
+def main():
+    url = os.args()[1]
+    c = redis.connect(url).unwrap()
+    run = crypto.token(6)
+    print("ping:", c.ping().is_ok())
+    print("set/get:", c.set(k(run, "g"), "hello").unwrap(), c.get(k(run, "g")).unwrap(), c.get(k(run, "none")).unwrap())
+    print("nx:", c.set(k(run, "g"), "x", only_if_missing=True).unwrap())
+    print("counters:", c.incr(k(run, "n")).unwrap(), c.incr(k(run, "n"), 5).unwrap(), c.decr(k(run, "n")).unwrap())
+    c.set(k(run, "t"), "x", ttl=datetime.seconds(30)).unwrap()
+    left = c.ttl(k(run, "t")).unwrap()
+    print("expiry:", left.is_some(), c.expire(k(run, "t"), datetime.seconds(60)).unwrap(), c.expire(k(run, "absent"), datetime.seconds(1)).unwrap())
+    c.hset(k(run, "h"), {"a": "1", "b": "2"}).unwrap()
+    print("hash:", c.hgetall(k(run, "h")).unwrap(), c.hset(k(run, "h"), {"a": "9", "c": "3"}).unwrap())
+    c.rpush(k(run, "l"), ["x", "y", "z"]).unwrap()
+    print("list:", c.lrange(k(run, "l")).unwrap(), c.llen(k(run, "l")).unwrap(), c.lpop(k(run, "l")).unwrap(), c.rpop(k(run, "l")).unwrap())
+    print("set:", c.sadd(k(run, "s"), ["a", "b", "a"]).unwrap(), sorted(c.smembers(k(run, "s")).unwrap()))
+    print("delete:", c.delete([k(run, "g"), k(run, "none")]).unwrap(), c.exists(k(run, "g")).unwrap())
+    replies = c.pipeline().add(["SET", k(run, "p"), "1"]).add(["INCR", k(run, "p")]).add(["GET", k(run, "gone")]).add(["LPUSH", k(run, "p"), "x"]).run().unwrap()
+    print("pipeline:", replies)
+    print("atomic:", c.pipeline().add(["INCR", k(run, "a")]).add(["INCR", k(run, "a")]).run(atomic=True).unwrap())
+    print("atomic refused:", c.pipeline().add(["INCR", k(run, "a")]).add(["NOPE"]).run(atomic=True).is_err())
+    c.rpush(k(run, "w"), ["v"]).unwrap()
+    match c.get(k(run, "w")):
+        case Ok(_):
+            print("wrong type: none")
+        case Err(problem):
+            print("wrong type:", problem.message())
+    print("eval:", c.eval("return {KEYS[1], ARGV[1]}", ["k"], ["v"]).unwrap())
+    c.rpush(k(run, "b"), ["x"]).unwrap()
+    popped = c.command(["BLPOP", k(run, "b"), "1"], timeout=datetime.seconds(3)).unwrap()
+    print("blocking pop:", popped.as_list().unwrap()[1].as_str().unwrap(), c.llen(k(run, "b")).unwrap())
+
+    # Many tasks share the pool of 10 connections.
+    small = redis.connect(url + ("&" if "?" in url else "?") + "pool_max=3").unwrap()
+    outputs: Channel[int] = Channel(40)
+    for _ in range(40):
+        spawn hit(small, k(run, "pool"), outputs)
+    total = 0
+    for _ in range(40):
+        total = max(total, outputs.recv().unwrap())
+    print("pool:", total, small.get(k(run, "pool")).unwrap().unwrap())
+
+    ready: Channel[bool] = Channel(1)
+    got: Channel[str] = Channel(1)
+    spawn sub_task(c, ready, got)
+    ready.recv().unwrap()
+    first_heard = c.publish("news", "hello").unwrap()
+    second_heard = c.publish("a.b", "hi").unwrap()
+    print(got.recv().unwrap())
+    print("published to:", first_heard, second_heard)
+
+    match redis.connect("memcached://x"):
+        case Ok(_):
+            print("bad url: accepted")
+        case Err(problem):
+            print("bad url:", problem.message())
+    print("refused:", redis.connect("redis://127.0.0.1:1").is_err())
+
+    # A rate limit that two servers share.
+    limit = crypto.token(6)
+    first = http.Server()
+    first.use(http.rate_limit("3/minute", key=lambda req: limit, store=redis.rate_store(c, prefix=k(run, "rate"))))
+    first.get("/x", lambda req: http.text("ok"))
+    second = http.Server()
+    second.use(http.rate_limit("3/minute", key=lambda req: limit, store=redis.rate_store(c, prefix=k(run, "rate"))))
+    second.get("/x", lambda req: http.text("ok"))
+    codes: list[int] = []
+    for server in [first, second, first, second, first]:
+        codes.append(server.handle(http.test_request("GET", "/x")).status)
+    print("rate limit:", codes[0], codes[1], codes[2], codes[3], codes[4], "| shared", codes[3] == 429)
+
+    # A job queue.
+    done: Atomic[int] = Atomic(0)
+    flaky: Atomic[int] = Atomic(0)
+    name = "q" + run
+    q = redis.queue(c, lambda item: work(done, flaky, item), name=name, workers=2, retries=1, backoff=datetime.nanos(10000000))
+    for i in range(9):
+        q.submit(f"item {i}").unwrap()
+    q.submit("flaky").unwrap()
+    q.submit("bad").unwrap()
+    print("queue:", q.wait(), done.get(), q.successes(), q.failures(), q.failed_items().unwrap())
+    print("flaky:", flaky.get())
+
+    # An instance that died with an item claimed: its item is queued again.
+    c.rpush(f"jobs:{name}:working:ghost", ["orphan"]).unwrap()
+    c.sadd(f"jobs:{name}:instances", ["ghost"]).unwrap()
+    before = done.get()
+    q.recover()
+    print("recovered:", q.wait(), done.get() - before)
+    q.close()

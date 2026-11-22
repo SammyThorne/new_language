@@ -1334,6 +1334,32 @@ What may be passed to `spawn`, sent on a channel or put in a `Mutex` is checked 
 
 A request's deadline and cancellation are carried by the task, not passed around: see "Timeouts and cancellation" under HTTP. Inside a cancelled task, `recv` returns `None` and `time.sleep` returns early.
 
+## Redis (docs/14, milestone 25)
+
+```python
+import redis
+
+c = redis.connect("redis://:password@127.0.0.1:6379/0?pool_max=10&timeout=5000")?
+c.set("greeting", "hello", ttl=60)?
+print(c.get("greeting")?)                 # hello
+n = c.incr("hits")?                       # counters, hashes, lists, sets: hset, lpush, sadd, ...
+
+p = c.pipeline()                          # one write, one read
+p.add(["INCR", "a"])
+p.add(["INCR", "b"])
+replies = p.run(atomic=True)?             # atomic wraps them in MULTI/EXEC
+
+sub = c.subscribe(["news"])?
+c.publish("news", "hi")?
+msg = sub.next(datetime.seconds(1))?      # Message? : None on timeout
+```
+
+- `command(args, timeout=None)` runs any command. A server error is a `Reply.Failure` value; a broken connection or a timeout is an `Err`. Give blocking commands (`BLPOP`) a `timeout`: a route's timeout does not interrupt them.
+- `rediss://` uses TLS. RESP3 is used when the server has it, RESP2 otherwise.
+- **Shared rate limit:** `http.rate_limit(..., store=redis.rate_store(c))`. One Lua script keeps the bucket atomic. If Redis fails the request is let through and a warning logged.
+- **Job queue:** `redis.queue(c, handler, name="mail", workers=4, retries=3)` has the methods of `jobs.Queue`. Delivery is at least once: handlers should be safe to repeat. Items that run out of retries are in `failed_items()`.
+- Tests against a real server: set `TEST_REDIS_URL` (with the language's environment prefix) to `redis://127.0.0.1:6379`.
+
 ## What lives where
 
 | Component | Compiler built-in | Rust runtime | Viper source |
@@ -1355,6 +1381,7 @@ A request's deadline and cancellation are carried by the task, not passed around
 | `log` | | formatting, the request context, buffering | API, `Logger` |
 | `template` | | file modification times | lexer, parser, escaping checks, renderer |
 | `sqlite` | | FFI to `libsqlite3`, a thread per database | `Db`, `Row`, `query_as` |
+| `redis` | | protocol, pool, TLS | `Client`, `Reply`, `rate_store`, `queue` |
 | `time`, `io`, `os` | | system calls | API |
 
 The direction of travel is rightwards: as generics, byte buffers and the optimiser mature, implementations move from the runtime column to the Viper column, which makes them inlinable and lets the language test itself.

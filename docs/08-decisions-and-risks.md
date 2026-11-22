@@ -1391,6 +1391,20 @@ Section 4.19 of docs/14 said to build a radix tree only if 200 parameterised rou
 - **Tests:** `tests/run/router_tree.vi` has the cases above and 400 random route sets, up to seven routes each with literals, parameters, rests and two methods, compared with a scan written in the test for 34 requests apiece (0 disagreements). `counts.json` is unchanged.
 - **Not done:** a router that prefers the most specific route (that would change which handler a path gets), and compressing chains of literal segments.
 
+### D130. A Redis client, a shared rate limit and a job queue (production web plan, milestone 25)
+
+Several servers behind a balancer need to share a rate limit, and a queue of jobs should survive a restart. Redis does both, so `redis` is a module of its own.
+
+- **Protocol:** RESP3, with a fall back to RESP2 when the server refuses `HELLO 3` (`AUTH` and `SELECT` are then sent separately). Replies are parsed in the runtime into a flat list of nodes and rebuilt in Viper as the `Reply` enum (`Nil`, `Status`, `Text`, `Int`, `Float`, `Bool`, `List`, `Map`, `Failure`). A server error is a `Failure` value, not an `Err`, so a pipeline can hold both; a broken connection or a timeout is an `Err(RedisError)`.
+- **Pool:** modelled on `pg`: `redis://[:password@]host[:port][/db]` or `rediss://` (TLS, no ALPN), with `pool_max` and `timeout` options. A connection that fails mid-command is dropped, never returned to the pool.
+- **Commands:** `command(args, timeout=None)` runs anything; typed helpers cover strings, counters, hashes, lists, sets and `publish`; `eval` runs Lua; `pipeline()` sends many commands in one write, and `run(atomic=True)` wraps them in `MULTI`/`EXEC`.
+- **Pub/sub** uses a connection taken out of the pool: `subscribe(channels, patterns=False)` and `Subscription.next(timeout)`.
+- **`redis.rate_store(client)`** implements the new `http.RateStore` trait, so `http.rate_limit(..., store=...)` shares one token bucket per key across servers. The bucket is one Lua script, so it is atomic. If Redis fails, the request is let through and a warning is logged: a cache of limits must not take the site down. `http` does not import `redis`; the trait lives in `http`.
+- **`redis.queue(client, handler, ...)`** is a `jobs.Queue` whose items live in a Redis list. Delivery is **at least once**: a worker moves an item to a per-instance working list, and an instance that stops sending its heartbeat (15 s) has its items put back by another. Retries and backoff follow `jobs`; items that run out of retries go to a failed list.
+- **Blocking commands** must be given a `timeout`; a route's own timeout does not interrupt a wait in the runtime.
+- **Tests:** a fake RESP2 server in `crates/lang_cli/tests/redis.rs` always runs (password, database, pipeline in one write). `against_a_real_redis` runs when `TEST_REDIS_URL` (with the language's prefix) is set; it was run against Redis 8.0.2. `counts.json` is unchanged.
+- **Not done:** Redis Cluster and Sentinel, streams, client-side caching, and a manual check of `rediss://` against a real TLS server.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |
