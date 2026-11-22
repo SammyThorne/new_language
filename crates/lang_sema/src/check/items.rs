@@ -665,7 +665,11 @@ impl<'m> Checker<'_, 'm> {
 
     /// What a name in `impl Name for ...` refers to: a trait in scope, or else a prelude trait
     /// whose name the module reuses for something else (`impl Error for HttpError` in `http`).
-    pub(super) fn trait_named(&self, name: &str) -> Option<Global> {
+    pub(super) fn trait_named(&mut self, name: &str, span: Span) -> Option<Global> {
+        if name.contains('.') {
+            // A trait of another module: `impl migrate.Backend for Db`.
+            return self.type_global(name, span).filter(|g| matches!(g, Global::Trait(_)));
+        }
         match self.globals.get(name) {
             Some(&(global @ Global::Trait(_), _)) => Some(global),
             other => match self.exports[0].get(name) {
@@ -735,7 +739,7 @@ impl<'m> Checker<'_, 'm> {
         let type_name = imp.target.name.clone();
         match &imp.trait_name {
             None => self.collect_inherent(imp, target, &type_name, &[], BodyMode::Normal),
-            Some(trait_name) => match self.trait_named(&trait_name.name) {
+            Some(trait_name) => match self.trait_named(&trait_name.name, trait_name.span) {
                 Some(Global::Trait(trait_id)) => {
                     self.collect_trait_impl(imp, trait_id, target, &type_name, &[], BodyMode::Normal)
                 }

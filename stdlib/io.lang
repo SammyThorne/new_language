@@ -27,6 +27,12 @@ impl Display for IoError:
 @extern("lrt_io_error")
 def last_error() -> str
 
+@extern("lrt_io_make_dir")
+def make_dir_raw(path: str) -> int
+
+@extern("lrt_io_remove_dir")
+def remove_dir_raw(path: str) -> int
+
 @extern("lrt_io_read_file")
 def read_file_raw(path: str) -> str
 
@@ -77,6 +83,7 @@ def failure(path: str) -> IoError:
 
 pub def read_file(path: str) -> Result[str, IoError]:
     """The whole file as text."""
+    _ = last_error()
     text = read_file_raw(path)
     reason = last_error()
     if reason != "":
@@ -114,6 +121,17 @@ pub def modified_ns(path: str) -> int:
 
 pub def remove(path: str) -> Result[None, IoError]:
     if remove_raw(path) == 0:
+        return Err(failure(path))
+
+pub def make_dir(path: str) -> Result[None, IoError]:
+    """Create a directory, and the ones above it that are missing; it is not an error if it
+    exists."""
+    if make_dir_raw(path) == 0:
+        return Err(failure(path))
+
+pub def remove_dir(path: str) -> Result[None, IoError]:
+    """Remove a directory and everything in it."""
+    if remove_dir_raw(path) == 0:
         return Err(failure(path))
 
 pub def list_dir(path: str) -> Result[list[str], IoError]:

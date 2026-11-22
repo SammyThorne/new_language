@@ -1,0 +1,122 @@
+# expect: first: ['0001_users.sql', '0002_tags.sql', '0010_notes.sql']
+# expect: again: []
+# expect: status: 3 applied, 0 pending
+# expect: tags: 1
+# expect: bookkeeping: 3 rows, newest 0010_notes.sql
+# expect: pending: 3 applied, 1 pending 0011_more.sql
+# expect: new file: ['0011_more.sql']
+# expect: edited: migration 0002_tags.sql was edited after it ran
+# expect: edited status: migration 0002_tags.sql was edited after it ran
+# expect: restored: []
+# expect: missing: migration 0011_more.sql has run, but its file is missing
+# expect: failing: migration 0002_bad.sql failed: no such table: nowhere
+# expect: kept the first: True, rolled back the second: True, stopped before the third: True
+# expect: recorded: 1
+# expect: late: migration 0005_late.sql is new, but a later one has already run
+# expect: duplicate: migrations 0001_a.sql and 0001_b.sql have the same number 1
+# expect: no directory: the migrations directory `/tmp/viper-migrations-nowhere` does not exist
+# expect: no transaction: ['0001_index.sql'] index: 1
+# Migrations over SQLite (docs/14, milestone 18): each file once and in order, checksums, a
+# failing file that rolls back and stops the run.
+
+import crypto
+import io
+import migrate
+import sqlite
+
+def put(dir: str, name: str, text: str):
+    io.write_file(dir + "/" + name, text).unwrap()
+
+def count(db: sqlite.Db, sql: str) -> int:
+    return db.query_row(sql).unwrap().unwrap().int("n").unwrap()
+
+def message(result: Result[list[str]]) -> str:
+    match result:
+        case Ok(names):
+            return str(names)
+        case Err(e):
+            return e.message()
+
+def describe(state: migrate.Status) -> str:
+    text = f"{len(state.applied)} applied, {len(state.pending)} pending"
+    for m in state.pending:
+        text += " " + m.name
+    return text
+
+def status_message(result: Result[migrate.Status]) -> str:
+    match result:
+        case Ok(state):
+            return describe(state)
+        case Err(e):
+            return e.message()
+
+def exists(db: sqlite.Db, table: str) -> bool:
+    return count(db, f"select count(*) as n from sqlite_master where name = '{table}'") == 1
+
+def folder(base: str, name: str) -> str:
+    dir = base + "/" + name
+    io.make_dir(dir).unwrap()
+    return dir
+
+def main():
+    base = "/tmp/viper-migrations-" + crypto.token(6)
+    dir = folder(base, "main")
+    db = sqlite.open(":memory:").unwrap()
+
+    put(dir, "0001_users.sql", "create table users (id integer primary key, email text not null unique);")
+    tags = "create table tags (id integer primary key, name text);\ninsert into tags (name) values ('first');"
+    put(dir, "0002_tags.sql", tags)
+    # Numbers sort as numbers, not as text, and other files in the directory are not migrations.
+    put(dir, "0010_notes.sql", "create table notes (id integer primary key, body text);")
+    put(dir, "README.md", "not a migration")
+    put(dir, "notes.sql", "not a migration either")
+    print("first:", message(migrate.apply(db, dir)))
+    print("again:", message(migrate.apply(db, dir)))
+    print("status:", status_message(migrate.status(db, dir)))
+    print("tags:", count(db, "select count(*) as n from tags"))
+    rows = db.query("select name from schema_migrations order by version").unwrap()
+    print(f"bookkeeping: {len(rows)} rows, newest {rows[-1].text('name').unwrap()}")
+
+    put(dir, "0011_more.sql", "create table more (id integer primary key);")
+    print("pending:", status_message(migrate.status(db, dir)))
+    print("new file:", message(migrate.apply(db, dir)))
+
+    # An applied file that changes is an error for `apply` and for `status`, until it is put back.
+    put(dir, "0002_tags.sql", tags + "\n-- a harmless edit")
+    print("edited:", message(migrate.apply(db, dir)))
+    print("edited status:", status_message(migrate.status(db, dir)))
+    put(dir, "0002_tags.sql", tags)
+    print("restored:", message(migrate.apply(db, dir)))
+    io.remove(dir + "/0011_more.sql").unwrap()
+    print("missing:", message(migrate.apply(db, dir)))
+
+    # A failing file is rolled back, and nothing after it runs; what ran before it stays.
+    bad = folder(base, "bad")
+    put(bad, "0001_ok.sql", "create table ok (id integer);")
+    put(bad, "0002_bad.sql", "create table half (id integer);\ninsert into nowhere values (1);")
+    put(bad, "0003_after.sql", "create table after_it (id integer);")
+    db2 = sqlite.open(":memory:").unwrap()
+    print("failing:", message(migrate.apply(db2, bad)))
+    print(f"kept the first: {exists(db2, 'ok')}, rolled back the second: {not exists(db2, 'half')}, stopped before the third: {not exists(db2, 'after_it')}")
+    print("recorded:", count(db2, "select count(*) as n from schema_migrations"))
+
+    late = folder(base, "late")
+    put(late, "0001_a.sql", "create table a (id integer);")
+    put(late, "0010_b.sql", "create table b (id integer);")
+    db3 = sqlite.open(":memory:").unwrap()
+    migrate.apply(db3, late).unwrap()
+    put(late, "0005_late.sql", "create table c (id integer);")
+    print("late:", message(migrate.apply(db3, late)))
+
+    dup = folder(base, "dup")
+    put(dup, "0001_a.sql", "select 1;")
+    put(dup, "0001_b.sql", "select 1;")
+    print("duplicate:", message(migrate.apply(db3, dup)))
+    print("no directory:", message(migrate.apply(db3, "/tmp/viper-migrations-nowhere")))
+
+    # `no-transaction` runs outside one, which statements like `create index concurrently` need.
+    plain = folder(base, "plain")
+    put(plain, "0001_index.sql", "-- migrate: no-transaction\ncreate table t (a integer);\ncreate index t_a on t (a);")
+    db4 = sqlite.open(":memory:").unwrap()
+    print("no transaction:", message(migrate.apply(db4, plain)), "index:", count(db4, "select count(*) as n from sqlite_master where type = 'index' and name = 't_a'"))
+    io.remove_dir(base).unwrap()

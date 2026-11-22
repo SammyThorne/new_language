@@ -38,6 +38,7 @@ that never opens one needs nothing installed.
 
 import crypto
 import json as jsonlib
+import migrate
 
 @extern("lrt_sqlite_open")
 def open_raw(path: str) -> int
@@ -395,3 +396,70 @@ pub def query_one_as[T: FromJson](db: Db, sql: str, args: list[jsonlib.Value] = 
     if len(values) == 0:
         return Ok(None)
     return Ok(Some(values[0]))
+
+# ---- migrations (the `migrate` module runs these) ----------------------------------------
+
+
+def lite_table() -> str:
+    return "create table if not exists schema_migrations (version integer primary key, name text not null, checksum text not null, applied_at text not null default current_timestamp)"
+
+def lite_applied(db: Db) -> Result[list[migrate.Applied]]:
+    out: list[migrate.Applied] = []
+    for row in db.query("select version, name, checksum from schema_migrations order by version")?:
+        out.append(migrate.Applied(row.int("version")?, row.text("name")?, row.text("checksum")?))
+    return Ok(out)
+
+def lite_record(db: Db, m: migrate.Migration) -> Result[None]:
+    _ = db.execute("insert into schema_migrations (version, name, checksum) values (?, ?, ?)", [m.version, m.name, m.checksum])?
+    return Ok(None)
+
+def lite_ran(db: Db, m: migrate.Migration) -> Result[bool]:
+    match db.query_row("select 1 as found from schema_migrations where version = ?", [m.version])?:
+        case Some(_):
+            return Ok(True)
+        case None:
+            return Ok(False)
+
+def lite_run_one(db: Db, m: migrate.Migration) -> Result[bool]:
+    """Run one migration. The transaction takes SQLite's write lock first, so another process
+    starting together waits here, and then finds the migration already recorded."""
+    if m.transactional:
+        with db.transaction()? as tx:
+            if lite_ran(tx, m)?:
+                return Ok(False)
+            match tx.script(m.sql):
+                case Err(e):
+                    return Err(migrate.failure(m, e.reason))
+                case Ok(_):
+                    pass
+            lite_record(tx, m)?
+            tx.commit()?
+        return Ok(True)
+    match db.script(m.sql):
+        case Err(e):
+            return Err(migrate.failure(m, e.reason))
+        case Ok(_):
+            pass
+    lite_record(db, m)?
+    return Ok(True)
+
+impl migrate.Backend for Db:
+    def applied(self, create: bool) -> Result[list[migrate.Applied]]:
+        if create:
+            self.execute(lite_table())?
+        else:
+            match self.query_row("select 1 as found from sqlite_master where name = 'schema_migrations'")?:
+                case Some(_):
+                    pass
+                case None:
+                    return Ok([])
+        return lite_applied(self)
+
+    def run_all(self, files: list[migrate.Migration]) -> Result[list[str]]:
+        self.execute(lite_table())?
+        pending = migrate.plan(lite_applied(self)?, files)?
+        names: list[str] = []
+        for m in pending:
+            if lite_run_one(self, m)?:
+                names.append(m.name)
+        return Ok(names)

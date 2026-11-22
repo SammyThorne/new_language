@@ -36,4 +36,8 @@ SSL_CERT_FILE=tests/data/tls/ca.pem \
 cargo test -p lang_cli --test postgres
 ```
 
+`cargo test -p lang_cli --test migrate` uses the same URL for the migration tests: the scenarios in
+`migrations_postgres.vi`, and two programs starting together, where one waits for the advisory
+lock. It drops and creates `mig_users`, `mig_half`, `mig_after`, `mig_race` and `schema_migrations`.
+
 Stop it with `"$PG/pg_ctl" -D "$dir/data" stop`.

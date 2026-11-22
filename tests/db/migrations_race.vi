@@ -1,0 +1,30 @@
+# Two instances applying the same migrations at once, started by crates/lang_cli/tests/migrate.rs:
+# `<url> <directory>` prints the names this process applied, separated by spaces. The URL is a
+# `postgres://` one or the path of an SQLite file. With `reset` as the directory it drops the
+# tables a race leaves in PostgreSQL instead.
+
+import migrate
+import os
+import postgres
+import sqlite
+
+def show(result: Result[list[str]]):
+    match result:
+        case Ok(names):
+            print(" ".join(names))
+        case Err(e):
+            print("error:", e.message())
+            os.exit(1)
+
+def main():
+    args = os.args()
+    if args[1].starts_with("postgres://"):
+        db = postgres.connect(args[1]).unwrap()
+        if args[2] == "reset":
+            db.execute("drop table if exists mig_race").unwrap()
+            db.execute("drop table if exists schema_migrations").unwrap()
+            return
+        show(migrate.apply(db, args[2]))
+    else:
+        file = sqlite.open(args[1]).unwrap()
+        show(migrate.apply(file, args[2]))

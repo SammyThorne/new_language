@@ -137,6 +137,36 @@ pub unsafe extern "C-unwind" fn lrt_io_remove(path: *const u8, path_len: i64) ->
     }
 }
 
+/// Create a directory and the ones above it that are missing. Returns 1 on success.
+///
+/// # Safety
+/// The arguments must describe a UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_io_make_dir(path: *const u8, path_len: i64) -> i64 {
+    match std::fs::create_dir_all(unsafe { text(path, path_len) }) {
+        Ok(()) => 1,
+        Err(error) => {
+            fail(describe(error));
+            0
+        }
+    }
+}
+
+/// Remove a directory and everything in it. Returns 1 on success.
+///
+/// # Safety
+/// The arguments must describe a UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_io_remove_dir(path: *const u8, path_len: i64) -> i64 {
+    match std::fs::remove_dir_all(unsafe { text(path, path_len) }) {
+        Ok(()) => 1,
+        Err(error) => {
+            fail(describe(error));
+            0
+        }
+    }
+}
+
 thread_local! {
     static LISTING: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }

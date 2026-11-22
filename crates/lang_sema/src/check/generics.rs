@@ -660,7 +660,7 @@ impl<'m> Checker<'_, 'm> {
             None => self.with_scope(bindings.clone(), quiet, |this| {
                 this.collect_inherent(imp, ty, &type_name, &bindings, mode)
             }),
-            Some(trait_name) => match self.trait_named(&trait_name.name) {
+            Some(trait_name) => match self.trait_named(&trait_name.name, trait_name.span) {
                 Some(Global::Trait(trait_id)) => self.with_scope(bindings.clone(), quiet, |this| {
                     this.collect_trait_impl(imp, trait_id, ty, &type_name, &bindings, mode)
                 }),

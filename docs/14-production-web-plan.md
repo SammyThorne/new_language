@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 17 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 18 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1253,6 +1253,14 @@ Done (D122):
   - Two processes starting together on Postgres: one applies, the other waits.
   - The CLI.
 - **Docs:** docs/05, and a site section.
+
+Done (D123):
+
+- `stdlib/migrate.lang`: `apply`, `status`, `files`, the `Backend` trait, `Migration`, `Applied`, `Status`, `MigrateError`, and the checks. `postgres.Db` and `sqlite.Db` implement `Backend` in their own modules (`impl migrate.Backend for Db`, which the checker now allows for a trait of another module).
+- PostgreSQL: a session advisory lock on a connection outside a transaction (`lrt_pg_session`), each file in its own transaction with its record, `no-transaction` for `create index concurrently`. SQLite: `BEGIN IMMEDIATE` per file, with the version checked again inside it.
+- `viper migrate new <name>` and `viper migrate status [--dir] [--database]` (`crates/lang_cli/src/migrate.rs`); `io.make_dir` and `io.remove_dir`.
+- Fixed: a finished SQLite transaction rolled back again by `with` left an error that `io.read_file` then reported; two processes creating one SQLite file could fail switching to WAL.
+- Tests: `tests/run/migrations_sqlite.vi`, `tests/db/migrations_postgres.vi`, `crates/lang_cli/tests/migrate.rs` (two processes together on both databases; the command line), checked against a real PostgreSQL 17.
 
 #### Milestone 19: jobs and schedules (about 2.5 days; after 5, and 8 for metrics)
 

@@ -6,6 +6,7 @@ mod hash_password;
 mod loader;
 mod lsp;
 mod manifest;
+mod migrate;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use lang_codegen::OptLevel;
@@ -108,6 +109,11 @@ enum Cmd {
         #[arg(long, default_value_t = hash_password::DEFAULT_ITERATIONS)]
         iterations: u32,
     },
+    /// Work with schema migrations: numbered SQL files applied in order
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCmd,
+    },
     /// Rewrite source files in the standard layout
     Fmt {
         /// Files or directories (searched recursively); the current directory if none
@@ -115,6 +121,27 @@ enum Cmd {
         /// Change nothing; list the files that are not formatted and fail if there are any
         #[arg(long)]
         check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateCmd {
+    /// Create the next numbered migration file, such as `migrations/0004_add_tags.sql`
+    New {
+        /// What the migration does, in a few words
+        name: String,
+        /// The directory of migration files
+        #[arg(long, default_value = migrate::DEFAULT_DIR)]
+        dir: PathBuf,
+    },
+    /// Report which migrations have run and which are pending, without changing the database
+    Status {
+        /// The directory of migration files
+        #[arg(long, default_value = migrate::DEFAULT_DIR)]
+        dir: PathBuf,
+        /// A `postgres://` URL or the path of an SQLite file (default: the DATABASE_URL environment variable)
+        #[arg(long)]
+        database: Option<String>,
     },
 }
 
@@ -144,6 +171,10 @@ fn main() -> ExitCode {
         Cmd::Fmt { paths, check } => format_files(&paths, check),
         Cmd::Explain { code } => explain(&code),
         Cmd::HashPassword { iterations } => hash_password_command(iterations),
+        Cmd::Migrate { command } => match command {
+            MigrateCmd::New { name, dir } => migrate::new_file(&name, &dir),
+            MigrateCmd::Status { dir, database } => migrate::status(&dir, database.as_deref()),
+        },
         Cmd::Fetch { file, update } => {
             let file = file.unwrap_or_else(|| PathBuf::from(".").join("main"));
             match manifest::dependencies_for(&file, true, update) {

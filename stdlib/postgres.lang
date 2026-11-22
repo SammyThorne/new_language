@@ -25,6 +25,7 @@ The URL is `postgres://user:password@host:port/database`, with options after `?`
 """
 
 import json as jsonlib
+import migrate
 
 @extern("lrt_pg_open")
 def open_raw(url: str) -> int
@@ -40,6 +41,9 @@ def script_raw(pool: int, tx: int, sql: str) -> int
 
 @extern("lrt_pg_begin")
 def begin_raw(pool: int) -> int
+
+@extern("lrt_pg_session")
+def session_raw(pool: int) -> int
 
 @extern("lrt_pg_finish")
 def finish_raw(tx: int, commit: int) -> int
@@ -257,3 +261,84 @@ pub def query_one_as[T: FromJson](db: Db, sql: str, args: list[str?] = []) -> Re
     if len(values) == 0:
         return Ok(None)
     return Ok(Some(values[0]))
+
+# ---- migrations (the `migrate` module runs these) ----------------------------------------
+
+
+# The advisory lock's key: arbitrary, and the same in every instance.
+def pg_lock() -> str:
+    return "7253199271"
+
+def pg_table() -> str:
+    return "create table if not exists schema_migrations (version bigint primary key, name text not null, checksum text not null, applied_at timestamptz not null default now())"
+
+def pg_applied(db: Db) -> Result[list[migrate.Applied]]:
+    out: list[migrate.Applied] = []
+    for row in db.query("select version, name, checksum from schema_migrations order by version")?:
+        out.append(migrate.Applied(row.int("version")?, row.text("name")?, row.text("checksum")?))
+    return Ok(out)
+
+def pg_record(db: Db, m: migrate.Migration) -> Result[None]:
+    _ = db.execute("insert into schema_migrations (version, name, checksum) values ($1, $2, $3)", [str(m.version), m.name, m.checksum])?
+    return Ok(None)
+
+def pg_run_one(db: Db, m: migrate.Migration) -> Result[None]:
+    if m.transactional:
+        with db.transaction()? as tx:
+            match tx.script(m.sql):
+                case Err(e):
+                    return Err(migrate.failure(m, e.reason))
+                case Ok(_):
+                    pass
+            pg_record(tx, m)?
+            tx.commit()?
+    else:
+        match db.script(m.sql):
+            case Err(e):
+                return Err(migrate.failure(m, e.reason))
+            case Ok(_):
+                pass
+        pg_record(db, m)?
+    return Ok(None)
+
+def pg_run_pending(db: Db, files: list[migrate.Migration]) -> Result[list[str]]:
+    db.execute(pg_table())?
+    pending = migrate.plan(pg_applied(db)?, files)?
+    names: list[str] = []
+    for m in pending:
+        pg_run_one(db, m)?
+        names.append(m.name)
+    return Ok(names)
+
+impl migrate.Backend for Db:
+    def applied(self, create: bool) -> Result[list[migrate.Applied]]:
+        if create:
+            self.execute(pg_table())?
+        else:
+            match self.query_row("select to_regclass('schema_migrations')::text as found")?:
+                case Some(row):
+                    if row.get("found") is None:
+                        return Ok([])
+                case None:
+                    return Ok([])
+        return pg_applied(self)
+
+    def run_all(self, files: list[migrate.Migration]) -> Result[list[str]]:
+        # The lock belongs to a connection of its own, kept outside a transaction (an open one
+        # would make `create index concurrently` wait for it), until the run is over; the
+        # migrations use others from the pool. A crashed instance's connection closes, and with
+        # it the lock.
+        id = session_raw(self.pool)
+        if id < 0:
+            return Err(failed())
+        holder = Db(self.pool, id)
+        match holder.query("select pg_advisory_lock($1)", [pg_lock()]):
+            case Err(e):
+                _ = finish_raw(id, 0)
+                return Err(e)
+            case Ok(_):
+                pass
+        outcome = pg_run_pending(self, files)
+        _ = holder.query("select pg_advisory_unlock($1)", [pg_lock()])
+        _ = finish_raw(id, 0)
+        return outcome

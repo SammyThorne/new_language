@@ -22,6 +22,7 @@ The standard library is what makes Viper a backend language and not a general-pu
 | `re` | Regular expressions | M12 | Viper API over the `regex-lite` crate |
 | `postgres` | PostgreSQL client with a connection pool | M12 | Runtime protocol code; Viper API layer |
 | `sqlite` | SQLite databases in files or memory, with the shape of `postgres` | docs/14, milestone 17 | Viper API over `libsqlite3`, loaded with `dlopen`; a thread per database in the runtime |
+| `migrate` | Numbered SQL migrations for `postgres` and `sqlite`: checksums, a lock, `viper migrate new` and `status` | docs/14, milestone 18 | Viper API; each database module implements the `Backend` trait; `lrt_pg_session` for the lock |
 | `crypto` | Secure random values, SHA-256, HMAC, constant-time comparison, base64, RS256 checks | post-prototype (D101) | Viper API over the `ring` crate |
 | `auth` | Sign-in with Google: login, callback and logout routes, a signed session cookie, route protection | post-prototype (D102) | Viper, on `http` and `crypto` |
 
@@ -47,7 +48,7 @@ def main():
 
 | Module | Functions and types |
 |---|---|
-| `io` | `read_file(path) -> Result[str, IoError]`, `read_lines`, `write_file(path, text)`, `append_file`, `exists`, `is_dir`, `modified_ns(path)` (last modified, nanoseconds since 1970, -1 if unreadable), `remove`, `list_dir`, `read_line() -> str?` (standard input), `eprint(text)` (standard error), `open(path, mode="r") -> Result[File, IoError]`; `File` has `read`, `read_line`, `lines`, `write`, `close`, and closes itself at the end of a `with` block; `IoError` implements `Error` |
+| `io` | `read_file(path) -> Result[str, IoError]`, `read_lines`, `write_file(path, text)`, `append_file`, `exists`, `is_dir`, `make_dir(path)` (with the directories above it), `remove_dir(path)` (and everything in it), `modified_ns(path)` (last modified, nanoseconds since 1970, -1 if unreadable), `remove`, `list_dir`, `read_line() -> str?` (standard input), `eprint(text)` (standard error), `open(path, mode="r") -> Result[File, IoError]`; `File` has `read`, `read_line`, `lines`, `write`, `close`, and closes itself at the end of a `with` block; `IoError` implements `Error` |
 | `os` | `args() -> list[str]`, `getenv(name) -> str?`, `environ() -> dict[str, str]` (every variable whose name and value are UTF-8), `setenv(name, value)` (at startup, before starting tasks: the environment is not safe to change while other threads read it), `exit(code)`, `cwd()` |
 
 `input(prompt)` is also built in, returning `str?` (`None` at the end of input).
@@ -917,6 +918,49 @@ def get(self, id: uuid.Uuid) -> Order:      # a malformed ID is a 400
 - **Errors** say which character was wrong: ``expected a hex digit at position 36, found `z` ``. Braces, `urn:uuid:` and the 32-digit form without hyphens are not accepted.
 - **Where they appear.** `http.request_log()` makes its request IDs with `v7`, so they sort by when requests arrived. OpenAPI documents a `Uuid` as `{"type": "string", "format": "uuid"}`. `datetime.set_clock_for_tests` fixes the time `v7` uses.
 - **Random bytes** are read from the operating system 4 KiB at a time per thread, so a UUID costs a system call only once in about 400.
+
+## Migrations (docs/14, milestone 18)
+
+`migrate` applies numbered SQL files to a `postgres` or `sqlite` database, each once and in order:
+
+```python
+import migrate
+import postgres
+
+def main():
+    db = postgres.connect(url).unwrap()
+    applied = migrate.apply(db, "migrations").unwrap()     # the file names it ran just now
+    for name in applied:
+        log.info(f"applied {name}")
+```
+
+```sql
+-- migrations/0001_create_users.sql
+create table users (id bigserial primary key, email text not null unique);
+```
+
+- **Files** are named `NNNN_name.sql` and run in the order of their numbers (`0010` after `0009`, whatever the width). Other files in the directory are ignored. Two files with the same number are an error, and so is a directory that does not exist.
+- **Each file runs in a transaction,** together with the row that records it. A file whose first line is `-- migrate: no-transaction` runs outside one, which is what `create index concurrently` needs; if it fails halfway, what it did stays, so keep such files to one statement.
+- **Bookkeeping** is the table `schema_migrations(version, name, checksum, applied_at)`, created on the first `apply`. The checksum is the SHA-256 of the file's text.
+- **Checks** run before anything changes, in `apply` and in `status`:
+  - an applied file that was edited: `migration 0003_add_tags.sql was edited after it ran`;
+  - an applied file that is gone: `migration 0003_add_tags.sql has run, but its file is missing`;
+  - a new file numbered below one that has run: `migration 0005_late.sql is new, but a later one has already run`.
+- **A failing migration** is rolled back, stops the run, and `apply` returns an error that names the file and says why; the migrations before it stay applied. Fix the file and run `apply` again. Migrations only go forward: there are no down files.
+- **Two instances starting together** do not both migrate. On PostgreSQL, one holds an advisory lock (on a connection of its own, outside a transaction) and the other waits for it, then finds nothing left to do. On SQLite, each file's transaction takes the write lock first and looks again at what has been recorded. A process that crashes while holding the PostgreSQL lock releases it when its connection closes.
+- **`migrate.status(db, dir)`** returns a `Status` with `applied` (a list of `Applied(version, name, checksum)`) and `pending` (the `Migration` files not yet run), without changing the database; on PostgreSQL it does not even create the bookkeeping table. `migrate.files(dir)` lists the files with their checksums.
+- **Errors** are `MigrateError` (a status of 500 if it reaches a handler); a database error comes back as that database's own `DbError`.
+- **Embedding** the files in the executable is not supported: they are read from the directory when `apply` runs, so ship the directory with the program.
+
+The command line:
+
+```bash
+viper migrate new "add tags"                       # creates migrations/0004_add_tags.sql, empty but for a comment
+viper migrate status --database app.db             # applied and pending; DATABASE_URL if --database is not given
+viper migrate status --dir db/migrations --database postgres://app:secret@localhost/app
+```
+
+`migrate new` takes the number after the highest in the directory, which it creates if need be. `migrate status` compiles and runs a small program that calls the module, so it needs the same system libraries as any program, and it exits with 1 when the files and the database disagree. It does not apply anything: do that from the program, at startup, or from a release step. A path given to `--database` that does not exist is created, as `sqlite.open` would.
 
 ## Configuration (docs/14, milestone 7)
 

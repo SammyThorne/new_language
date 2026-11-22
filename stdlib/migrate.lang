@@ -1,0 +1,181 @@
+"""
+Schema migrations: numbered SQL files, applied once each and in order, for `postgres` and
+`sqlite`.
+
+    import migrate
+
+    db = postgres.connect(url)?
+    applied = migrate.apply(db, "migrations")?      # the names of the files it ran now
+
+    # migrations/0001_create_users.sql
+    create table users (id bigserial primary key, email text not null unique);
+
+Files are named `NNNN_name.sql` and run in the order of their numbers, each in a transaction
+(a file whose first line is `-- migrate: no-transaction` runs outside one, for `create index
+concurrently`). What has run is recorded in the `schema_migrations` table with a checksum of the
+file; a file edited after it ran is an error, and so is a file that has gone missing. A migration
+that fails is rolled back and stops the run; the ones before it stay applied. Migrations only go
+forward. Two instances starting together do not both migrate: on PostgreSQL one holds an
+advisory lock and the other waits for it, on SQLite the write lock does the same.
+The full description is in docs/05 ("Migrations").
+"""
+
+import crypto
+import io
+
+pub struct MigrateError:
+    """A migration that cannot be applied: a mistake in the files, or a failed statement."""
+    reason: str
+
+impl Error for MigrateError:
+    def message(self) -> str:
+        return self.reason
+
+    def status(self) -> int:
+        return 500
+
+impl Display for MigrateError:
+    def to_str(self) -> str:
+        return self.reason
+
+@frozen
+pub struct Migration:
+    """One migration file."""
+    version: int
+    name: str
+    sql: str
+    checksum: str
+    transactional: bool = True
+
+@frozen
+pub struct Applied:
+    """A row of `schema_migrations`: a migration that has run."""
+    version: int
+    name: str
+    checksum: str
+
+@frozen
+pub struct Status:
+    """Where a database stands against a directory of migration files."""
+    applied: list[Applied]
+    pending: list[Migration]
+
+def no_transaction() -> str:
+    return "-- migrate: no-transaction"
+
+pub trait Backend:
+    def applied(self, create: bool) -> Result[list[Applied]]
+    def run_all(self, files: list[Migration]) -> Result[list[str]]
+
+# ---- the files ----------------------------------------------------------------------------
+
+def all_digits(text: str) -> bool:
+    if text == "":
+        return False
+    for ch in text:
+        if ch not in "0123456789":
+            return False
+    return True
+
+def parse_name(file: str) -> int?:
+    """The version of `0003_add_tags.sql`: 3. Files not named that way are not migrations."""
+    if not file.ends_with(".sql"):
+        return None
+    head, sep, rest = file.partition("_")
+    if sep == "" or rest == ".sql" or not all_digits(head):
+        return None
+    match int.parse(head):
+        case Ok(version):
+            return Some(version)
+        case Err(_):
+            return None
+
+pub def files(dir: str) -> Result[list[Migration]]:
+    """The migration files in `dir`, in the order they run."""
+    if not io.is_dir(dir):
+        return Err(MigrateError(f"the migrations directory `{dir}` does not exist"))
+    found: list[Migration] = []
+    for file in io.list_dir(dir)?:
+        match parse_name(file):
+            case Some(version):
+                text = io.read_file(dir + "/" + file)?
+                for m in found:
+                    if m.version == version:
+                        return Err(MigrateError(f"migrations {m.name} and {file} have the same number {version}"))
+                first, _, _ = text.partition("\n")
+                checksum = crypto.sha256(text.encode()).hex()
+                found.append(Migration(version, file, text, checksum, first.strip() != no_transaction()))
+            case None:
+                pass
+    # Insertion sort by number: the names sort by text, which is wrong when the widths differ.
+    for i in range(1, len(found)):
+        j = i
+        while j > 0 and found[j - 1].version > found[j].version:
+            tmp = found[j - 1]
+            found[j - 1] = found[j]
+            found[j] = tmp
+            j -= 1
+    return Ok(found)
+
+pub def plan(done: list[Applied], files: list[Migration]) -> Result[list[Migration]]:
+    """What is left to run, after checking what has run against the files."""
+    newest = 0
+    for a in done:
+        if a.version > newest:
+            newest = a.version
+        found: Migration? = None
+        for m in files:
+            if m.version == a.version:
+                found = Some(m)
+        match found:
+            case Some(m):
+                if m.checksum != a.checksum:
+                    return Err(MigrateError(f"migration {m.name} was edited after it ran"))
+            case None:
+                return Err(MigrateError(f"migration {a.name} has run, but its file is missing"))
+    pending: list[Migration] = []
+    for m in files:
+        ran = False
+        for a in done:
+            if a.version == m.version:
+                ran = True
+        if not ran:
+            if m.version < newest:
+                return Err(MigrateError(f"migration {m.name} is new, but a later one has already run"))
+            pending.append(m)
+    return Ok(pending)
+
+pub def failure(m: Migration, reason: str) -> MigrateError:
+    return MigrateError(f"migration {m.name} failed: {reason}")
+
+# ---- the API ------------------------------------------------------------------------------
+
+pub def apply(db: Backend, dir: str) -> Result[list[str]]:
+    """Run the migrations in `dir` that have not run yet, in order, and return their file
+    names. It does nothing, and returns an empty list, when the database is up to date."""
+    return db.run_all(files(dir)?)
+
+pub def status(db: Backend, dir: str) -> Result[Status]:
+    """What has run and what is pending, without changing the database. It fails when a file
+    that has run was edited or removed, as `apply` does."""
+    all = files(dir)?
+    done = db.applied(False)?
+    return Ok(Status(done, plan(done, all)?))
+
+
+# ---- the command line ---------------------------------------------------------------------
+
+pub def run_status(db: Backend, dir: str) -> int:
+    """What `<cli> migrate status` runs: print what has run and what is pending, and return the
+    exit status: 0, or 1 when the files and the database disagree."""
+    match status(db, dir):
+        case Err(e):
+            io.eprint(f"error: {e.message()}")
+            return 1
+        case Ok(state):
+            for a in state.applied:
+                print(f"applied  {a.name}")
+            for m in state.pending:
+                print(f"pending  {m.name}")
+            print(f"{len(state.applied)} applied, {len(state.pending)} pending")
+            return 0

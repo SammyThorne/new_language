@@ -1069,6 +1069,18 @@ pub unsafe extern "C-unwind" fn lrt_pg_script(pool: i64, tx: i64, sql: *const u8
 /// Start a transaction on a connection of its own. Returns its id, or -1.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn lrt_pg_begin(pool_id: i64) -> i64 {
+    take_connection(pool_id, true)
+}
+
+/// Take a connection of its own without starting a transaction, for session state such as an
+/// advisory lock: a transaction left open would make `create index concurrently` wait for it.
+/// Returns an id for `lrt_pg_finish` and the query functions, or -1.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn lrt_pg_session(pool_id: i64) -> i64 {
+    take_connection(pool_id, false)
+}
+
+fn take_connection(pool_id: i64, begin: bool) -> i64 {
     let Some(pool) = pool(pool_id) else {
         record(Error::Broken("not a database connection".into()));
         return -1;
@@ -1080,8 +1092,9 @@ pub extern "C-unwind" fn lrt_pg_begin(pool_id: i64) -> i64 {
             return -1;
         }
     };
-    match conn.script("BEGIN") {
-        Ok(_) => fiber::lock(&TRANSACTIONS).insert((pool, Some(conn))),
+    let started = if begin { conn.script("BEGIN").map(|_| ()) } else { Ok(()) };
+    match started {
+        Ok(()) => fiber::lock(&TRANSACTIONS).insert((pool, Some(conn))),
         Err(error) => {
             if matches!(error, Error::Broken(_)) {
                 conn.terminate();

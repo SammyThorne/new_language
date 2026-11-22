@@ -1,0 +1,95 @@
+# Migrations over PostgreSQL (docs/14, milestone 18), run by crates/lang_cli/tests/migrate.rs when
+# a database URL is given (see tests/db/README.md). The argument is the URL of a database the
+# test may write to (it drops and creates the tables `mig_users`, `mig_half` and
+# `schema_migrations`).
+# expect: first: ['0001_users.sql', '0002_rows.sql', '0003_index.sql']
+# expect: again: []
+# expect: status: 3 applied, 0 pending
+# expect: rows: 2
+# expect: index: True
+# expect: edited: migration 0002_rows.sql was edited after it ran
+# expect: restored: []
+# expect: failing: True
+# expect: rolled back: True, kept: 1
+# expect: stopped: True
+# expect: status table missing: 0 applied, 1 pending 0001_a.sql
+# expect: table still missing: True
+
+import crypto
+import io
+import migrate
+import os
+import postgres
+
+def put(dir: str, name: str, text: str):
+    io.write_file(dir + "/" + name, text).unwrap()
+
+def message(result: Result[list[str]]) -> str:
+    match result:
+        case Ok(names):
+            return str(names)
+        case Err(e):
+            return e.message()
+
+def describe(result: Result[migrate.Status]) -> str:
+    match result:
+        case Err(e):
+            return e.message()
+        case Ok(state):
+            text = f"{len(state.applied)} applied, {len(state.pending)} pending"
+            for m in state.pending:
+                text += " " + m.name
+            return text
+
+def scalar(db: postgres.Db, sql: str) -> str?:
+    return db.query_row(sql).unwrap().unwrap().get("v")
+
+def main():
+    url = os.args()[1]
+    db = postgres.connect(url).unwrap()
+    base = "/tmp/viper-migrations-" + crypto.token(6)
+    dir = base + "/main"
+    io.make_dir(dir).unwrap()
+    for table in ["mig_users", "mig_half", "mig_after", "schema_migrations"]:
+        db.execute(f"drop table if exists {table}").unwrap()
+
+    rows = "insert into mig_users (email) values ('a@example.com'), ('b@example.com');"
+    put(dir, "0001_users.sql", "create table mig_users (id bigserial primary key, email text not null);")
+    put(dir, "0002_rows.sql", rows)
+    # `create index concurrently` cannot run inside a transaction.
+    put(dir, "0003_index.sql", "-- migrate: no-transaction\ncreate index concurrently mig_users_email on mig_users (email);")
+    print("first:", message(migrate.apply(db, dir)))
+    print("again:", message(migrate.apply(db, dir)))
+    print("status:", describe(migrate.status(db, dir)))
+    print("rows:", scalar(db, "select count(*)::text as v from mig_users").unwrap())
+    print("index:", scalar(db, "select to_regclass('mig_users_email')::text as v").is_some())
+
+    put(dir, "0002_rows.sql", rows + "\n-- edited")
+    print("edited:", message(migrate.apply(db, dir)))
+    put(dir, "0002_rows.sql", rows)
+    print("restored:", message(migrate.apply(db, dir)))
+
+    bad = base + "/bad"
+    io.make_dir(bad).unwrap()
+    put(bad, "0001_ok.sql", "create table mig_after (id int);")
+    put(bad, "0002_bad.sql", "create table mig_half (id int);\ninsert into mig_nowhere values (1);")
+    put(bad, "0003_never.sql", "drop table mig_users;")
+    db.execute("drop table schema_migrations").unwrap()
+    failing = message(migrate.apply(db, bad))
+    print("failing:", failing.starts_with("migration 0002_bad.sql failed: ") and "mig_nowhere" in failing)
+    kept = scalar(db, "select count(*)::text as v from schema_migrations").unwrap()
+    half = scalar(db, "select to_regclass('mig_half')::text as v")
+    print(f"rolled back: {half.is_none()}, kept: {kept}")
+    print("stopped:", scalar(db, "select to_regclass('mig_users')::text as v").is_some())
+
+    # `status` does not create the bookkeeping table.
+    db.execute("drop table schema_migrations").unwrap()
+    only = base + "/only"
+    io.make_dir(only).unwrap()
+    put(only, "0001_a.sql", "select 1;")
+    print("status table missing:", describe(migrate.status(db, only)))
+    print("table still missing:", scalar(db, "select to_regclass('schema_migrations')::text as v").is_none())
+
+    for table in ["mig_users", "mig_half", "mig_after", "schema_migrations"]:
+        db.execute(f"drop table if exists {table}").unwrap()
+    io.remove_dir(base).unwrap()

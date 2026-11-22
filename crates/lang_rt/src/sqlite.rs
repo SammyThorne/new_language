@@ -375,8 +375,22 @@ impl Connection {
             (api.busy_timeout)(db, 5000);
         }
         let memory = path == ":memory:" || path.is_empty() || path.contains("mode=memory");
-        let setup = if memory { "PRAGMA foreign_keys=ON" } else { "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON" };
-        connection.script(setup)?;
+        if !memory {
+            // Switching a new file to WAL needs a lock that the busy timeout does not always wait
+            // for, when another process is switching it or writing at the same moment: two
+            // instances starting together. Try again for as long as the timeout would have.
+            let mut tries = 0;
+            loop {
+                match connection.script("PRAGMA journal_mode=WAL") {
+                    Err(error) if error.code.starts_with("SQLITE_BUSY") && tries < 100 => {
+                        tries += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    other => break other?,
+                }
+            }
+        }
+        connection.script("PRAGMA foreign_keys=ON")?;
         Ok(connection)
     }
 
@@ -619,7 +633,17 @@ fn serve(connection: Connection, jobs: Receiver<Job>) {
                         Err(error) => answer(&reply, Err(error)),
                     }
                 }
-                Job::Finish { commit, reply, .. } => {
+                Job::Finish { tx, commit, reply } => {
+                    if owner != Some(tx) {
+                        // Already ended: `with` rolls back after a commit, which is no error.
+                        let outcome = if commit {
+                            Err(failure("the transaction has already ended"))
+                        } else {
+                            Ok(Reply2::Nothing)
+                        };
+                        answer(&reply, outcome);
+                        continue;
+                    }
                     let outcome = if commit { connection.script("COMMIT") } else { connection.script("ROLLBACK") };
                     // A failed COMMIT leaves the transaction open: end it, so the connection is free.
                     if outcome.is_err() && connection.in_transaction() {

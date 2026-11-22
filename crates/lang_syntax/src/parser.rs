@@ -149,6 +149,17 @@ impl Parser<'_> {
         }
     }
 
+    /// A name that may be qualified by a module, `postgres.Db`, as one name with the dots in it.
+    fn qualified_name(&mut self, what: &str) -> PResult<Ident> {
+        let mut ident = self.expect_name(what)?;
+        while self.at(&TokenKind::Dot) && matches!(self.peek_nth(1), TokenKind::Name(_)) {
+            self.bump();
+            let next = self.expect_name(what)?;
+            ident = Ident { name: format!("{}.{}", ident.name, next.name), span: ident.span.to(next.span) };
+        }
+        Ok(ident)
+    }
+
     /// Skip the rest of the current line, and the indented block after it if there is one.
     fn skip_statement(&mut self) {
         while !self.at_line_end() {
@@ -793,14 +804,14 @@ impl Parser<'_> {
     fn impl_decl(&mut self) -> PResult<ImplDecl> {
         self.bump();
         let generics = self.generic_params()?;
-        let first = self.expect_name("a type or trait name after `impl`")?;
+        let first = self.qualified_name("a type or trait name after `impl`")?;
         let mut target_args = self.type_args()?;
         let (trait_name, target) = if self.eat(&TokenKind::For) {
             if !target_args.is_empty() {
                 let span = first.span;
                 return Err(self.not_supported("generic traits are", span));
             }
-            let target = self.expect_name("a type name after `for`")?;
+            let target = self.qualified_name("a type name after `for`")?;
             target_args = self.type_args()?;
             (Some(first), target)
         } else {
