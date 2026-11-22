@@ -963,6 +963,24 @@ viper migrate status --dir db/migrations --database postgres://app:secret@localh
 
 `migrate new` takes the number after the highest in the directory, which it creates if need be. `migrate status` compiles and runs a small program that calls the module, so it needs the same system libraries as any program, and it exits with 1 when the files and the database disagree. It does not apply anything: do that from the program, at startup, or from a release step. A path given to `--database` that does not exist is created, as `sqlite.open` would.
 
+## ETags and response caching (docs/14, milestone 23)
+
+```python
+server.use(http.compress())
+server.use(http.cache(datetime.seconds(30)))   # keeps GET responses, 30 seconds
+server.use(http.etag())                        # tags what the handlers made
+server.get("/prices", prices)
+server.get("/logo", lambda req: http.binary(logo).cache_control(max_age=datetime.hours(24), public=True, immutable=True))
+```
+
+`http.etag(weak=False)` gives `GET` and `HEAD` responses an `ETag`, a hash of the body, and answers a request whose `If-None-Match` names it (compared weakly; `*` and lists work) with `304 Not Modified` and no body. Only `200` responses with a body in memory are tagged; a response with its own `ETag` keeps it. The handler still runs and its body is hashed on every request: this saves bandwidth, not work.
+
+`http.cache(ttl, max_bytes=64 MiB, max_entry_bytes=1 MiB, key=None)` saves the work. It keeps `200` responses to `GET` for `ttl` (at least a second), and the entries least recently used go first when the bytes pass `max_bytes`. A response with `Set-Cookie`, `Vary`, or `Cache-Control: no-store` or `private` is not kept. Entries are found by path and query; a request with an `Authorization` or `Cookie` header never reads or fills the cache. `key=lambda req: ...` replaces both rules: return what tells the responses apart (the user, the tenant, the language), or `""` to skip the cache for that request. A hit has an `Age` header and answers `If-None-Match` itself when the stored response has an `ETag`. The cache lives in the process, handlers that miss together all run, and nothing is stale for longer than `ttl`.
+
+Order matters: `compress` outermost (it makes tags weak), then `cache`, then `etag`, so a hit is not hashed again.
+
+`response.cache_control(max_age=None, shared_max_age=None, public=False, private=False, no_cache=False, no_store=False, must_revalidate=False, immutable=False, stale_while_revalidate=None)` sets `Cache-Control` from directives (durations are `datetime.Duration`s) and returns the response. `public` and `private` together, or no directive at all, panic.
+
 ## Sign-in with any OpenID Connect provider (docs/14, milestone 21)
 
 ```python

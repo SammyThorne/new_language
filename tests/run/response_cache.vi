@@ -1,0 +1,192 @@
+# ETags and the response cache (docs/14, milestone 23).
+# expect: tag: 200 True
+# expect: same body, same tag: True
+# expect: other body, other tag: True
+# expect: match: 304 "" True
+# expect: weak match: 304
+# expect: star: 304
+# expect: list: 304
+# expect: no match: 200 hello
+# expect: post: 200 False
+# expect: binary: 200 304
+# expect: weak tag: True
+# expect: own tag kept: "mine" 304
+# expect: error untouched: 404 False
+# expect: calls with cache: 1 hit has Age True
+# expect: other path: 2
+# expect: query is part of the key: 3
+# expect: authorization bypasses: 5
+# expect: cookie bypasses: 6
+# expect: key function: 8
+# expect: empty key skips: 11
+# expect: not 200: 13
+# expect: set-cookie, private, vary: 19
+# expect: too big: 21
+# expect: small fits: 22
+# expect: cache and etag: 200 304 1
+# expect: eviction: 2 3 4 5
+# expect: expiry: 1 2
+# expect: cache_control: public, max-age=300, stale-while-revalidate=30
+# expect: cache_control 2: private, no-store
+# expect: cache_control 3: max-age=3600, s-maxage=86400, must-revalidate, immutable
+
+import http
+import datetime
+import time
+
+def get(server: http.Server, path: str, headers: dict[str, str] = {}) -> http.Response:
+    return server.handle(http.test_request("GET", path, headers=headers))
+
+def etag_server() -> http.Server:
+    server = http.Server()
+    server.use(http.etag())
+    server.get("/a", lambda req: http.text("hello"))
+    server.get("/b", lambda req: http.text("world"))
+    server.get("/binary", lambda req: http.binary("abc".encode(), "application/octet-stream"))
+    server.get("/mine", lambda req: http.text("x").with_header("ETag", "\"mine\""))
+    server.post("/a", lambda req: http.text("posted"))
+    return server
+
+def respond(calls: Atomic[int], body: str, status: int, name: str, value: str) -> Result[http.Response]:
+    calls.increment()
+    response = http.text(body, status)
+    if name != "":
+        response.headers[name] = value
+    return Ok(response)
+
+def counting(server: http.Server, calls: Atomic[int], path: str, body: str, status: int = 200, name: str = "", value: str = ""):
+    server.get(path, lambda req: respond(calls, body, status, name, value))
+
+def padding(n: int) -> str:
+    text = ""
+    for _ in range(n):
+        text += "x"
+    return text
+
+def main():
+    server = etag_server()
+    a = get(server, "/a")
+    tag = a.headers["ETag"]
+    print("tag:", a.status, tag.starts_with("\""))
+    print("same body, same tag:", get(server, "/a").headers["ETag"] == tag)
+    print("other body, other tag:", get(server, "/b").headers["ETag"] != tag)
+    r = get(server, "/a", {"If-None-Match": tag})
+    print("match:", r.status, "\"" + r.body + "\"", r.headers["ETag"] == tag)
+    print("weak match:", get(server, "/a", {"If-None-Match": "W/" + tag}).status)
+    print("star:", get(server, "/a", {"If-None-Match": "*"}).status)
+    print("list:", get(server, "/a", {"If-None-Match": "\"x\", " + tag + ", \"y\""}).status)
+    r = get(server, "/a", {"If-None-Match": "\"other\""})
+    print("no match:", r.status, r.body)
+    r = server.handle(http.test_request("POST", "/a", headers={"If-None-Match": "*"}))
+    print("post:", r.status, "ETag" in r.headers)
+    b = get(server, "/binary")
+    print("binary:", b.status, get(server, "/binary", {"If-None-Match": b.headers["ETag"]}).status)
+
+    weak = http.Server()
+    weak.use(http.etag(weak=True))
+    weak.get("/a", lambda req: http.text("hello"))
+    print("weak tag:", get(weak, "/a").headers["ETag"].starts_with("W/\""))
+    m = get(server, "/mine", {"If-None-Match": "\"mine\""})
+    print("own tag kept:", get(server, "/mine").headers["ETag"], m.status)
+    missing = get(server, "/nowhere")
+    print("error untouched:", missing.status, "ETag" in missing.headers)
+
+    calls: Atomic[int] = Atomic(0)
+    cached = http.Server()
+    cached.use(http.cache(datetime.seconds(60)))
+    counting(cached, calls, "/p", "page")
+    counting(cached, calls, "/q", "other page")
+    get(cached, "/p")
+    r = get(cached, "/p")
+    print("calls with cache:", calls.get(), "hit has Age", "Age" in r.headers)
+    get(cached, "/q")
+    print("other path:", calls.get())
+    get(cached, "/p?x=1")
+    get(cached, "/p?x=1")
+    print("query is part of the key:", calls.get())
+    get(cached, "/p", {"Authorization": "Bearer t"})
+    get(cached, "/p", {"Authorization": "Bearer t"})
+    print("authorization bypasses:", calls.get())
+    get(cached, "/p", {"Cookie": "a=b"})
+    print("cookie bypasses:", calls.get())
+
+    keyed = http.Server()
+    keyed.use(http.cache(datetime.seconds(60), key=lambda req: req.header("X-User").unwrap_or("") + req.path))
+    counting(keyed, calls, "/me", "me")
+    get(keyed, "/me", {"X-User": "ann"})
+    get(keyed, "/me", {"X-User": "bob"})
+    get(keyed, "/me", {"X-User": "ann"})
+    print("key function:", calls.get())
+
+    skipping = http.Server()
+    skipping.use(http.cache(datetime.seconds(60), key=lambda req: "" if req.header("X-Skip") != None else req.path))
+    counting(skipping, calls, "/s", "s")
+    get(skipping, "/s")
+    get(skipping, "/s")
+    get(skipping, "/s", {"X-Skip": "1"})
+    get(skipping, "/s", {"X-Skip": "1"})
+    print("empty key skips:", calls.get())
+
+    counting(cached, calls, "/missing", "x", 404)
+    get(cached, "/missing")
+    get(cached, "/missing")
+    print("not 200:", calls.get())
+    counting(cached, calls, "/cookie", "x", 200, "Set-Cookie", "a=b")
+    counting(cached, calls, "/private", "x", 200, "Cache-Control", "private, max-age=60")
+    counting(cached, calls, "/vary", "x", 200, "Vary", "Accept")
+    for path in ["/cookie", "/private", "/vary"]:
+        get(cached, path)
+        get(cached, path)
+    print("set-cookie, private, vary:", calls.get())
+
+    small = http.Server()
+    small.use(http.cache(datetime.seconds(60), max_entry_bytes=300))
+    counting(small, calls, "/big", padding(100))
+    counting(small, calls, "/small", "x")
+    get(small, "/big")
+    get(small, "/big")
+    print("too big:", calls.get())
+    get(small, "/small")
+    get(small, "/small")
+    print("small fits:", calls.get())
+
+    tagged = http.Server()
+    tagged.use(http.cache(datetime.seconds(60)))
+    tagged.use(http.etag())
+    before = calls.get()
+    counting(tagged, calls, "/t", "tagged")
+    first = get(tagged, "/t")
+    second = get(tagged, "/t", {"If-None-Match": first.headers["ETag"]})
+    print("cache and etag:", first.status, second.status, calls.get() - before)
+
+    evictions: Atomic[int] = Atomic(0)
+    lru = http.Server()
+    lru.use(http.cache(datetime.seconds(60), max_bytes=800))
+    for path in ["/a", "/b", "/c"]:
+        counting(lru, evictions, path, padding(100))
+    get(lru, "/a")
+    get(lru, "/b")
+    get(lru, "/a")
+    first_count = evictions.get()
+    get(lru, "/c")
+    second_count = evictions.get()
+    get(lru, "/a")
+    get(lru, "/b")
+    third_count = evictions.get()
+    get(lru, "/c")
+    print("eviction:", first_count, second_count, third_count, evictions.get())
+
+    expiring: Atomic[int] = Atomic(0)
+    brief = http.Server()
+    brief.use(http.cache(datetime.seconds(1)))
+    counting(brief, expiring, "/t", "t")
+    get(brief, "/t")
+    get(brief, "/t")
+    stale = expiring.get()
+    time.sleep(1.3)
+    get(brief, "/t")
+    print("expiry:", stale, expiring.get())
+
+    print("cache_control:", http.text("x").cache_control(max_age=datetime.minutes(5), public=True, stale_while_revalidate=datetime.seconds(30)).headers["Cache-Control"])
+    print("cache_control 2:", http.text("x").cache_control(private=True, no_store=True).headers["Cache-Control"])
+    print("cache_control 3:", http.text("x").cache_control(max_age=datetime.hours(1), shared_max_age=datetime.hours(24), must_revalidate=True, immutable=True).headers["Cache-Control"])

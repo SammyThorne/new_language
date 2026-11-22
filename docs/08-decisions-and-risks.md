@@ -1366,6 +1366,21 @@ Section 4.18 of docs/14:
 - **Tests:** `sign_in_with_github` in `crates/lang_cli/tests/oidc.rs` with `tests/oidc/github.vi` (verified primary email picked over a verified secondary one; an unverified primary refused, and accepted with `require_verified_email=False` and no email; no `user:email` scope; a token reply without a token; the API down; a profile without a name), and the example `examples/github_login`.
 - **Not done:** a manual check against a real GitHub OAuth app (it needs the owner's app and secret), GitHub Apps and Enterprise Server URLs (pass `endpoints=` to `github_for_tests`; a public way to set them is not offered), and organization membership checks.
 
+### D128. ETags and response caching (production web plan, milestone 23)
+
+Section 4.19 of docs/14:
+
+- **`http.etag(weak=False)`** hashes the body with the FNV-1a function the documentation page already uses (`lrt_docs_hash`), over the bytes of `body` or of a `http.binary` response, and tags only `200` responses to `GET` and `HEAD` that are not streams. It compares `If-None-Match` weakly, as RFC 9110 says for this header, accepts `*` and lists, and a response that already has an `ETag` keeps it (and is compared against it). A `304` keeps the response's headers except `Content-Type`, `Content-Length`, `Content-Encoding` and `Content-Range`. The tag is a decimal number in quotes, as the page's; 64-bit, not a cryptographic hash, which an `ETag` does not need.
+- **`http.cache(ttl, max_bytes, max_entry_bytes, key)`** is a middleware with a `Mutex[dict]` as its store, ordered by use: a hit moves its entry to the end and eviction removes the first, so both are constant time. Sizes are counted in an `Atomic` that changes only under the lock. Entries are frozen snapshots (`@frozen` with a `frozendict` of headers), and a hit builds a new `Response`, so `compress` and other middleware outside it never change what is stored.
+- **What is kept:** `200` responses to `GET` with a body in memory, up to `max_entry_bytes`, and no `Set-Cookie`, `Vary`, or `Cache-Control` with `no-store` or `private`. `Vary` is refused rather than honoured: keying on request headers is what `key=` is for, and a response that varies by a header the handler chose is better not shared by accident.
+- **What is shared with whom:** without `key`, a request with `Authorization` or `Cookie` neither reads nor fills the cache (the response may be about the user). With `key`, the author decides, and `""` skips the cache. This is stricter than a shared HTTP cache, on purpose: the usual mistake with an application cache is serving one user's page to another.
+- **No stampede protection:** requests that miss together each run the handler, and the last stored wins. A lock per key would hold workers; the documentation says so.
+- **A hit carries `Age`,** and answers `If-None-Match` itself when the stored response has an `ETag`, so `etag` belongs inside `cache` and `compress` outside both.
+- **`Response.cache_control(...)`** builds the header from directives (`max_age` and the others as `datetime.Duration`s, in whole seconds), refuses `public` with `private` and an empty call, and replaces the header.
+- **Cost:** none unless used; `bench/http/counts.json` is unchanged.
+- **Tests:** `tests/run/response_cache.vi` (tags, every `If-None-Match` form, other methods, binary bodies, own tags, errors; cache hits, the key, bypasses, what is not kept, size limits, least-recently-used eviction, expiry with a real one-second wait, `cache` with `etag`, and `cache_control`), and a check over a socket that a stack of `compress`, `cache` and `etag` answers a `304` without a body.
+- **Not done:** serving stale responses while revalidating, caching `HEAD` apart from `GET`, honouring the request's `Cache-Control`, and invalidating one entry (the `ttl` and `max_bytes` bound what is stale and large).
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

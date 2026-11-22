@@ -967,6 +967,57 @@ impl Response:
                 self.headers[name] = value
         return self
 
+    def cache_control(
+        self,
+        max_age: datetime.Duration? = None,
+        shared_max_age: datetime.Duration? = None,
+        public: bool = False,
+        private: bool = False,
+        no_cache: bool = False,
+        no_store: bool = False,
+        must_revalidate: bool = False,
+        immutable: bool = False,
+        stale_while_revalidate: datetime.Duration? = None,
+    ) -> Response:
+        """Set the `Cache-Control` header from directives, and return the response for chaining:
+        `http.json(page).cache_control(max_age=datetime.minutes(5), public=True)`. `max_age` and
+        `shared_max_age` (`s-maxage`, for shared caches) are durations, rounded down to whole
+        seconds. At least one directive is needed; `public` and `private` are exclusive."""
+        if public and private:
+            panic("`cache_control` takes `public` or `private`, not both")
+        parts: list[str] = []
+        if public:
+            parts.append("public")
+        if private:
+            parts.append("private")
+        if no_cache:
+            parts.append("no-cache")
+        if no_store:
+            parts.append("no-store")
+        match max_age:
+            case Some(age):
+                parts.append(f"max-age={duration_seconds(age, 'max_age')}")
+            case None:
+                pass
+        match shared_max_age:
+            case Some(age):
+                parts.append(f"s-maxage={duration_seconds(age, 'shared_max_age')}")
+            case None:
+                pass
+        if must_revalidate:
+            parts.append("must-revalidate")
+        if immutable:
+            parts.append("immutable")
+        match stale_while_revalidate:
+            case Some(age):
+                parts.append(f"stale-while-revalidate={duration_seconds(age, 'stale_while_revalidate')}")
+            case None:
+                pass
+        if len(parts) == 0:
+            panic("`cache_control` needs at least one directive")
+        self.headers["Cache-Control"] = ", ".join(parts)
+        return self
+
     def set_cookie(
         self,
         name: str,
@@ -2052,6 +2103,256 @@ def heartbeat(out: Stream, every: float):
         time.sleep(every)
         if not out.ping(every):
             return
+
+# ---- ETags and caching of dynamic responses -----------------------------------------------
+
+def duration_seconds(length: datetime.Duration, what: str) -> int:
+    seconds = length.seconds()
+    if seconds < 0.0:
+        panic(f"`{what}` is negative")
+    return int(seconds)
+
+def etag_matches(header: str, tag: str) -> bool:
+    """Whether an `If-None-Match` header names `tag`, compared weakly (`W/` is ignored), or is `*`."""
+    if header.strip() == "*":
+        return True
+    wanted = without_weak(tag)
+    for part in header.split(","):
+        if without_weak(part.strip()) == wanted:
+            return True
+    return False
+
+def without_weak(tag: str) -> str:
+    if tag.starts_with("W/"):
+        return tag[2:len(tag)]
+    return tag
+
+def make_not_modified(response: Response):
+    """Turn a response into `304 Not Modified`: no body, and none of the headers that describe it."""
+    response.status = 304
+    response.body = ""
+    response.raw = None
+    response.content_type = ""
+    for key in list(response.headers.keys()):
+        lowered = key.lower()
+        if lowered == "content-length" or lowered == "content-encoding" or lowered == "content-range" or lowered == "content-type":
+            response.headers.pop(key)
+
+pub def etag(weak: bool = False) -> Middleware:
+    """
+    Middleware that gives `GET` and `HEAD` responses an `ETag` (a hash of the body) and answers a
+    request whose `If-None-Match` names it with `304 Not Modified`, so a client that has the page
+    does not download it again:
+
+        server.use(http.compress())
+        server.use(http.etag())
+
+    Only `200` responses with a body in memory are tagged: streams, errors and responses that
+    already have an `ETag` (whose tag is then the one compared) are not hashed. The body is
+    still computed and hashed on every request, so this saves bandwidth, not work; put
+    `http.cache` before it to save both. Use it inside `http.compress`, so that the tag is of
+    the bytes before compression (which `compress` makes weak). `weak=True` writes `W/"..."`.
+    """
+    return lambda req, next: tag_response(req, next, weak)
+
+def tag_response(req: Request, next: Handler, weak: bool) -> Result[Response]:
+    result = next(req)
+    if req.method != "GET" and req.method != "HEAD":
+        return result
+    match result:
+        case Ok(response):
+            apply_etag(req, response, weak)
+        case Err(_):
+            pass
+    return result
+
+def apply_etag(req: Request, response: Response, weak: bool):
+    if response.status != 200:
+        return
+    content = response.body
+    match response.raw:
+        case Some(RawBody.Streamed(_)):
+            return
+        case Some(RawBody.Data(data)):
+            content = __bytes_data(data)
+        case None:
+            pass
+    tag = ""
+    match find_header(response, "ETag"):
+        case Some(existing):
+            tag = existing
+        case None:
+            tag = f"\"{docs_hash(content)}\""
+            if weak:
+                tag = "W/" + tag
+            response.headers["ETag"] = tag
+    match req.header("If-None-Match"):
+        case Some(tags):
+            if etag_matches(tags, tag):
+                make_not_modified(response)
+        case None:
+            pass
+
+@frozen
+struct CachedResponse:
+    status: int
+    body: str
+    content_type: str
+    headers: frozendict[str, str]
+    data: bytes?
+    stored: float
+    size: int
+
+@frozen
+struct ResponseCache:
+    ttl: float
+    max_bytes: int
+    max_entry: int
+    key: (def(Request) -> str)?
+    # Least recently used first: a hit moves its entry to the end.
+    entries: Mutex[dict[str, CachedResponse]]
+    # The sizes of the entries, changed only while `entries` is locked.
+    used: Atomic[int]
+
+pub def cache(
+    ttl: datetime.Duration,
+    max_bytes: int = 64 * 1024 * 1024,
+    max_entry_bytes: int = 1024 * 1024,
+    key: (def(Request) -> str)? = None,
+) -> Middleware:
+    """
+    Middleware that keeps `GET` responses in memory for `ttl`, and answers repeats without
+    calling the handler:
+
+        server.use(http.cache(datetime.seconds(30)))
+        reports.use(http.cache(datetime.minutes(5), key=lambda req: req.path + "?" + req.query + "|" + tenant_of(req)))
+
+    A response is kept when it is a `200` with a body in memory, no more than `max_entry_bytes`
+    in size, and has no `Set-Cookie`, `Vary` or `Cache-Control: no-store` or `private`. The
+    cache holds at most `max_bytes` in all (the sizes of the bodies and headers); past that, the
+    entries unused for longest go first. A hit carries an `Age` header, answers a matching
+    `If-None-Match` with `304` when the stored response has an `ETag` (put `http.etag()` inside
+    `cache`, so the tag is made once), and is a copy: middleware outside can change it freely.
+
+    Entries are found by path and query. Requests with an `Authorization` or `Cookie` header
+    never use or fill the cache, since the response may be about the user. With `key`, which
+    replaces that rule, you decide: return what tells responses apart (the user, the tenant, the
+    language) or `""` to skip the cache for the request. The cache is per process, and a handler
+    called by several requests at once, before the first response is kept, runs several times.
+    """
+    seconds = duration_seconds(ttl, "ttl")
+    if seconds == 0:
+        panic("`http.cache` needs a `ttl` of at least a second")
+    if max_bytes <= 0 or max_entry_bytes <= 0:
+        panic("`http.cache` needs `max_bytes` and `max_entry_bytes` above 0")
+    cache_policy = ResponseCache(float(seconds), max_bytes, max_entry_bytes, key, Mutex({}), Atomic(0))
+    return lambda req, next: cache_policy.handle(req, next)
+
+impl ResponseCache:
+    def handle(self, req: Request, next: Handler) -> Result[Response]:
+        if req.method != "GET":
+            return next(req)
+        name = ""
+        match self.key:
+            case Some(choose):
+                name = choose(req)
+            case None:
+                if req.header("Authorization") != None or req.header("Cookie") != None:
+                    return next(req)
+                name = req.path + "?" + req.query_string()
+        if name == "":
+            return next(req)
+        match self.lookup(name):
+            case Some(entry):
+                return Ok(self.replay(req, entry))
+            case None:
+                pass
+        result = next(req)
+        match result:
+            case Ok(response):
+                self.keep(name, response)
+            case Err(_):
+                pass
+        return result
+
+    def lookup(self, name: str) -> CachedResponse?:
+        with self.entries.lock() as entries:
+            match entries.get(name):
+                case Some(entry):
+                    entries.pop(name)
+                    if time.now() - entry.stored < self.ttl:
+                        entries[name] = entry
+                        return Some(entry)
+                    self.used.add(0 - entry.size)
+                case None:
+                    pass
+        return None
+
+    def replay(self, req: Request, entry: CachedResponse) -> Response:
+        response = Response(entry.status, entry.body, entry.content_type)
+        for header, value in entry.headers.items():
+            response.headers[header] = value
+        match entry.data:
+            case Some(data):
+                response.raw = RawBody.Data(data)
+            case None:
+                pass
+        response.headers["Age"] = str(int(time.now() - entry.stored))
+        match find_header(response, "ETag"):
+            case Some(tag):
+                match req.header("If-None-Match"):
+                    case Some(tags):
+                        if etag_matches(tags, tag):
+                            make_not_modified(response)
+                    case None:
+                        pass
+            case None:
+                pass
+        return response
+
+    def keep(self, name: str, response: Response):
+        if response.status != 200:
+            return
+        size = len(response.body) + len(name) + 256
+        held: bytes? = None
+        match response.raw:
+            case Some(RawBody.Streamed(_)):
+                return
+            case Some(RawBody.Data(data)):
+                held = Some(data)
+                size += len(data)
+            case None:
+                pass
+        for header, value in response.headers.items():
+            lowered = header.lower()
+            if lowered == "set-cookie" or lowered == "vary":
+                return
+            if lowered == "cache-control" and ("no-store" in value.lower() or "private" in value.lower()):
+                return
+            size += len(header) + len(value)
+        if size > self.max_entry:
+            return
+        entry = CachedResponse(response.status, response.body, response.content_type, frozendict(response.headers), held, time.now(), size)
+        with self.entries.lock() as entries:
+            match entries.get(name):
+                case Some(old):
+                    entries.pop(name)
+                    self.used.add(0 - old.size)
+                case None:
+                    pass
+            entries[name] = entry
+            total = self.used.add(size)
+            while total > self.max_bytes and len(entries) > 0:
+                oldest = ""
+                for existing in entries.keys():
+                    oldest = existing
+                    break
+                match entries.get(oldest):
+                    case Some(evicted):
+                        total = self.used.add(0 - evicted.size)
+                    case None:
+                        pass
+                entries.pop(oldest)
 
 # ---- rate limiting -------------------------------------------------------------------------
 

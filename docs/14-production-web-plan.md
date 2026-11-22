@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 22 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 23 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1336,6 +1336,12 @@ Done (D127):
 #### Milestone 23: response caching and ETags (about 1.5 days)
 
 `http.etag()`, `http.cache(...)` and `Response.cache_control`, as in 4.19.
+
+Done (D128):
+
+- `http.etag(weak)`, `http.cache(ttl, max_bytes, max_entry_bytes, key)` and `Response.cache_control(...)`.
+- Responses with `Set-Cookie`, `Vary`, `no-store` or `private` are not cached; requests with `Authorization` or `Cookie` bypass the cache unless a `key` is given.
+- Tests: `tests/run/response_cache.vi`; counts unchanged.
 
 #### Milestone 24: the router, if measured (about 2 days, or nothing)
 

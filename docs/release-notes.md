@@ -77,6 +77,8 @@ Not yet in a numbered release; `viper --version` still says 1.1.0.
 
 **GitHub sign-in** (milestone 22, D127): `auth.github()` signs users in with an OAuth app (`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_REDIRECT_URI`), reads the account from GitHub's API, and trusts only a verified primary email. `User.id` is `github:<number>`. `auth.github_for_tests()` is its test provider, and `examples/github_login` is an example.
 
+**ETags and response caching** (milestone 23, D128): `server.use(http.etag())` tags `GET` responses with a hash of the body and answers a matching `If-None-Match` with `304`. `server.use(http.cache(datetime.seconds(30)))` keeps `200` responses in memory, bounded in bytes with least-recently-used eviction, never for requests with `Authorization` or `Cookie` unless you give a `key`. `response.cache_control(max_age=..., public=True)` writes the header.
+
 **Signing in with Google** ([plan](13-google-oauth-plan.md), D100 to D104). The new `auth` module signs users in with their Google accounts from the credentials file the Google Cloud console makes, as Passport, Authlib or NextAuth do in other languages:
 
 - `provider.install(server)` adds the login, callback and logout routes and a signed session cookie. It uses the authorization code flow with PKCE, `state` and `nonce`, and checks the ID token's RS256 signature against Google's keys, which are cached.
