@@ -1340,6 +1340,21 @@ Section 4.17 of docs/14, and its decision 13:
 - **Tests:** `tests/run/csrf_protection.vi` (each `Sec-Fetch-Site` value, `Origin` missing, same, other port, cross, trusted and null, methods, `Authorization`, tokens valid, missing, wrong, forged, unsigned, from another server, in a header and a form field, and the template field). The Google tests pass unchanged.
 - **Not done:** tying the token to the session, rotating it on login, and a per-route opt-out.
 
+### D126. Generic OpenID Connect and presets (production web plan, milestone 21)
+
+Section 4.18 of docs/14 (decision 6 of docs/13, "endpoints are built in", now has its second half):
+
+- **`auth.oidc(issuer, name=...)` reads the discovery document** at `<issuer>/.well-known/openid-configuration` once, when the provider is made, and fails then (not at the first sign-in) if it is unreachable, has no endpoints, or names a different issuer. `{tenantid}` in the document's issuer stands for the tenant in the URL asked for, which is how Microsoft's `common`, `organizations` and `consumers` endpoints answer. Of the algorithms the document lists, those this module supports (RS256 and ES256) are kept; none left is an error.
+- **The ID token's issuer is the discovery document's, exactly.** For a templated issuer the token's `tid` claim fills the template, so a token from tenant A cannot claim tenant B's issuer. Google keeps its two accepted spellings.
+- **`crypto.verify_es256(x, y, message, signature)`** takes the JWK's coordinates and a raw 64-byte signature (the JWT form, not DER), builds the uncompressed point and verifies with ring's `ECDSA_P256_SHA256_FIXED`. A key's type must match the token's `alg`, so an RSA key never verifies an ES256 token or the other way round. `Key` has an `ec` flag; `fetch_keys` reads `EC`/`P-256` keys next to `RSA` ones.
+- **Google's user IDs are unchanged;** every other provider's are `<name>:<sub>`, so two providers cannot give one ID to two people and existing Google data keeps working. `User.provider` is the provider's name. The `id` of the one provider kept as it was is the only irregularity.
+- **Names decide the routes and cookies:** `/auth/<name>/login`, the callback path from the redirect URI, and a flow cookie `oauth-<name>` (Google's stays `oauth`), so sign-ins at two providers can be under way in one browser. The session cookie and the logout route are shared.
+- **`auth.install_all(server, providers)`** installs the first provider fully and only the login and callback routes of the others. It needs one `secret` for all of them: the session cookie is signed with a key derived from it, and a session from any provider is read by the one middleware. With the secrets differing, only the first provider's sign-ins would be recognised.
+- **Presets:** `microsoft(tenant="common")`, `okta(domain)` and `auth0(domain)` are calls of `oidc` with the issuers' URLs and their own environment variables (`MICROSOFT_CLIENT_ID`, ...). Microsoft's `require_verified_email` defaults to off, since its tokens carry no `email_verified`; the docs say to key on `User.id`. `hd` and `include_granted_scopes` are sent to Google only. Keycloak and others need only `oidc`.
+- **The scheme is `session`,** not `googleSession`, and the old name stays registered as an alias for one release (so a route naming it still works, and the document lists both). The compiler's `SIGN_IN_SCHEME` is `session`; `tests/http/secured_docs.vi`'s own scheme of that name became `sid`.
+- **Tests:** `sign_in_with_discovered_providers` in `crates/lang_cli/tests/oidc.rs` (a fake provider with a discovery document and an ES256 key made at run time; `tests/oidc/providers.vi`): an issuer that the document contradicts is refused, a token for another issuer is refused with the reason logged, Microsoft's tenant template accepts a matching `tid` and refuses another, two providers share a server and either's session works. The RS256 tests and `examples/google_login` pass unchanged. ES256 verification has a unit test in `lang_rt`.
+- **Not done:** refreshing ID tokens, `nonce`-less providers, `private_key_jwt` client authentication, and PS256.
+
 ## Risks
 
 | # | Risk | Likelihood | Impact | Mitigation |

@@ -1,0 +1,71 @@
+# Sign-in with providers found by discovery, signing with ES256 (docs/14, milestone 21).
+# crates/lang_cli/tests/oidc.rs runs the fake provider and passes its address; this program
+# serves an app with two providers, `fake` and a Microsoft-style one whose issuer holds the
+# tenant, and signs in to it over HTTP as a browser would.
+# expect: refused: yes
+# expect: fake: 302 | me: Ann Lee fake:1001 fake
+# expect: wrong issuer: 401 Sign-in failed
+# expect: microsoft: 302 | me: Ann Lee microsoft:1001 microsoft
+# expect: tenant that does not match: 401 Sign-in failed
+# expect: either session on /me: 200 200
+
+import http
+import auth
+import os
+
+def me(req: http.Request) -> Result[http.Response]:
+    user = auth.user(req).unwrap()
+    return http.text(f"{user.name} {user.id} {user.provider}")
+
+def app(idp: str, ports: Channel[int]):
+    server = http.Server()
+    port = server.bind("127.0.0.1:0").unwrap()
+    secret = "a shared session secret of more than thirty-two bytes"
+    # An issuer whose discovery document names another one is refused.
+    liar = auth.oidc(idp + "/liar", name="liar", client_id="c", client_secret="s3cret", redirect_uri=f"http://127.0.0.1:{port}/auth/liar/callback", secret=secret)
+    print("refused:", "yes" if liar.is_err() else "no")
+    first = auth.oidc(idp + "/ok", name="fake", client_id="fake-client", client_secret="s3cret", redirect_uri=f"http://127.0.0.1:{port}/auth/fake/callback", secret=secret).unwrap()
+    second = auth.microsoft(tenant="common", client_id="ms-client", client_secret="s3cret", redirect_uri=f"http://127.0.0.1:{port}/auth/microsoft/callback", secret=secret, base=idp).unwrap()
+    auth.install_all(server, [first, second])
+    server.get("/me", auth.protect(me))
+    ports.send(port)
+    server.serve()
+
+def cookie(response: http.ClientResponse, name: str) -> str:
+    for line in response.header("Set-Cookie").unwrap_or("").split("\n"):
+        if line.starts_with(name + "="):
+            return line.partition(";")[0]
+    return ""
+
+def sign_in(site: str, provider: str, scenario: str) -> http.ClientResponse:
+    login = http.get(site + f"/auth/{provider}/login").unwrap()
+    there = http.get(login.header("Location").unwrap() + "&login_hint=" + scenario).unwrap()
+    return http.fetch("GET", there.header("Location").unwrap(), headers={"Cookie": cookie(login, "oauth-" + provider)}).unwrap()
+
+def title(response: http.ClientResponse) -> str:
+    return response.text().unwrap().partition("<h1>")[2].partition("</h1>")[0]
+
+def whoami(site: str, response: http.ClientResponse) -> http.ClientResponse:
+    return http.fetch("GET", site + "/me", headers={"Cookie": cookie(response, "session")}).unwrap()
+
+def main():
+    idp = os.args()[1]
+    ports: Channel[int] = Channel(1)
+    spawn app(idp, ports)
+    site = f"http://127.0.0.1:{ports.recv().unwrap()}"
+
+    r = sign_in(site, "fake", "ok")
+    print("fake:", r.status, "| me:", whoami(site, r).text().unwrap())
+    fake_session = r
+
+    r = sign_in(site, "fake", "wrong_issuer")
+    print("wrong issuer:", r.status, title(r))
+
+    r = sign_in(site, "microsoft", "tenant")
+    print("microsoft:", r.status, "| me:", whoami(site, r).text().unwrap())
+    microsoft_session = r
+
+    r = sign_in(site, "microsoft", "tenant_lie")
+    print("tenant that does not match:", r.status, title(r))
+
+    print("either session on /me:", whoami(site, fake_session).status, whoami(site, microsoft_session).status)

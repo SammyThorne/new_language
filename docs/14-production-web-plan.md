@@ -1,6 +1,6 @@
 # Production web features: research and plan
 
-This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 20 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
+This is a plan, written so that an agent with no other context can carry it out. **Milestones 1 to 21 are built; the decisions in section 5 are confirmed.** Each milestone in section 6 ends with a "Done" note once built.
 
 It adds what a web service needs in production and that the language does not have yet:
 - CORS, static files, compression, request IDs, structured logs and access logs.
@@ -1309,6 +1309,12 @@ Done (D125):
   - Two providers on one server.
   - The Google example unchanged.
 - **Docs:** docs/05, the site, docs/13's section 4.7 ("later" items) marked done.
+
+Done (D126):
+
+- `auth.oidc(issuer, name=...)` with discovery, `crypto.verify_es256`, ES256 and RSA keys in the same key set, and issuer checks including `{tenantid}`; `microsoft`, `okta`, `auth0`, `oidc_for_tests`, and `install_all`.
+- `User.provider` and `<name>:<sub>` IDs (Google's unchanged); per-provider flow cookies; the scheme `session` with the `googleSession` alias.
+- Tests: `sign_in_with_discovered_providers` and `tests/oidc/providers.vi`; the Google tests pass unchanged.
 
 #### Milestone 22: GitHub (about 1.5 days; after 21)
 

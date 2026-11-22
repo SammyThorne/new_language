@@ -160,7 +160,7 @@
         },
         "security": [
           {
-            "googleSession": []
+            "session": []
           }
         ]
       }
@@ -259,6 +259,12 @@
         "scheme": "basic"
       },
       "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "session",
+        "description": "The session cookie. Sign in at /auth/google/login."
+      },
+      "sid": {
         "type": "apiKey",
         "in": "cookie",
         "name": "sid"

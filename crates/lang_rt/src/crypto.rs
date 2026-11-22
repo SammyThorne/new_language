@@ -185,6 +185,40 @@ pub unsafe extern "C-unwind" fn lrt_crypto_verify_rs256(
     i64::from(verify_rs256(n, e, message, sig))
 }
 
+/// Check an ES256 signature (ECDSA with P-256 and SHA-256, as JSON Web Signatures write it: the
+/// 32-byte `r` and `s` joined) with the public key's point coordinates `x` and `y`. Returns 1 if
+/// it is valid.
+///
+/// # Safety
+/// Each pointer and length pair describes a valid byte range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn lrt_crypto_verify_es256(
+    x_ptr: *const u8,
+    x_len: i64,
+    y_ptr: *const u8,
+    y_len: i64,
+    message_ptr: *const u8,
+    message_len: i64,
+    signature_ptr: *const u8,
+    signature_len: i64,
+) -> i64 {
+    let (x, y) = unsafe { (data(x_ptr, x_len), data(y_ptr, y_len)) };
+    let (message, sig) = unsafe { (data(message_ptr, message_len), data(signature_ptr, signature_len)) };
+    i64::from(verify_es256(x, y, message, sig))
+}
+
+fn verify_es256(x: &[u8], y: &[u8], message: &[u8], sig: &[u8]) -> bool {
+    if x.len() != 32 || y.len() != 32 || sig.len() != 64 {
+        return false;
+    }
+    // The uncompressed point: 0x04, then x and y.
+    let mut point = Vec::with_capacity(65);
+    point.push(4);
+    point.extend_from_slice(x);
+    point.extend_from_slice(y);
+    signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, point).verify(message, sig).is_ok()
+}
+
 /// Without leading zero bytes, which a key's numbers may have but `ring` refuses.
 fn strip(bytes: &[u8]) -> &[u8] {
     bytes.iter().position(|&b| b != 0).map_or(&[], |at| &bytes[at..])
@@ -198,6 +232,24 @@ fn verify_rs256(n: &[u8], e: &[u8], message: &[u8], sig: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn es256_signatures_are_checked() {
+        use ring::rand::SystemRandom;
+        use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap();
+        let public = pair.public_key().as_ref().to_vec();
+        let (x, y) = (&public[1..33], &public[33..65]);
+        let sig = pair.sign(&rng, b"header.claims").unwrap();
+        assert!(verify_es256(x, y, b"header.claims", sig.as_ref()));
+        assert!(!verify_es256(x, y, b"header.other", sig.as_ref()));
+        let mut bent = sig.as_ref().to_vec();
+        bent[10] ^= 1;
+        assert!(!verify_es256(x, y, b"header.claims", &bent));
+        assert!(!verify_es256(x, y, b"header.claims", &bent[..63]));
+    }
 
     #[test]
     fn base64_known_answers() {

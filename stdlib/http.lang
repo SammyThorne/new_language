@@ -2849,7 +2849,7 @@ impl Server:
                     if op.security != "":
                         for name in op.security.split(" "):
                             if name not in schemes:
-                                if name == "googleSession":
+                                if name == "session":
                                     panic(f"the route {op.method} {op.path} needs a signed-in user, but no sign-in provider is installed: call `provider.install(server)`")
                                 panic(f"the route {op.method} {op.path} names the security scheme `{name}`, which `docs` was not given")
                     id = unique_id(op.id, used_ids)

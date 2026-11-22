@@ -55,7 +55,7 @@ pub(super) struct AuthTypes {
 }
 
 /// The security scheme protected routes name in the API documentation; `auth` registers it.
-const SIGN_IN_SCHEME: &str = "googleSession";
+const SIGN_IN_SCHEME: &str = "session";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Scalar {

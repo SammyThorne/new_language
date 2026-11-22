@@ -441,7 +441,7 @@ def test_notes_signed_in():
 ### 4.7 Out of scope
 
 These are left out, and section 7 lists them for later:
-- Generic OpenID Connect providers: Microsoft, Okta, Auth0 and Keycloak through `auth.oidc(discovery_url, ...)`. The `Provider` struct holds the endpoints and the issuer, so this is a constructor, not a redesign.
+- Generic OpenID Connect providers: Microsoft, Okta, Auth0 and Keycloak through `auth.oidc(issuer, ...)`. **Done in docs/14 milestone 21 (D126).** The `Provider` struct holds the endpoints and the issuer, so this is a constructor, not a redesign.
 - GitHub sign-in, which is OAuth without OIDC.
 - Server-side sessions in Postgres.
 - Keeping and refreshing access tokens for calling Google APIs (decision 3).

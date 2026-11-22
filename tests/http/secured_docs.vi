@@ -73,7 +73,7 @@ def main():
         security={
             "token": http.bearer(format="opaque", description="Ask the owner for one."),
             "key": http.api_key("X-API-Key"),
-            "session": http.api_key("sid", cookie=True),
+            "sid": http.api_key("sid", cookie=True),
             "login": http.basic_auth(),
         },
     )

@@ -19,7 +19,9 @@ mod common;
 use common::{build_runtime, compiler, repo_root};
 use lang_names::SOURCE_EXTENSION;
 use ring::rand::SystemRandom;
-use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair, RsaPublicKeyComponents};
+use ring::signature::{
+    ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair, RSA_PKCS1_SHA256, RsaKeyPair, RsaPublicKeyComponents,
+};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
@@ -106,8 +108,27 @@ fn the_google_login_example_passes_its_tests() {
     );
 }
 
-/// One request, answered, and the connection closed.
+/// One request, answered by the fake of milestone 4, and the connection closed.
 fn serve(fake: &Fake, stream: TcpStream) {
+    serve_with(stream, |path, query, body| match path {
+        "/authorize" => authorize(&form(query)),
+        "/token" => token(fake, &form(&String::from_utf8(body).unwrap())),
+        "/keys" => {
+            std::thread::sleep(Duration::from_millis(300));
+            fake.fetches.fetch_add(1, Ordering::SeqCst);
+            (200, "Cache-Control: public, max-age=21600, must-revalidate, no-transform\r\n".to_string(), key_set(fake))
+        }
+        "/fetches" => (200, String::new(), fake.fetches.load(Ordering::SeqCst).to_string()),
+        "/rotate" => {
+            fake.current.store(1, Ordering::SeqCst);
+            (200, String::new(), "rotated".to_string())
+        }
+        _ => (404, String::new(), "{}".to_string()),
+    });
+}
+
+/// Reads one request, answers it with `handler(path, query, body)` as `(status, headers, body)`.
+fn serve_with(stream: TcpStream, handler: impl FnOnce(&str, &str, Vec<u8>) -> (u16, String, String)) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() {
@@ -131,21 +152,7 @@ fn serve(fake: &Fake, stream: TcpStream) {
     reader.read_exact(&mut body).unwrap();
     let target = request_line.split(' ').nth(1).unwrap_or("/");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    let (status, headers, body) = match path {
-        "/authorize" => authorize(&form(query)),
-        "/token" => token(fake, &form(&String::from_utf8(body).unwrap())),
-        "/keys" => {
-            std::thread::sleep(Duration::from_millis(300));
-            fake.fetches.fetch_add(1, Ordering::SeqCst);
-            (200, "Cache-Control: public, max-age=21600, must-revalidate, no-transform\r\n".to_string(), key_set(fake))
-        }
-        "/fetches" => (200, String::new(), fake.fetches.load(Ordering::SeqCst).to_string()),
-        "/rotate" => {
-            fake.current.store(1, Ordering::SeqCst);
-            (200, String::new(), "rotated".to_string())
-        }
-        _ => (404, String::new(), "{}".to_string()),
-    };
+    let (status, headers, body) = handler(path, query, body);
     let reason = if status == 302 { "Found" } else { "OK" };
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
@@ -294,4 +301,106 @@ fn pem_der(pem: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+// ---- discovery, ES256 and several providers (docs/14, milestone 21) --------------------------
+
+struct EcFake {
+    key: EcdsaKeyPair,
+    base: String,
+}
+
+/// `auth.oidc` finds a provider from its discovery document, checks ES256 tokens against its
+/// issuer, and two providers (one with Microsoft's `{tenantid}` issuer) share one server.
+#[test]
+fn sign_in_with_discovered_providers() {
+    build_runtime();
+    let root = repo_root();
+    let rng = SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+    let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let fake = Arc::new(EcFake { key, base: format!("http://127.0.0.1:{port}") });
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let fake = Arc::clone(&fake);
+            std::thread::spawn(move || serve_with(stream, |path, query, body| ec_route(&fake, path, query, body)));
+        }
+    });
+
+    let program = root.join(format!("tests/oidc/providers.{SOURCE_EXTENSION}"));
+    let source = std::fs::read_to_string(&program).unwrap();
+    let expected: String =
+        source.lines().filter_map(|l| l.strip_prefix("# expect: ")).map(|l| format!("{l}\n")).collect();
+    let output = Command::new(compiler())
+        .arg("run")
+        .arg(&program)
+        .arg(format!("http://127.0.0.1:{port}"))
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout == expected,
+        "{}\n--- expected\n{expected}--- actual\n{stdout}--- stderr\n{stderr}",
+        output.status
+    );
+    assert!(stderr.contains("its issuer is"), "the log does not give the issuer reason:\n{stderr}");
+}
+
+fn ec_route(fake: &EcFake, path: &str, query: &str, body: Vec<u8>) -> (u16, String, String) {
+    let base = &fake.base;
+    if let Some(prefix) = path.strip_suffix("/.well-known/openid-configuration") {
+        let issuer = match prefix {
+            "/common/v2.0" => format!("{base}/{{tenantid}}/v2.0"),
+            "/liar" => "https://evil.example".to_string(),
+            other => format!("{base}{other}"),
+        };
+        let doc = format!(
+            r#"{{"issuer":"{issuer}","authorization_endpoint":"{base}/authorize","token_endpoint":"{base}/token","jwks_uri":"{base}/keys","id_token_signing_alg_values_supported":["ES256","PS256"]}}"#
+        );
+        return (200, String::new(), doc);
+    }
+    match path {
+        "/authorize" => authorize(&form(query)),
+        "/token" => ec_token(fake, &form(&String::from_utf8(body).unwrap())),
+        "/keys" => {
+            let point = fake.key.public_key().as_ref();
+            let (x, y) = (base64url(&point[1..33]), base64url(&point[33..65]));
+            let set = format!(
+                r#"{{"keys":[{{"kty":"EC","crv":"P-256","alg":"ES256","use":"sig","kid":"ec1","x":"{x}","y":"{y}"}}]}}"#
+            );
+            (200, String::new(), set)
+        }
+        _ => (404, String::new(), "{}".to_string()),
+    }
+}
+
+fn ec_token(fake: &EcFake, fields: &[(String, String)]) -> (u16, String, String) {
+    let get = |name: &str| fields.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str()).unwrap_or("");
+    let code: Vec<&str> = get("code").split('.').collect();
+    let challenge = base64url(ring::digest::digest(&ring::digest::SHA256, get("code_verifier").as_bytes()).as_ref());
+    if code.len() != 3 || code[2] != challenge || get("client_secret") != "s3cret" {
+        return (400, String::new(), r#"{"error":"invalid_grant"}"#.to_string());
+    }
+    let (scenario, nonce, client) = (code[0], code[1], get("client_id"));
+    let base = &fake.base;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let (issuer, tid) = match scenario {
+        "wrong_issuer" => ("https://evil.example".to_string(), ""),
+        "tenant" => (format!("{base}/t-42/v2.0"), "t-42"),
+        "tenant_lie" => (format!("{base}/t-42/v2.0"), "t-43"),
+        _ => (format!("{base}/ok"), ""),
+    };
+    let claims = format!(
+        r#"{{"iss":"{issuer}","aud":"{client}","sub":"1001","tid":"{tid}","email":"ann@example.com","email_verified":true,"name":"Ann Lee","iat":{now},"exp":{},"nonce":"{nonce}"}}"#,
+        now + 3600
+    );
+    let message =
+        format!("{}.{}", base64url(br#"{"alg":"ES256","kid":"ec1","typ":"JWT"}"#), base64url(claims.as_bytes()));
+    let signature = fake.key.sign(&SystemRandom::new(), message.as_bytes()).unwrap();
+    let id_token = format!("{message}.{}", base64url(signature.as_ref()));
+    (200, String::new(), format!(r#"{{"access_token":"at","expires_in":3599,"id_token":"{id_token}"}}"#))
 }

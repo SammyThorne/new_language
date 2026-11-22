@@ -43,7 +43,9 @@ const USER_KEY = "auth.user"
 const LOGIN_KEY = "auth.login"
 # The security scheme of protected routes in the API documentation (docs/12). The compiler
 # names it too, in `check/http.rs`.
-const SCHEME = "googleSession"
+const SCHEME = "session"
+# The name the scheme had when Google was the only provider; kept as an alias.
+const OLD_SCHEME = "googleSession"
 
 # ---- errors -------------------------------------------------------------------------------
 
@@ -106,6 +108,11 @@ pub struct Endpoints:
     authorize: str = "https://accounts.google.com/o/oauth2/v2/auth"
     token: str = "https://oauth2.googleapis.com/token"
     keys: str = "https://www.googleapis.com/oauth2/v3/certs"
+    # The issuer ID tokens must name, exactly; "" for Google's two spellings. It may hold
+    # `{tenantid}`, which a token's `tid` claim fills in (Microsoft's multi-tenant endpoints).
+    issuer: str = ""
+    # The signing algorithms accepted, separated by spaces: `RS256`, `ES256`.
+    algorithms: str = "RS256"
 
 # ---- the provider -------------------------------------------------------------------------
 
@@ -135,12 +142,16 @@ pub struct Provider:
     priv secure: bool
     priv endpoints: Endpoints
     priv key_cache: Mutex[KeyCache]
+    priv name: str
+    priv title: str
 
 @frozen
 struct Key:
-    """An RSA public key of the JSON Web Key Set: its modulus and exponent."""
+    """A public key of the JSON Web Key Set: an RSA key's modulus and exponent, or (`ec`) a P-256
+    key's `x` and `y`, in the same two fields."""
     n: bytes
     e: bytes
+    ec: bool = False
 
 struct KeyCache:
     keys: frozendict[str, Key]
@@ -231,6 +242,260 @@ pub def google_for_tests(
         case Err(problem):
             panic(problem.message)
 
+pub def oidc(
+    issuer: str,
+    name: str = "oidc",
+    title: str = "",
+    client_id: str = "",
+    client_secret: str = "",
+    redirect_uri: str = "",
+    secret: str? = None,
+    scopes: list[str] = ["openid", "email", "profile"],
+    allowed_domains: list[str] = [],
+    allowed_emails: list[str] = [],
+    require_verified_email: bool = True,
+    session_days: int = 7,
+    login_path: str = "",
+    logout_path: str = "/auth/logout",
+    after_logout: str = "/",
+    on_login: LoginHook? = None,
+) -> Result[Provider, AuthError]:
+    """
+    Set up sign-in with any OpenID Connect provider, found from `issuer`: the provider's
+    discovery document at `<issuer>/.well-known/openid-configuration` names its endpoints and
+    signing keys. ID tokens must name exactly that issuer and be signed with RS256 or ES256.
+
+    `name` is the provider's short name: it is `User.provider`, the routes are
+    `/auth/<name>/login` and the callback's path comes from `redirect_uri`, and the client is
+    read from `<NAME>_CLIENT_ID` and `<NAME>_CLIENT_SECRET` unless `client_id=` and
+    `client_secret=` are given. Users' `id`s are `<name>:<sub>`. The other arguments are those of
+    `google`.
+    """
+    prefix = name.upper().replace("-", "_")
+    id = client_id
+    if id == "":
+        id = os.getenv(prefix + "_CLIENT_ID").unwrap_or("")
+    password = client_secret
+    if password == "":
+        password = os.getenv(prefix + "_CLIENT_SECRET").unwrap_or("")
+    if id == "" or password == "":
+        return Err(AuthError(f"no {name} client: give `client_id=` and `client_secret=`, or set {prefix}_CLIENT_ID and {prefix}_CLIENT_SECRET"))
+    redirect = redirect_uri
+    if redirect == "":
+        redirect = os.getenv(prefix + "_REDIRECT_URI").unwrap_or("")
+    if redirect == "":
+        return Err(AuthError(f"give `redirect_uri=` (or set {prefix}_REDIRECT_URI): the one registered for the client with {name}"))
+    endpoints = discover(issuer)?
+    return make_provider(
+        id,
+        password,
+        redirect,
+        secret,
+        scopes,
+        allowed_domains,
+        allowed_emails,
+        require_verified_email,
+        session_days,
+        login_path if login_path != "" else f"/auth/{name}/login",
+        logout_path,
+        after_logout,
+        on_login,
+        endpoints,
+        name,
+        title if title != "" else name,
+    )
+
+pub def oidc_for_tests(
+    name: str = "oidc",
+    issuer: str = "https://idp.test",
+    endpoints: Endpoints? = None,
+    secret: str = "a session secret for tests, never for a real program",
+    redirect_uri: str = "",
+    allowed_domains: list[str] = [],
+    allowed_emails: list[str] = [],
+    require_verified_email: bool = True,
+    on_login: LoginHook? = None,
+) -> Provider:
+    """`oidc` for tests: no discovery, no environment. Point `endpoints` at a fake provider; its
+    `issuer` is `issuer`, and its `algorithms` may be `"RS256 ES256"`."""
+    chosen = endpoints.unwrap_or(Endpoints("https://idp.test/authorize", "https://idp.test/token", "", issuer, "RS256 ES256"))
+    redirect = redirect_uri if redirect_uri != "" else f"http://localhost:8080/auth/{name}/callback"
+    match make_provider(
+        f"test-client-{name}",
+        "test-secret",
+        redirect,
+        Some(secret),
+        ["openid", "email", "profile"],
+        allowed_domains,
+        allowed_emails,
+        require_verified_email,
+        7,
+        f"/auth/{name}/login",
+        "/auth/logout",
+        "/",
+        on_login,
+        chosen,
+        name,
+        name,
+    ):
+        case Ok(provider):
+            return provider
+        case Err(problem):
+            panic(problem.message)
+
+pub def microsoft(
+    tenant: str = "common",
+    client_id: str = "",
+    client_secret: str = "",
+    redirect_uri: str = "",
+    secret: str? = None,
+    allowed_domains: list[str] = [],
+    allowed_emails: list[str] = [],
+    require_verified_email: bool = False,
+    session_days: int = 7,
+    on_login: LoginHook? = None,
+    base: str = "https://login.microsoftonline.com",
+) -> Result[Provider, AuthError]:
+    """
+    Sign-in with Microsoft (Entra ID). `tenant` is a tenant's ID or domain, or `"common"` (any
+    work or personal account), `"organizations"` or `"consumers"`; with those, each token names
+    its own tenant (`tid`) in its issuer, which is checked against that tenant's. Microsoft does
+    not say whether an email is verified, so `require_verified_email` is off: key records on
+    `User.id`, never on the email. The client comes from `MICROSOFT_CLIENT_ID` and
+    `MICROSOFT_CLIENT_SECRET`. `base` is
+    the sign-in host; a test points it at a fake.
+    """
+    return oidc(
+        f"{base}/{tenant}/v2.0",
+        name="microsoft",
+        title="Microsoft",
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=redirect_uri,
+        secret=secret,
+        allowed_domains=allowed_domains,
+        allowed_emails=allowed_emails,
+        require_verified_email=require_verified_email,
+        session_days=session_days,
+        on_login=on_login,
+    )
+
+pub def okta(
+    domain: str,
+    server: str = "default",
+    client_id: str = "",
+    client_secret: str = "",
+    redirect_uri: str = "",
+    secret: str? = None,
+    allowed_domains: list[str] = [],
+    allowed_emails: list[str] = [],
+    session_days: int = 7,
+    on_login: LoginHook? = None,
+) -> Result[Provider, AuthError]:
+    """Sign-in with Okta: `domain` is the org's, such as `"dev-123456.okta.com"`, and `server`
+    its authorization server (`"default"`). The client comes from `OKTA_CLIENT_ID` and
+    `OKTA_CLIENT_SECRET`."""
+    return oidc(
+        f"https://{domain}/oauth2/{server}",
+        name="okta",
+        title="Okta",
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=redirect_uri,
+        secret=secret,
+        allowed_domains=allowed_domains,
+        allowed_emails=allowed_emails,
+        session_days=session_days,
+        on_login=on_login,
+    )
+
+pub def auth0(
+    domain: str,
+    client_id: str = "",
+    client_secret: str = "",
+    redirect_uri: str = "",
+    secret: str? = None,
+    allowed_domains: list[str] = [],
+    allowed_emails: list[str] = [],
+    session_days: int = 7,
+    on_login: LoginHook? = None,
+) -> Result[Provider, AuthError]:
+    """Sign-in with Auth0: `domain` is the tenant's, such as `"example.eu.auth0.com"`. The
+    client comes from `AUTH0_CLIENT_ID` and `AUTH0_CLIENT_SECRET`."""
+    return oidc(
+        f"https://{domain}/",
+        name="auth0",
+        title="Auth0",
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=redirect_uri,
+        secret=secret,
+        allowed_domains=allowed_domains,
+        allowed_emails=allowed_emails,
+        session_days=session_days,
+        on_login=on_login,
+    )
+
+pub def install_all(server: http.Server, providers: list[Provider], csrf: bool = True):
+    """
+    Install several providers on one server: one session middleware and one logout route, and a
+    login and callback route for each. They must share one `secret`, so that a session from any
+    of them reads the same; give each its own `redirect_uri` path and `login_path` (the
+    defaults differ by name).
+    """
+    if len(providers) == 0:
+        return
+    providers[0].install(server, csrf)
+    for index in range(1, len(providers)):
+        providers[index].install_routes(server)
+
+def discover(issuer: str) -> Result[Endpoints, AuthError]:
+    """The endpoints from an issuer's discovery document, checked to name the issuer asked for."""
+    base = issuer
+    if base.ends_with("/"):
+        base = base[:len(base) - 1]
+    url = base + "/.well-known/openid-configuration"
+    match http.get(url):
+        case Ok(answer):
+            if not answer.ok():
+                return Err(AuthError(f"{url} answered {answer.status}: is {issuer} an OpenID Connect issuer?"))
+            match answer.json():
+                case Ok(doc):
+                    named = doc["issuer"].as_str().unwrap_or("")
+                    if not issuer_names(issuer, named):
+                        return Err(AuthError(f"{url} says its issuer is {named!r}, not {issuer!r}: refusing it"))
+                    authorize = doc["authorization_endpoint"].as_str().unwrap_or("")
+                    token = doc["token_endpoint"].as_str().unwrap_or("")
+                    keys = doc["jwks_uri"].as_str().unwrap_or("")
+                    if authorize == "" or token == "" or keys == "":
+                        return Err(AuthError(f"{url} lacks an authorization_endpoint, token_endpoint or jwks_uri"))
+                    algorithms: list[str] = []
+                    match doc["id_token_signing_alg_values_supported"]:
+                        case json.Value.Array(items):
+                            for item in items:
+                                alg = item.as_str().unwrap_or("")
+                                if alg == "RS256" or alg == "ES256":
+                                    algorithms.append(alg)
+                        case _:
+                            algorithms = ["RS256"]
+                    if len(algorithms) == 0:
+                        return Err(AuthError(f"{url} signs ID tokens only with algorithms this module does not support (it supports RS256 and ES256)"))
+                    return Endpoints(authorize, token, keys, named, " ".join(algorithms))
+                case Err(problem):
+                    return Err(AuthError(f"{url} is not JSON: {problem.message()}"))
+        case Err(problem):
+            return Err(AuthError(f"cannot read {url}: {problem.message()}"))
+
+def issuer_names(asked: str, named: str) -> bool:
+    """Whether a discovery document's issuer is the one asked for; a `{tenantid}` template
+    stands for the tenant named in the URL asked for."""
+    if named == asked:
+        return True
+    if "{tenantid}" not in named:
+        return False
+    before, _, after = named.partition("{tenantid}")
+    return asked.starts_with(before) and asked.ends_with(after)
+
 struct Client:
     id: str
     secret: str
@@ -310,17 +575,19 @@ def make_provider(
     after_logout: str,
     on_login: LoginHook?,
     endpoints: Endpoints,
+    name: str = "google",
+    title: str = "Google",
 ) -> Result[Provider, AuthError]:
     secure, callback_path = split_redirect_uri(redirect_uri)?
     if "openid" not in scopes:
-        return Err(AuthError("the scopes must include \"openid\", which asks Google who the user is"))
+        return Err(AuthError(f"the scopes must include \"openid\", which asks {title} who the user is"))
     if require_verified_email and "email" not in scopes:
         return Err(AuthError("`require_verified_email` needs the \"email\" scope; add it, or pass `require_verified_email=False`"))
     if session_days < 1:
         return Err(AuthError(f"`session_days` must be at least 1, not {session_days}"))
-    for name, path in [("login_path", login_path), ("logout_path", logout_path), ("after_logout", after_logout)]:
+    for label, path in [("login_path", login_path), ("logout_path", logout_path), ("after_logout", after_logout)]:
         if not path.starts_with("/") or path.starts_with("//"):
-            return Err(AuthError(f"`{name}` must be a path on this site, starting with one `/`: {path!r}"))
+            return Err(AuthError(f"`{label}` must be a path on this site, starting with one `/`: {path!r}"))
     if callback_path == login_path or callback_path == logout_path:
         return Err(AuthError(f"the redirect URI's path {callback_path} is also the login or logout route; register another, such as /auth/google/callback"))
     master = session_secret(secret, secure)?
@@ -329,6 +596,8 @@ def make_provider(
     emails = tuple([email.lower() for email in allowed_emails])
     session_cookie = "__Host-session" if secure else "session"
     flow_cookie = "__Host-oauth" if secure else "oauth"
+    if name != "google":
+        flow_cookie = flow_cookie + "-" + name
     return Provider(
         client_id,
         client_secret,
@@ -350,6 +619,8 @@ def make_provider(
         secure,
         endpoints,
         Mutex(KeyCache(frozendict(no_keys), 0.0)),
+        name,
+        title,
     )
 
 def split_redirect_uri(uri: str) -> Result[tuple[bool, str], AuthError]:
@@ -452,11 +723,17 @@ impl Provider:
         provider = self
         if csrf:
             server.use(http.csrf())
-        server.security_scheme(SCHEME, http.api_key(self.session_cookie, cookie=True, description=f"The session cookie. Sign in at {self.login_path}."))
+        scheme = http.api_key(self.session_cookie, cookie=True, description=f"The session cookie. Sign in at {self.login_path}.")
+        server.security_scheme(SCHEME, scheme)
+        server.security_scheme(OLD_SCHEME, scheme)
         server.use(lambda req, next: provider.middleware(req, next))
+        self.install_routes(server)
+        server.post(self.logout_path, lambda req: provider.logout(req))
+
+    def install_routes(self, server: http.Server):
+        provider = self
         server.get(self.login_path, lambda req: provider.login(req))
         server.get(self.callback_path, lambda req: provider.callback(req))
-        server.post(self.logout_path, lambda req: provider.logout(req))
 
     def login_url(self, next: str = "/") -> str:
         """The login route's URL, which brings the user back to `next` (a path on this site)."""
@@ -516,9 +793,10 @@ impl Provider:
             ("nonce", nonce),
             ("code_challenge", challenge),
             ("code_challenge_method", "S256"),
-            ("include_granted_scopes", "true"),
         ]
-        if len(self.allowed_domains) == 1:
+        if self.name == "google":
+            params.append(("include_granted_scopes", "true"))
+        if self.name == "google" and len(self.allowed_domains) == 1:
             params.append(("hd", self.allowed_domains[0]))
         joiner = "&" if "?" in self.endpoints.authorize else "?"
         response = http.redirect(self.endpoints.authorize + joiner + http.form_encode(params))
@@ -553,7 +831,7 @@ impl Provider:
         """The rest of the callback, once the flow cookie is read."""
         match req.query("error"):
             case Some(reason):
-                return self.page(401, "Sign-in cancelled", f"Google did not sign you in ({reason}).", True)
+                return self.page(401, "Sign-in cancelled", f"{self.title} did not sign you in ({reason}).", True)
             case None:
                 pass
         state = req.query("state").unwrap_or("")
@@ -561,14 +839,14 @@ impl Provider:
             return self.page(400, "Sign-in expired", "This sign-in does not match the one this browser started.", True)
         match req.query("iss"):
             case Some(issuer):
-                if issuer != ISSUER:
+                if not self.issuer_matches(issuer, ""):
                     log.warn(f"sign-in: the callback names the issuer {issuer!r}")
                     return self.page(401, "Sign-in failed", "Could not verify the sign-in.", True)
             case None:
                 pass
         code = req.query("code").unwrap_or("")
         if code == "":
-            return self.page(400, "Sign-in failed", "Google sent no authorization code.", True)
+            return self.page(400, "Sign-in failed", f"{self.title} sent no authorization code.", True)
         fields = [
             ("grant_type", "authorization_code"),
             ("code", code),
@@ -585,7 +863,7 @@ impl Provider:
                         reply = value
                     case Err(problem):
                         log.warn(f"sign-in: the token endpoint answered {answer.status} without JSON: {problem.message()}")
-                        return self.page(502, "Sign-in failed", "Google could not be reached. Try again later.", True)
+                        return self.page(502, "Sign-in failed", f"{self.title} could not be reached. Try again later.", True)
                 if not answer.ok():
                     error = reply["error"].as_str().unwrap_or("")
                     if error == "invalid_grant":
@@ -594,10 +872,10 @@ impl Provider:
                     if detail != "":
                         error = f"{error}: {detail}"
                     log.error(f"sign-in: the token endpoint refused the code: {answer.status} {error}")
-                    return self.page(502, "Sign-in failed", "Google refused the sign-in. Try again later.", True)
+                    return self.page(502, "Sign-in failed", f"{self.title} refused the sign-in. Try again later.", True)
             case Err(problem):
                 log.warn(f"sign-in: the token request failed: {problem.message()}")
-                return self.page(502, "Sign-in failed", "Google could not be reached. Try again later.", True)
+                return self.page(502, "Sign-in failed", f"{self.title} could not be reached. Try again later.", True)
         id_token = reply["id_token"].as_str().unwrap_or("")
         claims = json.Value.Null
         match self.check_id_token(id_token, flow.nonce):
@@ -606,13 +884,13 @@ impl Provider:
             case Err(reason):
                 log.warn(f"sign-in: the ID token was refused: {reason}")
                 return self.page(401, "Sign-in failed", "Could not verify the sign-in.", True)
-        user = user_of(claims)
+        user = user_of(claims, self.name)
         if self.require_verified_email and not user.email_verified:
-            return self.page(403, "Sign-in refused", f"The Google account {user.email} has no verified email address.", False)
+            return self.page(403, "Sign-in refused", f"The {self.title} account {user.email} has no verified email address.", False)
         if len(self.allowed_domains) > 0 and user.domain.lower() not in self.allowed_domains:
-            return self.page(403, "Sign-in refused", f"The Google account {user.email} cannot sign in here.", False)
+            return self.page(403, "Sign-in refused", f"The {self.title} account {user.email} cannot sign in here.", False)
         if len(self.allowed_emails) > 0 and user.email.lower() not in self.allowed_emails:
-            return self.page(403, "Sign-in refused", f"The Google account {user.email} cannot sign in here.", False)
+            return self.page(403, "Sign-in refused", f"The {self.title} account {user.email} cannot sign in here.", False)
         match self.on_login:
             case Some(hook):
                 expires_in = reply["expires_in"].as_float().unwrap_or(0.0)
@@ -625,7 +903,7 @@ impl Provider:
                 )
                 match hook(user, tokens):
                     case Ok(changed):
-                        user = User(user.id, changed.email, changed.email_verified, changed.name, changed.given_name, changed.family_name, changed.picture, changed.domain, changed.provider)
+                        user = User(user.id, changed.email, changed.email_verified, changed.name, changed.given_name, changed.family_name, changed.picture, changed.domain, user.provider)
                     case Err(refused):
                         return self.page(refused.status, "Sign-in refused", refused.message, False)
             case None:
@@ -641,15 +919,25 @@ impl Provider:
             return Err("it is not a JSON Web Token")
         header = decode_part(parts[0])
         claims = decode_part(parts[1])
-        if header["alg"].as_str() != Some("RS256"):
-            return Err(f"its algorithm is {header['alg']}, not RS256")
+        algorithms = self.endpoints.algorithms.split()
+        alg = header["alg"].as_str().unwrap_or("")
+        if alg not in algorithms:
+            if len(algorithms) == 1:
+                return Err(f"its algorithm is {header['alg']}, not {algorithms[0]}")
+            return Err(f"its algorithm is {header['alg']}, not one of {', '.join(algorithms)}")
         if self.endpoints.keys != "":
             key = self.key(header["kid"].as_str().unwrap_or(""))?
             signature = crypto.base64url_decode(parts[2]).unwrap_or("".encode())
-            if not crypto.verify_rs256(key.n, key.e, (parts[0] + "." + parts[1]).encode(), signature):
+            signed = (parts[0] + "." + parts[1]).encode()
+            valid = False
+            if alg == "ES256":
+                valid = key.ec and crypto.verify_es256(key.n, key.e, signed, signature)
+            else:
+                valid = not key.ec and crypto.verify_rs256(key.n, key.e, signed, signature)
+            if not valid:
                 return Err("its signature is not valid")
         issuer = claims["iss"].as_str().unwrap_or("")
-        if issuer != ISSUER and issuer != "accounts.google.com":
+        if not self.issuer_matches(issuer, claims["tid"].as_str().unwrap_or("")):
             return Err(f"its issuer is {issuer!r}")
         match claims["aud"]:
             case json.Value.Str(audience):
@@ -673,6 +961,17 @@ impl Provider:
             return Err("it names no account (`sub`)")
         return claims
 
+    def issuer_matches(self, issuer: str, tenant: str) -> bool:
+        """Whether a token's `iss` (or the callback's) is the issuer this provider trusts."""
+        expected = self.endpoints.issuer
+        if expected == "":
+            return issuer == ISSUER or issuer == "accounts.google.com"
+        if "{tenantid}" in expected:
+            if tenant == "":
+                return False
+            return issuer == expected.replace("{tenantid}", tenant)
+        return issuer == expected
+
     def key(self, id: str) -> Result[Key, str]:
         """The signing key `id` (a token's `kid`), from the cached key set. The set is fetched
         when the cache has expired, and once more for a key it does not have, since Google adds
@@ -692,7 +991,7 @@ impl Provider:
                 case Some(found):
                     return found
                 case None:
-                    return Err(f"its key {id!r} is not one of Google's")
+                    return Err(f"its key {id!r} is not one of {self.title}'s")
 
     def logout(self, req: http.Request) -> Result[http.Response]:
         match req.header("Origin"):
@@ -726,13 +1025,21 @@ def fetch_keys(url: str) -> Result[tuple[frozendict[str, Key], float], str]:
                         case json.Value.Array(items):
                             for item in items:
                                 kty = item["kty"].as_str().unwrap_or("")
-                                alg = item["alg"].as_str().unwrap_or("RS256")
+                                alg = item["alg"].as_str().unwrap_or("")
                                 use = item["use"].as_str().unwrap_or("sig")
                                 id = item["kid"].as_str().unwrap_or("")
-                                n = crypto.base64url_decode(item["n"].as_str().unwrap_or(""))
-                                e = crypto.base64url_decode(item["e"].as_str().unwrap_or(""))
-                                if kty == "RSA" and alg == "RS256" and use == "sig" and n != None and e != None:
-                                    keys[id] = Key(n.unwrap(), e.unwrap())
+                                if use != "sig":
+                                    continue
+                                if kty == "RSA" and (alg == "RS256" or alg == ""):
+                                    n = crypto.base64url_decode(item["n"].as_str().unwrap_or(""))
+                                    e = crypto.base64url_decode(item["e"].as_str().unwrap_or(""))
+                                    if n != None and e != None:
+                                        keys[id] = Key(n.unwrap(), e.unwrap())
+                                if kty == "EC" and item["crv"].as_str() == Some("P-256") and (alg == "ES256" or alg == ""):
+                                    x = crypto.base64url_decode(item["x"].as_str().unwrap_or(""))
+                                    y = crypto.base64url_decode(item["y"].as_str().unwrap_or(""))
+                                    if x != None and y != None:
+                                        keys[id] = Key(x.unwrap(), y.unwrap(), True)
                         case _:
                             return Err(f"the signing keys from {url} are not a JSON Web Key Set")
                     return (frozendict(keys), max_age(response.header("Cache-Control").unwrap_or("")))
@@ -760,7 +1067,7 @@ def decode_part(text: str) -> json.Value:
         case None:
             return json.Value.Null
 
-def user_of(claims: json.Value) -> User:
+def user_of(claims: json.Value, provider: str) -> User:
     verified = False
     match claims["email_verified"]:
         case json.Value.Bool(flag):
@@ -769,8 +1076,13 @@ def user_of(claims: json.Value) -> User:
             verified = text == "true"
         case _:
             pass
+    subject = claims["sub"].as_str().unwrap_or("")
+    if provider != "google":
+        # Google's IDs stay as they were; the others are written `<provider>:<subject>`, so that
+        # two providers never give one ID to two people.
+        subject = provider + ":" + subject
     return User(
-        claims["sub"].as_str().unwrap_or(""),
+        subject,
         claims["email"].as_str().unwrap_or(""),
         verified,
         claims["name"].as_str().unwrap_or(""),
@@ -778,7 +1090,7 @@ def user_of(claims: json.Value) -> User:
         claims["family_name"].as_str().unwrap_or(""),
         claims["picture"].as_str().unwrap_or(""),
         claims["hd"].as_str().unwrap_or(""),
-        "google",
+        provider,
     )
 
 def safe_next(target: str) -> str:

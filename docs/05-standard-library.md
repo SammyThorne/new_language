@@ -963,6 +963,24 @@ viper migrate status --dir db/migrations --database postgres://app:secret@localh
 
 `migrate new` takes the number after the highest in the directory, which it creates if need be. `migrate status` compiles and runs a small program that calls the module, so it needs the same system libraries as any program, and it exits with 1 when the files and the database disagree. It does not apply anything: do that from the program, at startup, or from a release step. A path given to `--database` that does not exist is created, as `sqlite.open` would.
 
+## Sign-in with any OpenID Connect provider (docs/14, milestone 21)
+
+```python
+google = auth.google().unwrap()
+microsoft = auth.microsoft(tenant="common", redirect_uri="https://example.com/auth/microsoft/callback").unwrap()
+okta = auth.okta("dev-123456.okta.com", redirect_uri="https://example.com/auth/okta/callback").unwrap()
+auth.install_all(server, [google, microsoft, okta])
+```
+
+`auth.oidc(issuer, name="keycloak", client_id="", client_secret="", redirect_uri="", ...)` reads `<issuer>/.well-known/openid-configuration` once when it is called, and returns an `AuthError` if the document cannot be read, lacks endpoints, or names another issuer. ID tokens must name that issuer and be signed with RS256 or ES256 by a key in the provider's key set. `name` is the provider's short name: the routes are `/auth/<name>/login` and the callback's path comes from `redirect_uri` (register it with the provider), `User.provider` is the name, and the client is read from `<NAME>_CLIENT_ID`, `<NAME>_CLIENT_SECRET` and `<NAME>_REDIRECT_URI` when not given. The other arguments (`scopes`, `allowed_domains`, `allowed_emails`, `require_verified_email`, `session_days`, `after_logout`, `on_login`) are those of `google`.
+
+- `auth.microsoft(tenant="common")`: `tenant` is a tenant ID or domain, `common`, `organizations` or `consumers`. A multi-tenant endpoint's tokens name their own tenant (`tid`) in the issuer, and that is checked. Microsoft's tokens carry no verified-email claim, so `require_verified_email` is off: key records on `User.id`.
+- `auth.okta(domain, server="default")` and `auth.auth0(domain)`.
+- `auth.oidc_for_tests(name=...)` is `oidc` without discovery or environment, for tests: `provider.test_cookie(...)` and `endpoints=` pointing at a fake work as with `google_for_tests`.
+- **`install_all(server, providers)`** installs one session middleware and logout route and each provider's login and callback. Give the providers one `secret` (or `SESSION_SECRET`): a session from any of them is then read by all. Their routes must differ, which the names ensure.
+- **`User.id`** is the provider's `sub` for Google (as before) and `<name>:<sub>` for the others, so two providers cannot give one ID to two people. Key on `(provider, id)` or just `id`, never on the email.
+- The security scheme in the API documentation is `session`; `googleSession` is kept for one release as an alias.
+
 ## CSRF protection (docs/14, milestone 20)
 
 `server.use(http.csrf(trusted_origins=[], tokens=False, secret=None, secure=False))` stops a page on another site from making a visitor's browser change things on yours with the visitor's cookies. It looks only at requests that change things (every method but `GET`, `HEAD` and `OPTIONS`) and answers a 403 (made like any error, so `on_error` applies) when:

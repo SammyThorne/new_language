@@ -269,10 +269,10 @@ fn security_schemes_and_tags_match_the_service() {
     assert_eq!(tags, ["notes", "admin"]);
     assert_eq!(
         doc.at(&["components", "securitySchemes"]).keys(),
-        ["googleSession", "key", "login", "session", "token"]
+        ["googleSession", "key", "login", "session", "sid", "token"]
     );
     assert_eq!(doc.at(&["components", "securitySchemes", "googleSession", "name"]).as_str(), Some("session"));
-    assert_eq!(doc.at(&["components", "securitySchemes", "session", "in"]).as_str(), Some("cookie"));
+    assert_eq!(doc.at(&["components", "securitySchemes", "sid", "in"]).as_str(), Some("cookie"));
     assert!(doc.at(&["paths", "/notes", "get"]).get("security").is_none(), "reading is open");
     let needs = |path: &str, method: &str| -> Vec<String> {
         match doc.at(&["paths", path, method, "security"]) {
@@ -282,7 +282,7 @@ fn security_schemes_and_tags_match_the_service() {
     };
     assert_eq!(needs("/notes", "post"), ["token"]);
     assert_eq!(needs("/report", "get"), ["key", "token"]);
-    assert_eq!(needs("/me", "get"), ["googleSession"], "an `auth.User` parameter protects the route");
+    assert_eq!(needs("/me", "get"), ["session"], "an `auth.User` parameter protects the route");
 
     // The service does what the document says, with each status declared.
     let token = [("Authorization", "Bearer secret")];

@@ -32,6 +32,9 @@ def base64_encode_raw(data: str, url: int) -> str
 @extern("lrt_crypto_base64_decode")
 def base64_decode_raw(text: str, url: int) -> str?
 
+@extern("lrt_crypto_verify_es256")
+def verify_es256_raw(x: str, y: str, message: str, signature: str) -> int
+
 @extern("lrt_crypto_verify_rs256")
 def verify_rs256_raw(modulus: str, exponent: str, message: str, signature: str) -> int
 
@@ -94,3 +97,9 @@ pub def verify_rs256(modulus: bytes, exponent: bytes, message: bytes, signature:
     big-endian: a JSON Web Key's `n` and `e`, base64url-decoded. Keys of 2048 to 8192 bits;
     anything else, or a malformed key, is `False`."""
     return verify_rs256_raw(__bytes_data(modulus), __bytes_data(exponent), __bytes_data(message), __bytes_data(signature)) == 1
+
+pub def verify_es256(x: bytes, y: bytes, message: bytes, signature: bytes) -> bool:
+    """Whether `signature` is a valid ES256 signature (ECDSA over P-256 with SHA-256) of
+    `message`, as a JSON Web Token carries it: the 64 bytes of `r` and `s` joined. `x` and `y`
+    are the 32-byte coordinates of the public key, the `x` and `y` of a JSON Web Key."""
+    return verify_es256_raw(__bytes_data(x), __bytes_data(y), __bytes_data(message), __bytes_data(signature)) == 1
