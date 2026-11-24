@@ -865,9 +865,14 @@ impl Provider:
         issued = now()
         return sign(json.encode(Session(user, issued, issued + self.session_seconds)), self.session_key)
 
+    # The key that signs sessions, for `bearer`: a plain value, so an app can keep it in a
+    # handler (a `Provider` holds a callback, which handlers may not share).
+    def signing_key(self) -> bytes:
+        return self.session_key
+
     def middleware(self, req: http.Request, next: http.Handler) -> Result[http.Response]:
         req.set_local(LOGIN_KEY, self.login_path)
-        match req.cookie(self.session_cookie):
+        match session_token(req, self.session_cookie):
             case Some(value):
                 match unsign(value, self.session_key):
                     case Some(text):
@@ -1251,6 +1256,24 @@ def user_of(claims: json.Value, provider: str) -> User:
         claims["hd"].as_str().unwrap_or(""),
         provider,
     )
+
+pub def bearer(key: bytes, user: User, expires_in: int) -> str:
+    """A signed sign-in for `Authorization: Bearer <token>`, made with `Provider.signing_key()`
+    and lasting `expires_in` seconds. For an app that hands the token to a browser on another
+    site instead of setting a cookie."""
+    issued = now()
+    return sign(json.encode(Session(user, issued, issued + expires_in)), key)
+
+# The signed session a request carries: from `Authorization: Bearer <token>` when it has one,
+# otherwise from the session cookie.
+def session_token(req: http.Request, cookie: str) -> str?:
+    match req.header("Authorization"):
+        case Some(value):
+            if value.starts_with("Bearer "):
+                return value[7:]
+        case None:
+            pass
+    return req.cookie(cookie)
 
 def safe_next(target: str) -> str:
     """`target` if it is a path on this site, else `/`: the login route never sends a user to
