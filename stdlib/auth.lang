@@ -902,6 +902,8 @@ impl Provider:
         ]
         if self.name == "google":
             params.append(("include_granted_scopes", "true"))
+            # Always show Google's account chooser, so a signed-in browser is asked which account to use.
+            params.append(("prompt", "select_account"))
         if self.name == "google" and len(self.allowed_domains) == 1:
             params.append(("hd", self.allowed_domains[0]))
         joiner = "&" if "?" in self.endpoints.authorize else "?"
@@ -1026,7 +1028,9 @@ impl Provider:
             case None:
                 pass
         response = http.redirect(flow.next)
-        response.set_cookie(self.session_cookie, self.session_value(user), max_age=self.session_seconds, secure=self.secure)
+        # `SameSite=None` lets the browser send the session to an editor on another site, which
+        # needs `Secure` (HTTPS); without HTTPS the cookie stays `Lax`.
+        response.set_cookie(self.session_cookie, self.session_value(user), max_age=self.session_seconds, secure=self.secure, same_site="None" if self.secure else "Lax")
         return response
 
     def github_user(self, token: str) -> Result[User, str]:
